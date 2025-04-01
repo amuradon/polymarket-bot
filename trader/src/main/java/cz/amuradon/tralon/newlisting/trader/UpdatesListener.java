@@ -1,9 +1,9 @@
 package cz.amuradon.tralon.newlisting.trader;
 
-import static cz.amuradon.tralon.newlisting.trader.MexcWsClient.SPOT_ACCOUNT_UPDATES_CHANNEL;
-import static cz.amuradon.tralon.newlisting.trader.MexcWsClient.SPOT_DEPTH_UPDATES_CHANNEL_PREFIX;
-import static cz.amuradon.tralon.newlisting.trader.MexcWsClient.SPOT_ORDER_UPDATES_CHANNEL;
-import static cz.amuradon.tralon.newlisting.trader.MexcWsClient.SPOT_TRADE_UPDATES_CHANNEL_PREFIX;
+import static cz.amuradon.tralon.connector.mexc.MexcWsClient.SPOT_ACCOUNT_UPDATES_CHANNEL;
+import static cz.amuradon.tralon.connector.mexc.MexcWsClient.SPOT_DEPTH_UPDATES_CHANNEL_PREFIX;
+import static cz.amuradon.tralon.connector.mexc.MexcWsClient.SPOT_ORDER_UPDATES_CHANNEL;
+import static cz.amuradon.tralon.connector.mexc.MexcWsClient.SPOT_TRADE_UPDATES_CHANNEL_PREFIX;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -21,7 +21,11 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import cz.amuradon.tralon.newlisting.json.Side;
+import cz.amuradon.tralon.connector.mexc.MexcWebsocketListener;
+import cz.amuradon.tralon.connector.mexc.OrderUpdate;
+import cz.amuradon.tralon.connector.mexc.OrderUpdateData;
+import cz.amuradon.tralon.connector.mexc.Side;
+import cz.amuradon.tralon.connector.mexc.Status;
 import cz.amuradon.tralon.newlisting.json.TradeDetail;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,7 +34,7 @@ import jakarta.inject.Named;
 
 
 @ApplicationScoped
-public class UpdatesListener {
+public class UpdatesListener implements MexcWebsocketListener {
 	
 	private final int trailingStopBelow;
 

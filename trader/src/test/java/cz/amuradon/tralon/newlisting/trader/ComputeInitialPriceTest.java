@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 
 import com.google.common.collect.Lists;
 
+import cz.amuradon.tralon.connector.mexc.OrderBook;
+
 public class ComputeInitialPriceTest {
 
 	@Test

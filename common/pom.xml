@@ -12,6 +12,11 @@
 	<artifactId>newlistingbot-common</artifactId>
 
 	<dependencies>
+		<dependency>
+			<groupId>cz.amuradon.tralon.exchange-connector</groupId>
+			<artifactId>exchange-connector</artifactId>
+		</dependency>
+	
 		<!-- Quarkus-->
 		<dependency>
 			<groupId>io.quarkus</groupId>

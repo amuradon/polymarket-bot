@@ -6,6 +6,7 @@ import java.util.List;
 
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import cz.amuradon.tralon.connector.mexc.OrderBook;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

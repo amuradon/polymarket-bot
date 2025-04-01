@@ -23,6 +23,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import cz.amuradon.tralon.connector.mexc.MexcClient;
+import cz.amuradon.tralon.connector.mexc.MexcWsClient;
+import cz.amuradon.tralon.connector.mexc.OrderResponse;
 import cz.amuradon.tralon.newlisting.trader.RequestBuilder.NewOrderRequestBuilder;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;

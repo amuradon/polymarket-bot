@@ -18,6 +18,10 @@
 			<artifactId>newlistingbot-common</artifactId>
 			<version>${project.version}</version>
 		</dependency>
+		<dependency>
+			<groupId>cz.amuradon.tralon.exchange-connector</groupId>
+			<artifactId>exchange-connector</artifactId>
+		</dependency>
 
 		<!-- Quarkus-->
 		<dependency>

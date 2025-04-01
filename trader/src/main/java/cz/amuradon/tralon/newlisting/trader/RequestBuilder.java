@@ -16,7 +16,9 @@ import javax.crypto.spec.SecretKeySpec;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
 
-import cz.amuradon.tralon.newlisting.json.Side;
+import cz.amuradon.tralon.connector.mexc.MexcClient;
+import cz.amuradon.tralon.connector.mexc.OrderResponse;
+import cz.amuradon.tralon.connector.mexc.Side;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 

@@ -26,8 +26,13 @@ import org.eclipse.microprofile.rest.client.inject.RestClient;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import cz.amuradon.tralon.connector.mexc.ListenKey;
+import cz.amuradon.tralon.connector.mexc.MexcClient;
+import cz.amuradon.tralon.connector.mexc.MexcWsClient;
+import cz.amuradon.tralon.connector.mexc.OrderBook;
+import cz.amuradon.tralon.connector.mexc.OrderResponse;
+import cz.amuradon.tralon.connector.mexc.Side;
 import cz.amuradon.tralon.newlisting.json.ExchangeInfo;
-import cz.amuradon.tralon.newlisting.json.Side;
 import cz.amuradon.tralon.newlisting.json.SymbolInfo;
 import cz.amuradon.tralon.newlisting.trader.RequestBuilder.NewOrderRequestBuilder;
 import io.quarkus.logging.Log;
@@ -168,7 +173,7 @@ public class TraderAgent {
 		queryParams.put("timestamp", String.valueOf(timestamp));
 		
 		ListenKey listenKey = mexcClient.userDataStream(requestBuilder.signQueryParams(queryParams));
-		mexcWsClient.connect(listenKey.listenKey());
+		mexcWsClient.connect(listenKey.listenKey(), symbol);
 		
 		// get order book
 		String exchangeInfoJson = mexcClient.exchangeInfo();
