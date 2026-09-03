@@ -1,8 +1,0 @@
-data/
-test-data/
-target/
-.classpath
-.project
-.settings/
-.theia/
-application.log*
