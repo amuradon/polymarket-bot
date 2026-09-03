@@ -1,0 +1,65 @@
+package cz.polymarket.bot.web;
+
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+
+@QuarkusTest
+class BtcUsdResourceTest {
+
+    @Test
+    void shouldRenderBtcUsdWebConsole() {
+        given()
+                .when().get("/btc-usd")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.HTML)
+                .body(containsString("BTC-USD TWAP Console"))
+                .body(containsString("id=\"timeframe-select\""))
+                .body(containsString("id=\"chart-container\""))
+                .body(containsString("id=\"chart-legend\""))
+                .body(containsString("lightweight-charts"));
+    }
+
+    @Test
+    void shouldReturnCurrentCandleDataJsonForFiveMinutes() {
+        given()
+                .queryParam("timeframe", "5m")
+                .when().get("/api/twap")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("timeframe", equalTo("5m"))
+                .body("candleStart", notNullValue())
+                .body("candleEnd", notNullValue())
+                .body("openPrice", notNullValue())
+                .body("points", notNullValue());
+    }
+
+    @Test
+    void shouldReturnCurrentCandleDataJsonForFifteenMinutes() {
+        given()
+                .queryParam("timeframe", "15m")
+                .when().get("/api/twap")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("timeframe", equalTo("15m"))
+                .body("candleStart", notNullValue())
+                .body("candleEnd", notNullValue())
+                .body("openPrice", notNullValue());
+    }
+
+    @Test
+    void shouldReturn400ForInvalidTimeframe() {
+        given()
+                .queryParam("timeframe", "1h")
+                .when().get("/api/twap")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("Unsupported timeframe"));
+    }
+}

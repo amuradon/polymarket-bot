@@ -1,0 +1,47 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "quarkus:dev",
+            "type": "shell",
+            "command": "./mvnw quarkus:dev",
+            "windows": {
+                "command": "mvn quarkus:dev"
+            },
+            "isBackground": true,
+            "problemMatcher": [
+                {
+                    "pattern": [
+                        {
+                            "regexp": "\\b\\B",
+                            "file": 1,
+                            "location": 2,
+                            "message": 3
+                        }
+                    ],
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^.*Quarkus .* starting.*",
+                        "endsPattern": "^.*Quarkus .* started in.*"
+                    }
+                }
+            ],
+            "group": "build"
+        },
+        {
+            "label": "maven:compile",
+            "type": "shell",
+            "command": "mvn clean compile",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "maven:test",
+            "type": "shell",
+            "command": "mvn test",
+            "group": "test"
+        }
+    ]
+}
