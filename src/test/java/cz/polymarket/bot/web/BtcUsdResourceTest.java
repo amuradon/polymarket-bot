@@ -21,7 +21,22 @@ class BtcUsdResourceTest {
                 .body(containsString("id=\"timeframe-select\""))
                 .body(containsString("id=\"chart-container\""))
                 .body(containsString("id=\"chart-legend\""))
-                .body(containsString("lightweight-charts"));
+                .body(containsString("lightweight-charts"))
+                .body(containsString("/css/btc-usd.css"))
+                .body(containsString("/js/btc-usd.js"));
+    }
+
+    @Test
+    void shouldServeStaticCssAndJs() {
+        given()
+                .when().get("/css/btc-usd.css")
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get("/js/btc-usd.js")
+                .then()
+                .statusCode(200);
     }
 
     @Test

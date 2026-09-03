@@ -1,0 +1,210 @@
+:root {
+    --bg-primary: #12141c;
+    --bg-secondary: #1a1d28;
+    --bg-card: #202433;
+    --border-color: #2b3145;
+    --text-primary: #f0f3fa;
+    --text-secondary: #848e9c;
+    --accent-blue: #2962ff;
+    --accent-green: #0ecb81;
+    --accent-red: #f6465d;
+    --accent-orange: #f59e0b;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+header {
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding: 14px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.header-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.header-title h1 {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+
+.badge-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(14, 203, 129, 0.15);
+    color: var(--accent-green);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.badge-live::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    background-color: var(--accent-green);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--accent-green);
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.timeframe-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-card);
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.timeframe-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+select#timeframe-select {
+    background: transparent;
+    color: var(--text-primary);
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+    padding: 2px 4px;
+}
+
+select#timeframe-select option {
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+
+main {
+    flex: 1;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.stats-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stat-title {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.chart-wrapper {
+    position: relative;
+    flex: 1;
+    min-height: 520px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+#chart-container {
+    width: 100%;
+    height: 100%;
+    min-height: 520px;
+}
+
+#chart-legend {
+    position: absolute;
+    top: 14px;
+    left: 16px;
+    z-index: 10;
+    background: rgba(26, 29, 40, 0.85);
+    backdrop-filter: blur(6px);
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    pointer-events: none;
+    font-size: 13px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+}
+
+.legend-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.legend-name {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.legend-val {
+    font-size: 14px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.text-blue { color: var(--accent-blue); }
+.text-orange { color: var(--accent-orange); }
+.text-green { color: var(--accent-green); }
+.text-red { color: var(--accent-red); }
+
+footer {
+    padding: 12px 24px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
