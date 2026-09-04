@@ -199,6 +199,41 @@ main {
     align-items: center;
 }
 
+.target-badge {
+    position: absolute;
+    right: 10px;
+    z-index: 15;
+    background: #64748b;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 3px 9px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+    pointer-events: none;
+    user-select: none;
+    transition: opacity 0.15s ease;
+}
+
+.target-badge.pos-top {
+    top: 12px;
+    bottom: auto;
+}
+
+.target-badge.pos-bottom {
+    bottom: 34px;
+    top: auto;
+}
+
+.target-badge .target-arrow {
+    font-size: 10px;
+    line-height: 1;
+}
+
 .legend-item {
     display: flex;
     flex-direction: column;

@@ -22,8 +22,8 @@
             <div class="timeframe-wrapper">
                 <span class="timeframe-label">Candle Timeframe:</span>
                 <select id="timeframe-select" name="timeframe">
-                    <option value="5m" {#if selectedTimeframe == "5m"}selected{/if}>5m (Default)</option>
-                    <option value="15m" {#if selectedTimeframe == "15m"}selected{/if}>15m</option>
+                    <option value="5m" data-y-range="{yRange5m}" {#if selectedTimeframe == "5m"}selected{/if}>5m (Default)</option>
+                    <option value="15m" data-y-range="{yRange15m}" {#if selectedTimeframe == "15m"}selected{/if}>15m</option>
                 </select>
             </div>
         </div>
@@ -71,6 +71,10 @@
                     <span class="legend-name">Diff (TWAP - Open)</span>
                     <span class="legend-val" id="legend-diff">-</span>
                 </div>
+            </div>
+            <div id="target-badge" class="target-badge" style="display: none;">
+                <span class="target-text">Target</span>
+                <span class="target-arrow" id="target-arrow">▼</span>
             </div>
             <div id="chart-container"></div>
         </div>

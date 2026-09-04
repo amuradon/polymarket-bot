@@ -1,5 +1,6 @@
 package cz.polymarket.bot.web;
 
+import cz.polymarket.bot.config.ChartRangeConfig;
 import cz.polymarket.bot.domain.CandleTwapState;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.service.TwapEngine;
@@ -24,20 +25,26 @@ public class BtcUsdResource {
 
     private final TwapEngine twapEngine;
     private final Template btcUsdTemplate;
+    private final ChartRangeConfig chartRangeConfig;
 
     @Inject
     public BtcUsdResource(
             TwapEngine twapEngine,
-            @Location("btc-usd.html") Template btcUsdTemplate) {
+            @Location("btc-usd.html") Template btcUsdTemplate,
+            ChartRangeConfig chartRangeConfig) {
         this.twapEngine = twapEngine;
         this.btcUsdTemplate = btcUsdTemplate;
+        this.chartRangeConfig = chartRangeConfig;
     }
 
     @GET
     @Path("/btc-usd")
     @Produces(MediaType.TEXT_HTML)
     public TemplateInstance getConsolePage(@QueryParam("timeframe") @DefaultValue("5m") String timeframe) {
-        return btcUsdTemplate.data("selectedTimeframe", timeframe);
+        return btcUsdTemplate
+                .data("selectedTimeframe", timeframe)
+                .data("yRange5m", chartRangeConfig.getYRange("btc-usd", Timeframe.FIVE_MINUTES))
+                .data("yRange15m", chartRangeConfig.getYRange("btc-usd", Timeframe.FIFTEEN_MINUTES));
     }
 
     @GET

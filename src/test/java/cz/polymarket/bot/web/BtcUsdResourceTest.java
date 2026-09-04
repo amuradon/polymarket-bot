@@ -19,8 +19,11 @@ class BtcUsdResourceTest {
                 .contentType(ContentType.HTML)
                 .body(containsString("BTC-USD TWAP Console"))
                 .body(containsString("id=\"timeframe-select\""))
+                .body(containsString("data-y-range=\"30\""))
+                .body(containsString("data-y-range=\"50\""))
                 .body(containsString("id=\"chart-container\""))
                 .body(containsString("id=\"chart-legend\""))
+                .body(containsString("id=\"target-badge\""))
                 .body(containsString("lightweight-charts"))
                 .body(containsString("/css/btc-usd.css"))
                 .body(containsString("/js/btc-usd.js"));
