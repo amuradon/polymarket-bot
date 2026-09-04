@@ -144,23 +144,42 @@ $(document).ready(function() {
 
     // Function to update off-screen Target indicator badge on Y-axis
     function updateTargetBadge() {
-        if (!currentOpenPrice || currentOpenPrice <= 0 || !twapSeries || currentYMin === null || currentYMax === null) {
-            $('#target-badge').hide();
-            return;
-        }
+        requestAnimationFrame(function() {
+            if (!currentOpenPrice || currentOpenPrice <= 0 || !twapSeries || !chart) {
+                $('#target-badge').hide();
+                return;
+            }
 
-        if (currentOpenPrice > currentYMax) {
-            // Target (open price) is above current visible range
-            $('#target-badge').removeClass('pos-bottom').addClass('pos-top').show();
-            $('#target-arrow').text('▲');
-        } else if (currentOpenPrice < currentYMin) {
-            // Target (open price) is below current visible range
-            $('#target-badge').removeClass('pos-top').addClass('pos-bottom').show();
-            $('#target-arrow').text('▼');
-        } else {
-            // Target is within visible view
-            $('#target-badge').hide();
-        }
+            const paneH = (chart.paneSize && chart.paneSize(0)) ? chart.paneSize(0).height : (chartContainer.clientHeight - 28);
+            const coord = twapSeries.priceToCoordinate(currentOpenPrice);
+
+            if (coord === null || isNaN(coord)) {
+                // Fallback if coordinate conversion is unavailable
+                if (currentYMax !== null && currentOpenPrice > currentYMax) {
+                    $('#target-badge').removeClass('pos-bottom').addClass('pos-top').css('display', 'flex');
+                    $('#target-arrow').text('▲');
+                } else if (currentYMin !== null && currentOpenPrice < currentYMin) {
+                    $('#target-badge').removeClass('pos-top').addClass('pos-bottom').css('display', 'flex');
+                    $('#target-arrow').text('▼');
+                } else {
+                    $('#target-badge').hide();
+                }
+                return;
+            }
+
+            if (coord < 0) {
+                // Target (open price) is above current visible range
+                $('#target-badge').removeClass('pos-bottom').addClass('pos-top').css('display', 'flex');
+                $('#target-arrow').text('▲');
+            } else if (coord > paneH) {
+                // Target (open price) is below current visible range
+                $('#target-badge').removeClass('pos-top').addClass('pos-bottom').css('display', 'flex');
+                $('#target-arrow').text('▼');
+            } else {
+                // Target is within visible view
+                $('#target-badge').hide();
+            }
+        });
     }
 
     // Subscribe to visible logical range changes on X-axis:
@@ -176,25 +195,32 @@ $(document).ready(function() {
         } else if (loadedPointsCount > 0 && range.to >= loadedPointsCount - 2) {
             userPannedHorizontally = false;
         }
+        updateTargetBadge();
     });
 
-    // Detect user stretching / dragging Y-axis to retain user's chosen span R
-    $(chartContainer).on('mouseup touchend', function() {
-        setTimeout(function() {
-            const containerHeight = chartContainer.clientHeight;
-            const bottomThreshold = containerHeight - 32;
-            const topP = twapSeries.coordinateToPrice(0);
-            const botP = twapSeries.coordinateToPrice(bottomThreshold);
-            if (topP !== null && botP !== null && topP > botP) {
-                const userSpan = topP - botP;
-                if (userSpan > 1 && Math.abs(userSpan - currentYRange) > 0.5) {
-                    currentYRange = userSpan;
-                    currentYMin = botP;
-                    currentYMax = topP;
-                }
+    // Detect user stretching / dragging Y-axis to retain user's chosen span and position
+    function captureUserYBounds() {
+        if (!twapSeries || !chart) return;
+        const paneH = (chart.paneSize && chart.paneSize(0)) ? chart.paneSize(0).height : (chartContainer.clientHeight - 28);
+        const topP = twapSeries.coordinateToPrice(0);
+        const botP = twapSeries.coordinateToPrice(paneH);
+        if (topP !== null && botP !== null && topP > botP) {
+            const userSpan = topP - botP;
+            if (userSpan > 1) {
+                currentYRange = userSpan;
+                currentYMin = botP;
+                currentYMax = topP;
             }
-            updateTargetBadge();
-        }, 50);
+        }
+        updateTargetBadge();
+    }
+
+    $(chartContainer).on('mouseup touchend', function() {
+        setTimeout(captureUserYBounds, 50);
+    });
+
+    $(chartContainer).on('wheel', function() {
+        setTimeout(captureUserYBounds, 50);
     });
 
     $(window).on('resize', function() {
@@ -284,8 +310,10 @@ $(document).ready(function() {
                 twapSeries.setData(chartPoints);
                 loadedPointsCount = chartPoints.length;
 
+                chartPoints.forEach(function(p) {
+                    checkSlidingYWindow(p.value);
+                });
                 latestPoint = chartPoints[chartPoints.length - 1];
-                checkSlidingYWindow(latestPoint.value);
                 updateTimeScaleWindow();
 
                 $('#stat-twap').text(priceFormatter(latestPoint.value));
