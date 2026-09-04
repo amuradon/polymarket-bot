@@ -1,14 +1,23 @@
 $(document).ready(function() {
     let activeTimeframe = $('#timeframe-select').val() || '5m';
-    let currentYRange = parseFloat($('#timeframe-select option:selected').data('y-range')) || 30;
+
+    // Range configurations
+    const getConfiguredYRange = () => parseFloat($('#timeframe-select option:selected').data('y-range')) || (activeTimeframe === '15m' ? 50 : 30);
+    const getConfiguredXRangeBars = () => (parseInt($('#timeframe-select option:selected').data('x-range-minutes'), 10) || 5) * 60;
+
+    let currentYRange = getConfiguredYRange();
+    let currentXWindowBars = getConfiguredXRangeBars();
+
     let chart = null;
     let twapSeries = null;
     let openPriceLine = null;
     let currentOpenPrice = 0;
+    let currentYMin = null;
+    let currentYMax = null;
     let latestPoint = null;
     let ws = null;
     let loadedPointsCount = 0;
-    let userScrolledHorizontally = false;
+    let userPannedHorizontally = false;
 
     // Formatter for currency
     const priceFormatter = (val) => {
@@ -47,7 +56,7 @@ $(document).ready(function() {
             borderColor: '#e2e8f0',
             timeVisible: true,
             secondsVisible: true,
-            minBarSpacing: 0.1,
+            minBarSpacing: 0.05,
             rightOffset: 0,
         },
         localization: {
@@ -55,19 +64,18 @@ $(document).ready(function() {
         }
     });
 
-    // Add TWAP series (v5 syntax) with fixed default Y-range centered on open price
+    // Add TWAP series (v5 syntax) with sliding window autoscaleInfoProvider
     twapSeries = chart.addSeries(LightweightCharts.LineSeries, {
         color: '#2563eb',
         lineWidth: 2,
         title: '',
         priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
         autoscaleInfoProvider: () => {
-            if (currentOpenPrice && currentOpenPrice > 0 && currentYRange > 0) {
-                const half = currentYRange / 2;
+            if (currentYMin !== null && currentYMax !== null && currentYMax > currentYMin) {
                 return {
                     priceRange: {
-                        minValue: currentOpenPrice - half,
-                        maxValue: currentOpenPrice + half,
+                        minValue: currentYMin,
+                        maxValue: currentYMax,
                     },
                     margins: {
                         above: 0,
@@ -79,84 +87,123 @@ $(document).ready(function() {
         }
     });
 
-    // Function to maintain a 300-second visible window on X-axis
+    // Function to maintain the latest price pinned to the RIGHT edge of the X-axis
+    // If fewer seconds elapsed than the window (e.g. 120s of 300s), the left space (180s) is empty whitespace
     function updateTimeScaleWindow() {
-        if (userScrolledHorizontally) return;
-        const windowBars = 300;
-        if (loadedPointsCount <= windowBars) {
-            chart.timeScale().setVisibleLogicalRange({ from: 0, to: windowBars - 1 });
-        } else {
-            chart.timeScale().setVisibleLogicalRange({
-                from: loadedPointsCount - windowBars,
-                to: loadedPointsCount - 1
-            });
+        if (userPannedHorizontally || loadedPointsCount === 0) return;
+        const to = loadedPointsCount - 1;
+        const from = to - (currentXWindowBars - 1);
+        chart.timeScale().setVisibleLogicalRange({ from: from, to: to });
+    }
+
+    // Check sliding Y-axis window (10% - 90% boundary check)
+    // If price exceeds top 10% or drops below bottom 10%, the window shifts (without stretching)
+    function checkSlidingYWindow(price) {
+        if (!price || price <= 0 || !currentYRange || currentYRange <= 0) return;
+
+        if (currentYMin === null || currentYMax === null) {
+            const half = currentYRange / 2;
+            currentYMin = price - half;
+            currentYMax = price + half;
+            return;
         }
+
+        const margin = 0.10 * currentYRange;
+        const upperThreshold = currentYMax - margin; // 10% from top
+        const lowerThreshold = currentYMin + margin; // 10% from bottom
+
+        let changed = false;
+        if (price > upperThreshold) {
+            currentYMax = price + margin;
+            currentYMin = currentYMax - currentYRange;
+            changed = true;
+        } else if (price < lowerThreshold) {
+            currentYMin = price - margin;
+            currentYMax = currentYMin + currentYRange;
+            changed = true;
+        }
+
+        if (changed) {
+            twapSeries.applyOptions({});
+        }
+    }
+
+    // Initialize or reset Y-axis bounds around open price
+    function resetYBounds(openPrice) {
+        currentOpenPrice = parseFloat(openPrice);
+        currentYRange = getConfiguredYRange();
+        if (currentOpenPrice && currentOpenPrice > 0) {
+            const half = currentYRange / 2;
+            currentYMin = currentOpenPrice - half;
+            currentYMax = currentOpenPrice + half;
+        }
+        chart.priceScale('right').applyOptions({ autoScale: true });
+        twapSeries.applyOptions({});
+        updateTargetBadge();
     }
 
     // Function to update off-screen Target indicator badge on Y-axis
     function updateTargetBadge() {
-        if (!currentOpenPrice || currentOpenPrice <= 0 || !twapSeries) {
+        if (!currentOpenPrice || currentOpenPrice <= 0 || !twapSeries || currentYMin === null || currentYMax === null) {
             $('#target-badge').hide();
             return;
         }
 
-        const containerHeight = chartContainer.clientHeight;
-        const bottomThreshold = containerHeight - 32;
-        const coord = twapSeries.priceToCoordinate(currentOpenPrice);
-
-        if (coord === null) {
-            const topPrice = twapSeries.coordinateToPrice(0);
-            const bottomPrice = twapSeries.coordinateToPrice(bottomThreshold);
-            if (topPrice !== null && bottomPrice !== null) {
-                if (currentOpenPrice > topPrice) {
-                    $('#target-badge').removeClass('pos-bottom').addClass('pos-top').show();
-                    $('#target-arrow').text('▲');
-                } else if (currentOpenPrice < bottomPrice) {
-                    $('#target-badge').removeClass('pos-top').addClass('pos-bottom').show();
-                    $('#target-arrow').text('▼');
-                } else {
-                    $('#target-badge').hide();
-                }
-            } else {
-                $('#target-badge').hide();
-            }
-            return;
-        }
-
-        if (coord < 0) {
+        if (currentOpenPrice > currentYMax) {
+            // Target (open price) is above current visible range
             $('#target-badge').removeClass('pos-bottom').addClass('pos-top').show();
             $('#target-arrow').text('▲');
-        } else if (coord > bottomThreshold) {
+        } else if (currentOpenPrice < currentYMin) {
+            // Target (open price) is below current visible range
             $('#target-badge').removeClass('pos-top').addClass('pos-bottom').show();
             $('#target-arrow').text('▼');
         } else {
+            // Target is within visible view
             $('#target-badge').hide();
         }
     }
 
-    // Subscribe to visible range changes to detect user panning and update Target badge
+    // Subscribe to visible logical range changes on X-axis:
+    // Preserves user zoom (stretch / shrink) and detects horizontal panning away from real-time
     chart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {
         if (!range) return;
-        if (loadedPointsCount > 0 && range.to < loadedPointsCount - 10) {
-            userScrolledHorizontally = true;
-        } else if (loadedPointsCount > 0 && range.to >= loadedPointsCount - 2) {
-            userScrolledHorizontally = false;
+        const visibleBars = Math.round(range.to - range.from + 1);
+        if (visibleBars >= 10) {
+            currentXWindowBars = visibleBars;
         }
-        updateTargetBadge();
+        if (loadedPointsCount > 0 && range.to < loadedPointsCount - 5) {
+            userPannedHorizontally = true;
+        } else if (loadedPointsCount > 0 && range.to >= loadedPointsCount - 2) {
+            userPannedHorizontally = false;
+        }
     });
 
-    // When mouse interacts with price scale or chart container, update target badge
-    $(chartContainer).on('mouseup mouseleave touchend', function() {
-        setTimeout(updateTargetBadge, 50);
+    // Detect user stretching / dragging Y-axis to retain user's chosen span R
+    $(chartContainer).on('mouseup touchend', function() {
+        setTimeout(function() {
+            const containerHeight = chartContainer.clientHeight;
+            const bottomThreshold = containerHeight - 32;
+            const topP = twapSeries.coordinateToPrice(0);
+            const botP = twapSeries.coordinateToPrice(bottomThreshold);
+            if (topP !== null && botP !== null && topP > botP) {
+                const userSpan = topP - botP;
+                if (userSpan > 1 && Math.abs(userSpan - currentYRange) > 0.5) {
+                    currentYRange = userSpan;
+                    currentYMin = botP;
+                    currentYMax = topP;
+                }
+            }
+            updateTargetBadge();
+        }, 50);
     });
+
     $(window).on('resize', function() {
         setTimeout(updateTargetBadge, 100);
     });
 
-    // Clicking target badge resets autoScale to default range
+    // Clicking target badge resets Y-scale back to open price centering with default range
     $('#target-badge').on('click', function() {
-        chart.priceScale('right').applyOptions({ autoScale: true });
-        updateTargetBadge();
+        resetYBounds(currentOpenPrice);
     });
 
     // Update top-left legend
@@ -211,9 +258,7 @@ $(document).ready(function() {
                 title: ''
             });
         }
-        chart.priceScale('right').applyOptions({ autoScale: true });
         $('#stat-open').text(priceFormatter(price));
-        updateTargetBadge();
     }
 
     // Fetch initial candle data from REST API
@@ -222,6 +267,7 @@ $(document).ready(function() {
             if (!data) return;
 
             setOpenPriceLine(data.openPrice);
+            resetYBounds(data.openPrice);
 
             const startTimeStr = new Date(data.candleStart * 1000).toISOString().substring(11, 19);
             const endTimeStr = new Date(data.candleEnd * 1000).toISOString().substring(11, 19);
@@ -237,9 +283,11 @@ $(document).ready(function() {
                 });
                 twapSeries.setData(chartPoints);
                 loadedPointsCount = chartPoints.length;
-                updateTimeScaleWindow();
 
                 latestPoint = chartPoints[chartPoints.length - 1];
+                checkSlidingYWindow(latestPoint.value);
+                updateTimeScaleWindow();
+
                 $('#stat-twap').text(priceFormatter(latestPoint.value));
                 $('#stat-median').text(priceFormatter(latestPoint.medianPrice));
                 updateLegend(latestPoint.time, latestPoint.value, latestPoint.medianPrice);
@@ -278,12 +326,15 @@ $(document).ready(function() {
                 }
 
                 if (msg.isNewCandle) {
-                    // New candle rollover: clear old candle data and reset scale
+                    // New candle rollover: reset points, reset user zoom to defaults
                     loadedPointsCount = 0;
-                    userScrolledHorizontally = false;
+                    userPannedHorizontally = false;
+                    currentXWindowBars = getConfiguredXRangeBars();
+
                     twapSeries.setData([]);
                     setOpenPriceLine(msg.openPrice);
-                    chart.priceScale('right').applyOptions({ autoScale: true });
+                    resetYBounds(msg.openPrice);
+
                     const startTimeStr = new Date(msg.candleStart * 1000).toISOString().substring(11, 19);
                     const endTimeStr = new Date(msg.candleEnd * 1000).toISOString().substring(11, 19);
                     $('#stat-interval').text(startTimeStr + ' - ' + endTimeStr + ' UTC (' + msg.timeframe + ')');
@@ -298,6 +349,9 @@ $(document).ready(function() {
                     twapSeries.update(newPoint);
                     latestPoint = newPoint;
                     loadedPointsCount++;
+
+                    // Check sliding Y-axis window (10% - 90%)
+                    checkSlidingYWindow(newPoint.value);
 
                     $('#stat-twap').text(priceFormatter(newPoint.value));
                     $('#stat-median').text(priceFormatter(newPoint.medianPrice));
@@ -328,9 +382,8 @@ $(document).ready(function() {
     // Handle timeframe dropdown switch
     $('#timeframe-select').on('change', function() {
         activeTimeframe = $(this).val();
-        currentYRange = parseFloat($('#timeframe-select option:selected').data('y-range')) || (activeTimeframe === '15m' ? 50 : 30);
-        userScrolledHorizontally = false;
-        chart.priceScale('right').applyOptions({ autoScale: true });
+        userPannedHorizontally = false;
+        currentXWindowBars = getConfiguredXRangeBars();
         loadCandleData(activeTimeframe);
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ action: 'setTimeframe', timeframe: activeTimeframe }));

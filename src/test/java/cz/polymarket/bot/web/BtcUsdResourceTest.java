@@ -21,6 +21,7 @@ class BtcUsdResourceTest {
                 .body(containsString("id=\"timeframe-select\""))
                 .body(containsString("data-y-range=\"30\""))
                 .body(containsString("data-y-range=\"50\""))
+                .body(containsString("data-x-range-minutes=\"5\""))
                 .body(containsString("id=\"chart-container\""))
                 .body(containsString("id=\"chart-legend\""))
                 .body(containsString("id=\"target-badge\""))

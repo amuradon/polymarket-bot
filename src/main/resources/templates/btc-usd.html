@@ -22,8 +22,8 @@
             <div class="timeframe-wrapper">
                 <span class="timeframe-label">Candle Timeframe:</span>
                 <select id="timeframe-select" name="timeframe">
-                    <option value="5m" data-y-range="{yRange5m}" {#if selectedTimeframe == "5m"}selected{/if}>5m (Default)</option>
-                    <option value="15m" data-y-range="{yRange15m}" {#if selectedTimeframe == "15m"}selected{/if}>15m</option>
+                    <option value="5m" data-y-range="{yRange5m}" data-x-range-minutes="{xRangeMinutes5m}" {#if selectedTimeframe == "5m"}selected{/if}>5m (Default)</option>
+                    <option value="15m" data-y-range="{yRange15m}" data-x-range-minutes="{xRangeMinutes15m}" {#if selectedTimeframe == "15m"}selected{/if}>15m</option>
                 </select>
             </div>
         </div>

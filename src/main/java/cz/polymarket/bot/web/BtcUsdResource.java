@@ -44,7 +44,9 @@ public class BtcUsdResource {
         return btcUsdTemplate
                 .data("selectedTimeframe", timeframe)
                 .data("yRange5m", chartRangeConfig.getYRange("btc-usd", Timeframe.FIVE_MINUTES))
-                .data("yRange15m", chartRangeConfig.getYRange("btc-usd", Timeframe.FIFTEEN_MINUTES));
+                .data("yRange15m", chartRangeConfig.getYRange("btc-usd", Timeframe.FIFTEEN_MINUTES))
+                .data("xRangeMinutes5m", chartRangeConfig.getXRangeMinutes("btc-usd", Timeframe.FIVE_MINUTES))
+                .data("xRangeMinutes15m", chartRangeConfig.getXRangeMinutes("btc-usd", Timeframe.FIFTEEN_MINUTES));
     }
 
     @GET
