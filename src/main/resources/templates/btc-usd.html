@@ -31,11 +31,11 @@
     <main>
         <div class="stats-bar">
             <div class="stat-card">
-                <span class="stat-title">Current TWAP</span>
+                <span class="stat-title">Current TWAP (60s)</span>
                 <span class="stat-value text-blue" id="stat-twap">-</span>
             </div>
             <div class="stat-card">
-                <span class="stat-title">Candle Open Price</span>
+                <span class="stat-title">Open Price (TWAP 60s @ Start)</span>
                 <span class="stat-value text-orange" id="stat-open">-</span>
             </div>
             <div class="stat-card">
@@ -55,7 +55,7 @@
                     <span class="legend-val" id="legend-time">-</span>
                 </div>
                 <div class="legend-item">
-                    <span class="legend-name">TWAP</span>
+                    <span class="legend-name">TWAP 60s</span>
                     <span class="legend-val text-blue" id="legend-twap">-</span>
                 </div>
                 <div class="legend-item">
@@ -76,7 +76,7 @@
     </main>
 
     <footer>
-        Aggregated BTC TWAP (Binance, Coinbase, Kraken 1s snapshot median) &bull; Java 25 &bull; Quarkus
+        Aggregated BTC 60s Rolling TWAP (Binance, Coinbase, Kraken 1s snapshot median) &bull; Java 25 &bull; Quarkus
     </footer>
 
     <!-- External JS -->

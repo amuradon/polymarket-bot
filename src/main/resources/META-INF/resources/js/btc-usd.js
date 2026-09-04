@@ -19,28 +19,28 @@ $(document).ready(function() {
         return d.toISOString().substring(11, 19) + ' UTC';
     };
 
-    // Initialize TradingView Lightweight Chart (v5 API)
+    // Initialize TradingView Lightweight Chart (v5 API) - Light Theme
     const chartContainer = document.getElementById('chart-container');
     chart = LightweightCharts.createChart(chartContainer, {
         autoSize: true,
         layout: {
-            background: { type: 'solid', color: '#1a1d28' },
-            textColor: '#848e9c',
+            background: { type: 'solid', color: '#ffffff' },
+            textColor: '#475569',
             fontSize: 12
         },
         grid: {
-            vertLines: { color: 'rgba(43, 49, 69, 0.4)' },
-            horzLines: { color: 'rgba(43, 49, 69, 0.4)' }
+            vertLines: { color: '#f1f5f9' },
+            horzLines: { color: '#f1f5f9' }
         },
         crosshair: {
             mode: LightweightCharts.CrosshairMode.Normal,
         },
         rightPriceScale: {
-            borderColor: '#2b3145',
+            borderColor: '#e2e8f0',
             scaleMargins: { top: 0.1, bottom: 0.1 },
         },
         timeScale: {
-            borderColor: '#2b3145',
+            borderColor: '#e2e8f0',
             timeVisible: true,
             secondsVisible: true,
         },
@@ -51,9 +51,9 @@ $(document).ready(function() {
 
     // Add TWAP series (v5 syntax)
     twapSeries = chart.addSeries(LightweightCharts.LineSeries, {
-        color: '#2962ff',
+        color: '#2563eb',
         lineWidth: 2,
-        title: 'TWAP',
+        title: 'TWAP 60s',
         priceFormat: { type: 'price', precision: 2, minMove: 0.01 }
     });
 
@@ -64,9 +64,11 @@ $(document).ready(function() {
         $('#legend-open').text(priceFormatter(currentOpenPrice));
         $('#legend-median').text(priceFormatter(medianVal));
 
-        if (twapVal !== null && currentOpenPrice > 0) {
-            const diff = twapVal - currentOpenPrice;
-            const pct = (diff / currentOpenPrice) * 100;
+        const numTwap = parseFloat(twapVal);
+        const numOpen = parseFloat(currentOpenPrice);
+        if (!isNaN(numTwap) && !isNaN(numOpen) && numOpen > 0) {
+            const diff = numTwap - numOpen;
+            const pct = (diff / numOpen) * 100;
             const sign = diff >= 0 ? '+' : '';
             const colorClass = diff >= 0 ? 'text-green' : 'text-red';
             $('#legend-diff').attr('class', 'legend-val ' + colorClass)
@@ -80,7 +82,7 @@ $(document).ready(function() {
     chart.subscribeCrosshairMove(function(param) {
         if (!param || param.time === undefined || !param.seriesData) {
             if (latestPoint) {
-                updateLegend(latestPoint.time, latestPoint.twap, latestPoint.medianPrice);
+                updateLegend(latestPoint.time, latestPoint.value, latestPoint.medianPrice);
             }
             return;
         }
@@ -100,11 +102,11 @@ $(document).ready(function() {
         if (price && price > 0) {
             openPriceLine = twapSeries.createPriceLine({
                 price: parseFloat(price),
-                color: '#f59e0b',
+                color: '#d97706',
                 lineWidth: 2,
                 lineStyle: LightweightCharts.LineStyle.Dashed,
                 axisLabelVisible: true,
-                title: 'OPEN'
+                title: 'OPEN (60s)'
             });
         }
         $('#stat-open').text(priceFormatter(price));

@@ -38,14 +38,15 @@ class HistoricalDataReconstructorTest {
         long nowSec = now.getEpochSecond();
 
         for (long t = startSec; t <= nowSec; t++) {
-            cache.put(t, new BigDecimal("78000.00"));
+            cache.put(t, new BigDecimal("78823.52"));
         }
 
         CandleTwapState state = reconstructor.reconstructCandle(Timeframe.FIVE_MINUTES, now);
 
         assertThat(state.candleStart()).isEqualTo(startSec);
-        assertThat(state.openPrice()).isEqualByComparingTo("78000.00");
+        assertThat(state.openPrice()).isEqualByComparingTo("78823.52");
         assertThat(state.points()).hasSize(121);
+        assertThat(state.points().get(0).twap()).isEqualByComparingTo("78823.52");
         verify(binanceClient, never()).fetch1sKlines(anyLong(), anyLong());
     }
 
@@ -55,20 +56,23 @@ class HistoricalDataReconstructorTest {
         long startSec = Instant.parse("2026-09-03T14:00:00Z").getEpochSecond();
         long nowSec = now.getEpochSecond();
 
+        // 60 seconds before startSec up to nowSec
+        long fetchStart = startSec - 59;
         Map<Long, BigDecimal> klines = new TreeMap<>();
-        for (long t = startSec; t <= nowSec; t++) {
+        for (long t = fetchStart; t <= nowSec; t++) {
             klines.put(t, new BigDecimal("78050.00"));
         }
-        when(binanceClient.fetch1sKlines(startSec, nowSec)).thenReturn(klines);
+        when(binanceClient.fetch1sKlines(fetchStart, nowSec)).thenReturn(klines);
 
         CandleTwapState state = reconstructor.reconstructCandle(Timeframe.FIVE_MINUTES, now);
 
         assertThat(state.candleStart()).isEqualTo(startSec);
         assertThat(state.openPrice()).isEqualByComparingTo("78050.00");
         assertThat(state.points()).hasSize(121);
-        verify(binanceClient, times(1)).fetch1sKlines(startSec, nowSec);
+        verify(binanceClient, times(1)).fetch1sKlines(fetchStart, nowSec);
 
-        // Verify prices were backfilled into cache
+        // Verify 60s TWAPs were backfilled into cache
         assertThat(cache.hasFullRange(startSec, nowSec)).isTrue();
+        assertThat(cache.get(startSec)).isEqualByComparingTo("78050.00");
     }
 }

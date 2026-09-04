@@ -5,7 +5,6 @@ import cz.polymarket.bot.calculator.MedianCalculator;
 import cz.polymarket.bot.calculator.TwapCalculator;
 import cz.polymarket.bot.domain.CandleTwapState;
 import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TwapPoint;
 import cz.polymarket.bot.exchange.BinanceHistoricalClient;
 import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
 import io.cucumber.java.en.And;
@@ -31,8 +30,8 @@ public class TwapSteps {
     private BigDecimal krakenPrice;
     private BigDecimal calculatedMedian;
 
-    private BigDecimal openPrice;
-    private final List<TwapPoint> twapPoints = new ArrayList<>();
+    private final List<BigDecimal> priceWindow = new ArrayList<>();
+    private BigDecimal calculatedRollingTwap;
 
     private HourlyPriceCache cache;
     private BinanceHistoricalClient binanceClient;
@@ -65,32 +64,29 @@ public class TwapSteps {
         assertThat(calculatedMedian).isEqualByComparingTo(expected);
     }
 
-    @Given("a candle starts with open price {bigdecimal}")
-    public void aCandleStartsWithOpenPrice(BigDecimal openPrice) {
-        this.openPrice = openPrice;
-        this.twapPoints.clear();
-        this.twapPoints.add(twapCalculator.createInitialPoint(1000L, openPrice));
+    @Given("60 one-second median prices with thirty at {bigdecimal} and thirty at {bigdecimal}")
+    public void sixtyOneSecondMedianPricesWithThirtyAtAndThirtyAt(BigDecimal p1, BigDecimal p2) {
+        priceWindow.clear();
+        for (int i = 0; i < 30; i++) {
+            priceWindow.add(p1);
+        }
+        for (int i = 0; i < 30; i++) {
+            priceWindow.add(p2);
+        }
     }
 
-    @When("1-second median prices are {bigdecimal}, {bigdecimal}, and {bigdecimal}")
-    public void oneSecondMedianPricesAre(BigDecimal p1, BigDecimal p2, BigDecimal p3) {
-        TwapPoint pt1 = twapCalculator.calculateNext(twapPoints.get(0), 1001L, p1, 1);
-        twapPoints.add(pt1);
-
-        TwapPoint pt2 = twapCalculator.calculateNext(pt1, 1002L, p2, 2);
-        twapPoints.add(pt2);
-
-        TwapPoint pt3 = twapCalculator.calculateNext(pt2, 1003L, p3, 3);
-        twapPoints.add(pt3);
+    @When("the 60-second rolling TWAP is calculated")
+    public void the60SecondRollingTwapIsCalculated() {
+        calculatedRollingTwap = twapCalculator.calculateRollingTwap(priceWindow);
     }
 
-    @Then("the TWAP at second {int} should be {bigdecimal}")
-    public void theTwapAtSecondShouldBe(int second, BigDecimal expected) {
-        assertThat(twapPoints.get(second).twap()).isEqualByComparingTo(expected);
+    @Then("the rolling TWAP should be {bigdecimal}")
+    public void theRollingTwapShouldBe(BigDecimal expected) {
+        assertThat(calculatedRollingTwap).isEqualByComparingTo(expected);
     }
 
-    @Given("1-second prices for the past 120 seconds are cached")
-    public void oneSecondPricesForThePast120SecondsAreCached() {
+    @Given("60s TWAP prices for the past 120 seconds are cached")
+    public void sixtySecTwapPricesForThePast120SecondsAreCached() {
         cache = new HourlyPriceCache(3600);
         binanceClient = mock(BinanceHistoricalClient.class);
         reconstructor = new HistoricalDataReconstructor(cache, binanceClient, twapCalculator);
@@ -100,7 +96,7 @@ public class TwapSteps {
         long end = now.getEpochSecond();
 
         for (long t = start; t <= end; t++) {
-            cache.put(t, new BigDecimal("78000.00"));
+            cache.put(t, new BigDecimal("78823.52"));
         }
     }
 

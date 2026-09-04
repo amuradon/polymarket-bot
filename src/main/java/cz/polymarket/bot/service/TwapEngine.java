@@ -109,17 +109,18 @@ public class TwapEngine {
 
     public synchronized void tick(Instant now) {
         Optional<PriceSnapshot> snapshotOpt = priceTracker.getSnapshot(now);
-        BigDecimal currentMedian = null;
-        if (snapshotOpt.isPresent()) {
-            currentMedian = snapshotOpt.get().medianPrice();
-            cache.put(now.getEpochSecond(), currentMedian);
-        } else {
-            currentMedian = cache.get(now.getEpochSecond());
-        }
+        long nowSec = now.getEpochSecond();
 
-        if (currentMedian == null) {
+        List<BigDecimal> windowPrices = priceTracker.getLast60SecondsMedians(nowSec);
+        if (windowPrices.isEmpty()) {
             return;
         }
+
+        BigDecimal rollingTwap = twapCalculator.calculateRollingTwap(windowPrices);
+        BigDecimal currentMedian = windowPrices.get(windowPrices.size() - 1);
+
+        // Store 60s TWAP directly in HourlyPriceCache
+        cache.put(nowSec, rollingTwap);
 
         if (!initialized) {
             initialize(now);
@@ -127,8 +128,6 @@ public class TwapEngine {
                 return;
             }
         }
-
-        long nowSec = now.getEpochSecond();
 
         for (Timeframe tf : Timeframe.values()) {
             CandleTwapState currentState = candleStates.get(tf);
@@ -146,8 +145,9 @@ public class TwapEngine {
                 Instant newStart = tf.getCandleStart(now);
                 Instant newEnd = tf.getCandleEnd(newStart);
 
-                BigDecimal openPrice = currentMedian;
-                TwapPoint p0 = twapCalculator.createInitialPoint(newStart.getEpochSecond(), openPrice);
+                // Open price for new candle is 60s TWAP at candle start
+                BigDecimal openPrice = rollingTwap;
+                TwapPoint p0 = twapCalculator.createPoint(newStart.getEpochSecond(), rollingTwap, currentMedian);
 
                 List<TwapPoint> newPoints = new ArrayList<>();
                 newPoints.add(p0);
@@ -166,7 +166,7 @@ public class TwapEngine {
             } else {
                 List<TwapPoint> points = currentState.points();
                 if (points.isEmpty()) {
-                    TwapPoint p0 = twapCalculator.createInitialPoint(currentState.candleStart(), currentState.openPrice());
+                    TwapPoint p0 = twapCalculator.createPoint(currentState.candleStart(), currentState.openPrice(), currentMedian);
                     points.add(p0);
                 }
 
@@ -175,7 +175,7 @@ public class TwapEngine {
                     continue;
                 }
 
-                TwapPoint nextPoint = twapCalculator.calculateNext(lastPoint, nowSec, currentMedian, points.size());
+                TwapPoint nextPoint = twapCalculator.createPoint(nowSec, rollingTwap, currentMedian);
                 points.add(nextPoint);
 
                 TwapUpdate update = new TwapUpdate(tf, currentState.candleStart(), currentState.candleEnd(), currentState.openPrice(), nextPoint, false);

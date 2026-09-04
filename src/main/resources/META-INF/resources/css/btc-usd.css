@@ -1,14 +1,14 @@
 :root {
-    --bg-primary: #12141c;
-    --bg-secondary: #1a1d28;
-    --bg-card: #202433;
-    --border-color: #2b3145;
-    --text-primary: #f0f3fa;
-    --text-secondary: #848e9c;
-    --accent-blue: #2962ff;
-    --accent-green: #0ecb81;
-    --accent-red: #f6465d;
-    --accent-orange: #f59e0b;
+    --bg-primary: #f8fafc;
+    --bg-secondary: #ffffff;
+    --bg-card: #f1f5f9;
+    --border-color: #e2e8f0;
+    --text-primary: #0f172a;
+    --text-secondary: #64748b;
+    --accent-blue: #2563eb;
+    --accent-green: #16a34a;
+    --accent-red: #dc2626;
+    --accent-orange: #d97706;
 }
 
 * {
@@ -33,6 +33,7 @@ header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .header-title {
@@ -45,18 +46,20 @@ header {
     font-size: 20px;
     font-weight: 700;
     letter-spacing: -0.5px;
+    color: var(--text-primary);
 }
 
 .badge-live {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: rgba(14, 203, 129, 0.15);
+    background: rgba(22, 163, 74, 0.1);
     color: var(--accent-green);
     padding: 4px 10px;
     border-radius: 20px;
     font-size: 12px;
     font-weight: 600;
+    border: 1px solid rgba(22, 163, 74, 0.2);
 }
 
 .badge-live::before {
@@ -65,7 +68,7 @@ header {
     height: 7px;
     background-color: var(--accent-green);
     border-radius: 50%;
-    box-shadow: 0 0 8px var(--accent-green);
+    box-shadow: 0 0 6px var(--accent-green);
 }
 
 .controls {
@@ -78,10 +81,11 @@ header {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--bg-card);
+    background: var(--bg-secondary);
     padding: 6px 12px;
     border-radius: 8px;
     border: 1px solid var(--border-color);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .timeframe-label {
@@ -102,7 +106,7 @@ select#timeframe-select {
 }
 
 select#timeframe-select option {
-    background: var(--bg-card);
+    background: #ffffff;
     color: var(--text-primary);
 }
 
@@ -128,6 +132,7 @@ main {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .stat-title {
@@ -135,6 +140,7 @@ main {
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    font-weight: 600;
 }
 
 .stat-value {
@@ -151,6 +157,7 @@ main {
     border: 1px solid var(--border-color);
     border-radius: 12px;
     overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 #chart-container {
@@ -164,11 +171,12 @@ main {
     top: 14px;
     left: 16px;
     z-index: 10;
-    background: rgba(26, 29, 40, 0.85);
-    backdrop-filter: blur(6px);
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(8px);
     padding: 10px 14px;
     border-radius: 8px;
     border: 1px solid var(--border-color);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
     pointer-events: none;
     font-size: 13px;
     display: flex;

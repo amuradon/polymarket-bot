@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,5 +49,30 @@ class ExchangePriceTrackerTest {
         assertThat(snapshot.get().krakenPrice()).isEqualByComparingTo("77990");
         assertThat(snapshot.get().medianPrice()).isEqualByComparingTo("78000");
         assertThat(snapshot.get().timestamp()).isEqualTo(now);
+    }
+
+    @Test
+    void shouldTrackRecentMediansAndReturnLast60Seconds() {
+        long t0 = 1000L;
+        for (long t = t0; t < t0 + 60; t++) {
+            tracker.recordMedian(t, BigDecimal.valueOf(t));
+        }
+
+        List<BigDecimal> window = tracker.getLast60SecondsMedians(t0 + 59);
+        assertThat(window).hasSize(60);
+        assertThat(window.get(0)).isEqualByComparingTo(String.valueOf(t0));
+        assertThat(window.get(59)).isEqualByComparingTo(String.valueOf(t0 + 59));
+    }
+
+    @Test
+    void shouldSeedMedianHistory() {
+        Map<Long, BigDecimal> seed = Map.of(
+                100L, new BigDecimal("78000"),
+                101L, new BigDecimal("78005")
+        );
+        tracker.seedMedianHistory(seed);
+
+        List<BigDecimal> window = tracker.getLast60SecondsMedians(101L);
+        assertThat(window).hasSize(2);
     }
 }

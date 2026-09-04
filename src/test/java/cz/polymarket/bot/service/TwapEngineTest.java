@@ -7,8 +7,11 @@ import cz.polymarket.bot.domain.PriceSnapshot;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TwapPoint;
 import cz.polymarket.bot.domain.TwapUpdate;
+import cz.polymarket.bot.exchange.BinanceWebSocketClient;
+import cz.polymarket.bot.exchange.CoinbaseWebSocketClient;
 import cz.polymarket.bot.exchange.ExchangePriceTracker;
 import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
+import cz.polymarket.bot.exchange.KrakenWebSocketClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,9 +38,9 @@ class TwapEngineTest {
         reconstructor = mock(HistoricalDataReconstructor.class);
         cache = new HourlyPriceCache(3600);
         twapCalculator = new TwapCalculator();
-        cz.polymarket.bot.exchange.BinanceWebSocketClient binanceClient = mock(cz.polymarket.bot.exchange.BinanceWebSocketClient.class);
-        cz.polymarket.bot.exchange.CoinbaseWebSocketClient coinbaseClient = mock(cz.polymarket.bot.exchange.CoinbaseWebSocketClient.class);
-        cz.polymarket.bot.exchange.KrakenWebSocketClient krakenClient = mock(cz.polymarket.bot.exchange.KrakenWebSocketClient.class);
+        BinanceWebSocketClient binanceClient = mock(BinanceWebSocketClient.class);
+        CoinbaseWebSocketClient coinbaseClient = mock(CoinbaseWebSocketClient.class);
+        KrakenWebSocketClient krakenClient = mock(KrakenWebSocketClient.class);
 
         engine = new TwapEngine(priceTracker, reconstructor, cache, twapCalculator, binanceClient, coinbaseClient, krakenClient, "5m");
     }
@@ -46,13 +49,13 @@ class TwapEngineTest {
     void shouldInitializeFromReconstructor() {
         Instant now = Instant.parse("2026-09-03T14:02:00Z");
         List<TwapPoint> points = new ArrayList<>();
-        points.add(new TwapPoint(1788444000L, new BigDecimal("78000.00"), new BigDecimal("78000.00")));
+        points.add(new TwapPoint(1788444000L, new BigDecimal("78823.52"), new BigDecimal("78820.00")));
 
         CandleTwapState mockState = new CandleTwapState(
                 Timeframe.FIVE_MINUTES,
                 1788444000L,
                 1788444300L,
-                new BigDecimal("78000.00"),
+                new BigDecimal("78823.52"),
                 points
         );
         when(reconstructor.reconstructCandle(any(Timeframe.class), eq(now))).thenReturn(mockState);
@@ -62,12 +65,12 @@ class TwapEngineTest {
         CandleTwapState state = engine.getCurrentCandleState(Timeframe.FIVE_MINUTES);
         assertThat(state).isNotNull();
         assertThat(state.candleStart()).isEqualTo(1788444000L);
-        assertThat(state.openPrice()).isEqualByComparingTo("78000.00");
+        assertThat(state.openPrice()).isEqualByComparingTo("78823.52");
         assertThat(state.points()).hasSize(1);
     }
 
     @Test
-    void shouldTickEverySecondAndEmitUpdate() {
+    void shouldTickEverySecondAndEmit60sRollingTwap() {
         Instant t0 = Instant.parse("2026-09-03T14:00:00Z");
         List<TwapPoint> initialPoints = new ArrayList<>();
         initialPoints.add(new TwapPoint(t0.getEpochSecond(), new BigDecimal("100.00"), new BigDecimal("100.00")));
@@ -85,10 +88,11 @@ class TwapEngineTest {
         List<TwapUpdate> updates = new ArrayList<>();
         engine.registerListener(updates::add);
 
-        // Tick at second 1
+        // Tick at second 1: window has prices that average to 105.00
         Instant t1 = t0.plusSeconds(1);
         PriceSnapshot snap1 = new PriceSnapshot(t1, new BigDecimal("110.00"), new BigDecimal("110.00"), new BigDecimal("110.00"), new BigDecimal("110.00"));
         when(priceTracker.getSnapshot(t1)).thenReturn(Optional.of(snap1));
+        when(priceTracker.getLast60SecondsMedians(t1.getEpochSecond())).thenReturn(List.of(new BigDecimal("100.00"), new BigDecimal("110.00")));
 
         engine.tick(t1);
 
@@ -96,12 +100,14 @@ class TwapEngineTest {
         TwapUpdate u1 = updates.stream().filter(u -> u.timeframe() == Timeframe.FIVE_MINUTES).findFirst().orElseThrow();
         assertThat(u1.isNewCandle()).isFalse();
         assertThat(u1.point().time()).isEqualTo(t1.getEpochSecond());
-        assertThat(u1.point().twap()).isEqualByComparingTo("105.00"); // (100 + 110) / 2
-        assertThat(cache.get(t1.getEpochSecond())).isEqualByComparingTo("110.00");
+        assertThat(u1.point().twap()).isEqualByComparingTo("105.00");
+        assertThat(u1.point().medianPrice()).isEqualByComparingTo("110.00");
+        // Verify 60s TWAP is stored directly in cache
+        assertThat(cache.get(t1.getEpochSecond())).isEqualByComparingTo("105.00");
     }
 
     @Test
-    void shouldRollOverCandleOnBoundary() {
+    void shouldRollOverCandleOnBoundaryAndSetOpenPriceTo60sTwap() {
         Instant t0 = Instant.parse("2026-09-03T14:04:59Z");
         List<TwapPoint> initialPoints = new ArrayList<>();
         long candleStart = Instant.parse("2026-09-03T14:00:00Z").getEpochSecond();
@@ -127,6 +133,7 @@ class TwapEngineTest {
         Instant tBoundary = Instant.parse("2026-09-03T14:05:00Z");
         PriceSnapshot snapBoundary = new PriceSnapshot(tBoundary, new BigDecimal("120.00"), new BigDecimal("120.00"), new BigDecimal("120.00"), new BigDecimal("120.00"));
         when(priceTracker.getSnapshot(tBoundary)).thenReturn(Optional.of(snapBoundary));
+        when(priceTracker.getLast60SecondsMedians(tBoundary.getEpochSecond())).thenReturn(List.of(new BigDecimal("120.00")));
 
         engine.tick(tBoundary);
 
