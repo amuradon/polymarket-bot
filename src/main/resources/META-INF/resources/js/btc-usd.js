@@ -53,7 +53,7 @@ $(document).ready(function() {
     twapSeries = chart.addSeries(LightweightCharts.LineSeries, {
         color: '#2563eb',
         lineWidth: 2,
-        title: 'TWAP 60s',
+        title: '',
         priceFormat: { type: 'price', precision: 2, minMove: 0.01 }
     });
 
@@ -106,7 +106,7 @@ $(document).ready(function() {
                 lineWidth: 2,
                 lineStyle: LightweightCharts.LineStyle.Dashed,
                 axisLabelVisible: true,
-                title: 'OPEN (60s)'
+                title: ''
             });
         }
         $('#stat-open').text(priceFormatter(price));
