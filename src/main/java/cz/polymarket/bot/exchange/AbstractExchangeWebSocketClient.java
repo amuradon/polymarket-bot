@@ -134,5 +134,9 @@ public abstract class AbstractExchangeWebSocketClient {
         parsePrice(message).ifPresent(price -> tracker.updatePrice(exchange, price));
     }
 
+    protected void updatePrice(BigDecimal price) {
+        tracker.updatePrice(exchange, price);
+    }
+
     protected abstract Optional<BigDecimal> parsePrice(String message);
 }

@@ -8,7 +8,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.concurrent.atomic.AtomicLong;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 class ExchangeWebSocketClientTest {
@@ -32,11 +34,14 @@ class ExchangeWebSocketClientTest {
     @Test
     void shouldHandleBinanceMessage() {
         BinanceWebSocketClient client = new BinanceWebSocketClient(vertx, tracker, parser, "wss://stream.binance.com:9443/ws/btcusdt@ticker");
-        String message = "{\"e\":\"24hrTicker\",\"s\":\"BTCUSDT\",\"c\":\"78050.00\"}";
+        AtomicLong receivedTick = new AtomicLong();
+        client.setTickListener(receivedTick::set);
+        String message = "{\"e\":\"24hrTicker\",\"E\":1788444001000,\"s\":\"BTCUSDT\",\"c\":\"78050.00\"}";
 
         client.handleMessage(message);
 
         verify(tracker, times(1)).updatePrice(Exchange.BINANCE, new BigDecimal("78050.00"));
+        assertThat(receivedTick.get()).isEqualTo(1788444001000L);
     }
 
     @Test

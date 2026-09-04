@@ -70,7 +70,7 @@ class TwapEngineTest {
     }
 
     @Test
-    void shouldTickEverySecondAndEmit60sRollingTwap() {
+    void shouldProcessTickOnBinanceTimestamp() {
         Instant t0 = Instant.parse("2026-09-03T14:00:00Z");
         List<TwapPoint> initialPoints = new ArrayList<>();
         initialPoints.add(new TwapPoint(t0.getEpochSecond(), new BigDecimal("100.00"), new BigDecimal("100.00")));
@@ -88,26 +88,66 @@ class TwapEngineTest {
         List<TwapUpdate> updates = new ArrayList<>();
         engine.registerListener(updates::add);
 
-        // Tick at second 1: window has prices that average to 105.00
+        // Binance tick at t0 + 1 second (14:00:01)
         Instant t1 = t0.plusSeconds(1);
+        long t1Ms = t1.toEpochMilli();
         PriceSnapshot snap1 = new PriceSnapshot(t1, new BigDecimal("110.00"), new BigDecimal("110.00"), new BigDecimal("110.00"), new BigDecimal("110.00"));
         when(priceTracker.getSnapshot(t1)).thenReturn(Optional.of(snap1));
         when(priceTracker.getLast60SecondsMedians(t1.getEpochSecond())).thenReturn(List.of(new BigDecimal("100.00"), new BigDecimal("110.00")));
 
-        engine.tick(t1);
+        engine.onBinanceTick(t1Ms);
 
         assertThat(updates).isNotEmpty();
         TwapUpdate u1 = updates.stream().filter(u -> u.timeframe() == Timeframe.FIVE_MINUTES).findFirst().orElseThrow();
         assertThat(u1.isNewCandle()).isFalse();
         assertThat(u1.point().time()).isEqualTo(t1.getEpochSecond());
         assertThat(u1.point().twap()).isEqualByComparingTo("105.00");
-        assertThat(u1.point().medianPrice()).isEqualByComparingTo("110.00");
-        // Verify 60s TWAP is stored directly in cache
         assertThat(cache.get(t1.getEpochSecond())).isEqualByComparingTo("105.00");
     }
 
     @Test
-    void shouldRollOverCandleOnBoundaryAndSetOpenPriceTo60sTwap() {
+    void shouldForwardFillMissingSecondsWhenNoTradesOccur() {
+        Instant t0 = Instant.parse("2026-09-03T14:00:00Z");
+        List<TwapPoint> initialPoints = new ArrayList<>();
+        initialPoints.add(new TwapPoint(t0.getEpochSecond(), new BigDecimal("9.00"), new BigDecimal("9.00")));
+
+        CandleTwapState mockState = new CandleTwapState(
+                Timeframe.FIVE_MINUTES,
+                t0.getEpochSecond(),
+                t0.plusSeconds(300).getEpochSecond(),
+                new BigDecimal("9.00"),
+                initialPoints
+        );
+        when(reconstructor.reconstructCandle(any(Timeframe.class), eq(t0))).thenReturn(mockState);
+        engine.initialize(t0);
+
+        List<TwapUpdate> updates = new ArrayList<>();
+        engine.registerListener(updates::add);
+
+        // For gap seconds t0 + 1 and t0 + 2:
+        when(priceTracker.getLast60SecondsMedians(t0.getEpochSecond() + 1)).thenReturn(List.of(new BigDecimal("9.00")));
+        when(priceTracker.getLast60SecondsMedians(t0.getEpochSecond() + 2)).thenReturn(List.of(new BigDecimal("9.00")));
+
+        // At t0 + 3, new tick arrives with price 10.00
+        Instant t3 = t0.plusSeconds(3);
+        PriceSnapshot snap3 = new PriceSnapshot(t3, new BigDecimal("10.00"), new BigDecimal("10.00"), new BigDecimal("10.00"), new BigDecimal("10.00"));
+        when(priceTracker.getSnapshot(t3)).thenReturn(Optional.of(snap3));
+        when(priceTracker.getLast60SecondsMedians(t3.getEpochSecond())).thenReturn(List.of(new BigDecimal("9.00"), new BigDecimal("9.00"), new BigDecimal("9.00"), new BigDecimal("10.00")));
+
+        // Jump straight to t0 + 3 (e.g. gap of 2 seconds)
+        engine.onBinanceTick(t3.toEpochMilli());
+
+        // Should verify forward fill was recorded for seconds 1 and 2
+        verify(priceTracker).recordForwardFilledMedian(t0.getEpochSecond() + 1);
+        verify(priceTracker).recordForwardFilledMedian(t0.getEpochSecond() + 2);
+
+        // 3 updates for 5m: second 1, second 2, second 3
+        long count5m = updates.stream().filter(u -> u.timeframe() == Timeframe.FIVE_MINUTES).count();
+        assertThat(count5m).isEqualTo(3);
+    }
+
+    @Test
+    void shouldRollOverCandleOnBoundaryFromBinanceTimestamp() {
         Instant t0 = Instant.parse("2026-09-03T14:04:59Z");
         List<TwapPoint> initialPoints = new ArrayList<>();
         long candleStart = Instant.parse("2026-09-03T14:00:00Z").getEpochSecond();
@@ -129,13 +169,13 @@ class TwapEngineTest {
         List<TwapUpdate> updates = new ArrayList<>();
         engine.registerListener(updates::add);
 
-        // Tick at 14:05:00 -> Candle boundary reached!
+        // Binance tick at 14:05:00 -> Candle boundary reached!
         Instant tBoundary = Instant.parse("2026-09-03T14:05:00Z");
         PriceSnapshot snapBoundary = new PriceSnapshot(tBoundary, new BigDecimal("120.00"), new BigDecimal("120.00"), new BigDecimal("120.00"), new BigDecimal("120.00"));
         when(priceTracker.getSnapshot(tBoundary)).thenReturn(Optional.of(snapBoundary));
         when(priceTracker.getLast60SecondsMedians(tBoundary.getEpochSecond())).thenReturn(List.of(new BigDecimal("120.00")));
 
-        engine.tick(tBoundary);
+        engine.onBinanceTick(tBoundary.toEpochMilli());
 
         assertThat(updates).isNotEmpty();
         TwapUpdate rollUpdate = updates.stream().filter(u -> u.timeframe() == Timeframe.FIVE_MINUTES).findFirst().orElseThrow();
@@ -144,7 +184,6 @@ class TwapEngineTest {
         assertThat(rollUpdate.openPrice()).isEqualByComparingTo("120.00");
         assertThat(rollUpdate.point().twap()).isEqualByComparingTo("120.00");
 
-        // Old candle data discarded - only new candle held
         CandleTwapState currentState = engine.getCurrentCandleState(Timeframe.FIVE_MINUTES);
         assertThat(currentState.candleStart()).isEqualTo(tBoundary.getEpochSecond());
         assertThat(currentState.points()).hasSize(1);

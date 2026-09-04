@@ -77,6 +77,21 @@ header {
     gap: 16px;
 }
 
+.badge-time {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
 .timeframe-wrapper {
     display: flex;
     align-items: center;

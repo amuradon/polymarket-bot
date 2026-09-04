@@ -138,6 +138,8 @@ $(document).ready(function() {
                 $('#stat-twap').text(priceFormatter(latestPoint.value));
                 $('#stat-median').text(priceFormatter(latestPoint.medianPrice));
                 updateLegend(latestPoint.time, latestPoint.value, latestPoint.medianPrice);
+                const binanceDate = new Date(latestPoint.time * 1000);
+                $('#binance-time').text('Binance Time: ' + binanceDate.toISOString().substring(11, 19) + ' UTC');
             } else {
                 twapSeries.setData([]);
             }
@@ -187,6 +189,9 @@ $(document).ready(function() {
                     $('#stat-twap').text(priceFormatter(newPoint.value));
                     $('#stat-median').text(priceFormatter(newPoint.medianPrice));
                     updateLegend(newPoint.time, newPoint.value, newPoint.medianPrice);
+
+                    const binanceDate = new Date(newPoint.time * 1000);
+                    $('#binance-time').text('Binance Time: ' + binanceDate.toISOString().substring(11, 19) + ' UTC');
                 }
             } catch (e) {
                 console.error('Error processing websocket message:', e);

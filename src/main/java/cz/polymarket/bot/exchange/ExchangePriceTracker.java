@@ -26,6 +26,7 @@ public class ExchangePriceTracker {
     private final AtomicReference<BigDecimal> binancePrice = new AtomicReference<>();
     private final AtomicReference<BigDecimal> coinbasePrice = new AtomicReference<>();
     private final AtomicReference<BigDecimal> krakenPrice = new AtomicReference<>();
+    private final AtomicReference<BigDecimal> lastKnownMedian = new AtomicReference<>();
     private final ConcurrentSkipListMap<Long, BigDecimal> recentMedians = new ConcurrentSkipListMap<>();
 
     @Inject
@@ -62,13 +63,25 @@ public class ExchangePriceTracker {
         if (medianPrice == null) {
             throw new IllegalArgumentException("Median price cannot be null");
         }
+        lastKnownMedian.set(medianPrice);
         recentMedians.put(timestampSec, medianPrice);
         evictOldEntries(timestampSec);
     }
 
+    public void recordForwardFilledMedian(long timestampSec) {
+        BigDecimal last = lastKnownMedian.get();
+        if (last != null) {
+            recordMedian(timestampSec, last);
+        }
+    }
+
     public void seedMedianHistory(Map<Long, BigDecimal> historicalMedians) {
-        if (historicalMedians != null) {
+        if (historicalMedians != null && !historicalMedians.isEmpty()) {
             recentMedians.putAll(historicalMedians);
+            Map.Entry<Long, BigDecimal> lastEntry = recentMedians.lastEntry();
+            if (lastEntry != null) {
+                lastKnownMedian.set(lastEntry.getValue());
+            }
         }
     }
 

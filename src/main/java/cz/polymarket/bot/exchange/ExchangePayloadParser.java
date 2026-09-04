@@ -20,11 +20,13 @@ public class ExchangePayloadParser {
         this.objectMapper = objectMapper;
     }
 
-    public Optional<BigDecimal> parseBinanceTicker(String json) {
+    public Optional<cz.polymarket.bot.domain.BinanceTicker> parseBinanceTicker(String json) {
         try {
             JsonNode root = objectMapper.readTree(json);
-            if (root.hasNonNull("c")) {
-                return Optional.of(new BigDecimal(root.get("c").asText()));
+            if (root.hasNonNull("c") && root.hasNonNull("E")) {
+                long eventTimeMs = root.get("E").asLong();
+                BigDecimal price = new BigDecimal(root.get("c").asText());
+                return Optional.of(new cz.polymarket.bot.domain.BinanceTicker(eventTimeMs, price));
             }
         } catch (Exception ignored) {
         }

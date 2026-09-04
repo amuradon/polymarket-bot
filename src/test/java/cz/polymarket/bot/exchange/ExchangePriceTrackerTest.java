@@ -75,4 +75,24 @@ class ExchangePriceTrackerTest {
         List<BigDecimal> window = tracker.getLast60SecondsMedians(101L);
         assertThat(window).hasSize(2);
     }
+
+    @Test
+    void shouldTrackLastKnownMedianAndForwardFill() {
+        tracker.updatePrice(Exchange.BINANCE, new BigDecimal("9.00"));
+        tracker.updatePrice(Exchange.COINBASE, new BigDecimal("9.00"));
+        tracker.updatePrice(Exchange.KRAKEN, new BigDecimal("9.00"));
+
+        Instant t0 = Instant.parse("2026-09-03T14:00:00Z");
+        tracker.getSnapshot(t0);
+
+        // Forward-fill at t0 + 1 and t0 + 2
+        tracker.recordForwardFilledMedian(t0.getEpochSecond() + 1);
+        tracker.recordForwardFilledMedian(t0.getEpochSecond() + 2);
+
+        List<BigDecimal> window = tracker.getLast60SecondsMedians(t0.getEpochSecond() + 2);
+        assertThat(window).hasSize(3);
+        assertThat(window.get(0)).isEqualByComparingTo("9.00");
+        assertThat(window.get(1)).isEqualByComparingTo("9.00");
+        assertThat(window.get(2)).isEqualByComparingTo("9.00");
+    }
 }

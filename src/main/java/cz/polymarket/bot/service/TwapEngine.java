@@ -14,7 +14,6 @@ import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
 import cz.polymarket.bot.exchange.KrakenWebSocketClient;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
-import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -29,6 +28,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -49,6 +49,7 @@ public class TwapEngine {
     private final AtomicReference<Timeframe> activeTimeframe = new AtomicReference<>();
     private final Map<Timeframe, CandleTwapState> candleStates = new ConcurrentHashMap<>();
     private final List<Consumer<TwapUpdate>> listeners = new CopyOnWriteArrayList<>();
+    private final AtomicLong lastProcessedSecond = new AtomicLong(0);
     private volatile boolean initialized = false;
 
     @Inject
@@ -70,6 +71,9 @@ public class TwapEngine {
         this.krakenClient = krakenClient;
         this.defaultTimeframeCode = defaultTimeframeCode;
         this.activeTimeframe.set(Timeframe.fromCode(defaultTimeframeCode));
+        if (this.binanceClient != null) {
+            this.binanceClient.setTickListener(this::onBinanceTick);
+        }
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -77,8 +81,6 @@ public class TwapEngine {
         binanceClient.start();
         coinbaseClient.start();
         krakenClient.start();
-
-        initialize(Instant.now());
     }
 
     void onStop(@Observes ShutdownEvent ev) {
@@ -100,18 +102,52 @@ public class TwapEngine {
             }
         }
         initialized = !candleStates.isEmpty();
+        if (initialized) {
+            lastProcessedSecond.set(now.getEpochSecond());
+        }
     }
 
-    @Scheduled(every = "1s")
-    void scheduledTick() {
-        tick(Instant.now());
+    public synchronized void onBinanceTick(long eventTimeMs) {
+        if (eventTimeMs <= 0) {
+            return;
+        }
+
+        long currentSec = eventTimeMs / 1000L;
+
+        if (!initialized) {
+            initialize(Instant.ofEpochSecond(currentSec));
+            lastProcessedSecond.set(currentSec);
+            priceTracker.getSnapshot(Instant.ofEpochSecond(currentSec));
+            processSecond(currentSec);
+            return;
+        }
+
+        long lastSec = lastProcessedSecond.get();
+        if (lastSec == 0) {
+            lastProcessedSecond.set(currentSec);
+            priceTracker.getSnapshot(Instant.ofEpochSecond(currentSec));
+            processSecond(currentSec);
+            return;
+        }
+
+        if (currentSec <= lastSec) {
+            return;
+        }
+
+        // In case of low activity / gap: forward fill missing seconds with last known price
+        for (long s = lastSec + 1; s < currentSec; s++) {
+            priceTracker.recordForwardFilledMedian(s);
+            processSecond(s);
+        }
+
+        // Process current second with latest snapshot
+        priceTracker.getSnapshot(Instant.ofEpochSecond(currentSec));
+        processSecond(currentSec);
+        lastProcessedSecond.set(currentSec);
     }
 
-    public synchronized void tick(Instant now) {
-        Optional<PriceSnapshot> snapshotOpt = priceTracker.getSnapshot(now);
-        long nowSec = now.getEpochSecond();
-
-        List<BigDecimal> windowPrices = priceTracker.getLast60SecondsMedians(nowSec);
+    private void processSecond(long sec) {
+        List<BigDecimal> windowPrices = priceTracker.getLast60SecondsMedians(sec);
         if (windowPrices.isEmpty()) {
             return;
         }
@@ -120,20 +156,15 @@ public class TwapEngine {
         BigDecimal currentMedian = windowPrices.get(windowPrices.size() - 1);
 
         // Store 60s TWAP directly in HourlyPriceCache
-        cache.put(nowSec, rollingTwap);
+        cache.put(sec, rollingTwap);
 
-        if (!initialized) {
-            initialize(now);
-            if (!initialized) {
-                return;
-            }
-        }
+        Instant time = Instant.ofEpochSecond(sec);
 
         for (Timeframe tf : Timeframe.values()) {
             CandleTwapState currentState = candleStates.get(tf);
             if (currentState == null) {
                 try {
-                    currentState = reconstructor.reconstructCandle(tf, now);
+                    currentState = reconstructor.reconstructCandle(tf, time);
                     candleStates.put(tf, currentState);
                 } catch (Exception e) {
                     continue;
@@ -141,8 +172,8 @@ public class TwapEngine {
             }
 
             // Check if candle boundary has been reached
-            if (nowSec >= currentState.candleEnd()) {
-                Instant newStart = tf.getCandleStart(now);
+            if (sec >= currentState.candleEnd()) {
+                Instant newStart = tf.getCandleStart(time);
                 Instant newEnd = tf.getCandleEnd(newStart);
 
                 // Open price for new candle is 60s TWAP at candle start
@@ -171,11 +202,11 @@ public class TwapEngine {
                 }
 
                 TwapPoint lastPoint = points.get(points.size() - 1);
-                if (lastPoint.time() == nowSec) {
+                if (lastPoint.time() == sec) {
                     continue;
                 }
 
-                TwapPoint nextPoint = twapCalculator.createPoint(nowSec, rollingTwap, currentMedian);
+                TwapPoint nextPoint = twapCalculator.createPoint(sec, rollingTwap, currentMedian);
                 points.add(nextPoint);
 
                 TwapUpdate update = new TwapUpdate(tf, currentState.candleStart(), currentState.candleEnd(), currentState.openPrice(), nextPoint, false);
@@ -199,7 +230,6 @@ public class TwapEngine {
         if (state == null) {
             state = switchTimeframe(timeframe, Instant.now());
         }
-        // Return defensive copy of points
         return new CandleTwapState(
                 state.timeframe(),
                 state.candleStart(),

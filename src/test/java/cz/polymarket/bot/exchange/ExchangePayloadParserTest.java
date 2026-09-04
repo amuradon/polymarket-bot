@@ -1,5 +1,6 @@
 package cz.polymarket.bot.exchange;
 
+import cz.polymarket.bot.domain.BinanceTicker;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -13,17 +14,19 @@ class ExchangePayloadParserTest {
     private final ExchangePayloadParser parser = new ExchangePayloadParser(new com.fasterxml.jackson.databind.ObjectMapper());
 
     @Test
-    void shouldParseBinanceTickerPrice() {
+    void shouldParseBinanceTickerWithEventTimeAndPrice() {
         String json = "{\"e\":\"24hrTicker\",\"E\":1788437674016,\"s\":\"BTCUSDT\",\"c\":\"78058.10000000\"}";
-        Optional<BigDecimal> price = parser.parseBinanceTicker(json);
-        assertThat(price).isPresent().contains(new BigDecimal("78058.10000000"));
+        Optional<BinanceTicker> ticker = parser.parseBinanceTicker(json);
+        assertThat(ticker).isPresent();
+        assertThat(ticker.get().eventTimeMs()).isEqualTo(1788437674016L);
+        assertThat(ticker.get().price()).isEqualByComparingTo("78058.10000000");
     }
 
     @Test
     void shouldReturnEmptyWhenBinanceMessageHasNoPrice() {
         String json = "{\"result\":null,\"id\":1}";
-        Optional<BigDecimal> price = parser.parseBinanceTicker(json);
-        assertThat(price).isEmpty();
+        Optional<BinanceTicker> ticker = parser.parseBinanceTicker(json);
+        assertThat(ticker).isEmpty();
     }
 
     @Test
