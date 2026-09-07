@@ -5,3 +5,5 @@ target/
 .settings/
 .theia/
 application.log*
+__pycache__/
+*.py[cod]
