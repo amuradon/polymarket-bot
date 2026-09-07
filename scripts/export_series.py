@@ -51,7 +51,49 @@ def parse_args(args=None):
         default=4,
         help="Number of concurrent downloads (default: 4)"
     )
+    parser.add_argument(
+        "--rename",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Rename files to <open_time>.parquet after download (default: True)"
+    )
+    parser.add_argument(
+        "--rename-only",
+        action="store_true",
+        default=False,
+        help="Only rename existing files in data-dir without downloading"
+    )
     return parser.parse_args(args)
+
+
+def get_market_open_times(
+    client: MarketLens,
+    series_id: str,
+    after: str,
+    before: str
+) -> dict[str, int]:
+    """Fetch market metadata for the series and map market_id -> open_time in seconds."""
+    mapping: dict[str, int] = {}
+    for market in client.series.walk(series_id, after=after, before=before):
+        if market.open_time is None:
+            raise ValueError(f"Market {market.id} is missing open_time metadata.")
+        mapping[market.id] = int(market.open_time // 1000)
+    return mapping
+
+
+def rename_market_files(data_dir: Path | str, mapping: dict[str, int]) -> int:
+    """Rename history-{market_id}*.parquet to {open_time}.parquet in data_dir."""
+    data_path = Path(data_dir)
+    renamed_count = 0
+    for market_id, open_time in mapping.items():
+        matching_files = list(data_path.glob(f"history-{market_id}*.parquet"))
+        target_file = data_path / f"{open_time}.parquet"
+        for file in matching_files:
+            if file == target_file:
+                continue
+            file.replace(target_file)
+            renamed_count += 1
+    return renamed_count
 
 
 def export_series(
@@ -61,6 +103,8 @@ def export_series(
     data_dir: str,
     dry_run: bool = False,
     concurrency: int = 4,
+    rename_by_open_time: bool = True,
+    rename_only: bool = False,
     client: MarketLens | None = None
 ):
     path = Path(data_dir)
@@ -72,7 +116,14 @@ def export_series(
             raise ValueError("MARKETLENS_API_KEY environment variable is not set.")
         client = MarketLens(api_key=api_key)
 
-    print(f"Starting series export:")
+    if rename_only:
+        print(f"Fetching market metadata for renaming in {data_dir}...")
+        open_times = get_market_open_times(client, series_id, after=after, before=before)
+        renamed = rename_market_files(path, open_times)
+        print(f"Successfully renamed {renamed} files to <open_time>.parquet format.")
+        return None
+
+    print("Starting series export:")
     print(f"  Series ID:   {series_id}")
     print(f"  After:       {after}")
     print(f"  Before:      {before}")
@@ -97,6 +148,12 @@ def export_series(
     print(f"  Rows charged:        {result.rows_charged}")
     print(f"  Events charged:      {result.events_charged}")
 
+    if not dry_run and rename_by_open_time and result.ready:
+        print("\nFetching market metadata for renaming...")
+        open_times = get_market_open_times(client, series_id, after=after, before=before)
+        renamed = rename_market_files(path, open_times)
+        print(f"  Renamed {renamed} files to <open_time>.parquet format.")
+
     return result
 
 
@@ -109,7 +166,9 @@ def main():
             before=args.before,
             data_dir=args.data_dir,
             dry_run=args.dry_run,
-            concurrency=args.concurrency
+            concurrency=args.concurrency,
+            rename_by_open_time=args.rename,
+            rename_only=args.rename_only
         )
     except Exception as e:
         print(f"Error during export: {e}", file=sys.stderr)
