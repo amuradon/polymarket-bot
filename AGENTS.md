@@ -2,6 +2,21 @@
 
 This repository contains the Polymarket Bot application.
 
+## Architecture & Vision Mandates (CRITICAL)
+
+Before proposing plans, designing features, or writing any code in this repository, agents **MUST ALWAYS** study and strictly abide by the following foundational documents:
+
+1. 👉 [`ARCHITECTURE.md`](ARCHITECTURE.md):
+   - Agents must familiarize themselves with the 5-submodule architecture (`common`, `trading`, `live`, `paper`, `backtest`) and strictly obey module boundaries and prohibited dependencies.
+   - **Zero Backtest Leakage**: Never introduce backtesting tools or heavy simulation dependencies into `live` or `paper`.
+   - **Zero Discrepancy**: Ensure strategies and engine logic in `common` execute identically across backtesting, paper, and live trading.
+
+2. 👉 [`VISION.md`](VISION.md):
+   - Agents must study the platform vision (multi-token support for BTC, ETH, SOL; 15m/5m/1h timeframes; GCP Dublin deployment near London data centers).
+   - All code must be designed to be easily extensible, modular, and optimized for ultra-low latency (Java 25, GC-free hot path, non-blocking Vert.x event loops).
+
+---
+
 ## Java & Quarkus Development Rules
 
 When working on any Java and Quarkus code in this repository, agents **MUST ALWAYS** follow the specific rules and instructions defined in:

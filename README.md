@@ -1,102 +1,27 @@
 # Polymarket Crypto Bot
 
-Real-time cryptocurrency price aggregation and TWAP (Time-Weighted Average Price) calculation engine designed for Polymarket prediction markets.
-
-## Overview
-
-Polymarket prediction markets (such as BTC/USD price binary options and timeframe resolution markets) settle based on price feeds across reference exchanges over specific time intervals. 
-
-This application provides:
-- **Multi-Exchange Streaming**: Live, low-latency WebSocket connections to Tier-1 exchanges: **Binance**, **Coinbase**, and **Kraken**.
-- **Composite Median Pricing**: Real-time 1-second price snapshots calculating the median composite price across active exchanges to eliminate outliers and exchange-specific anomalies.
-- **Dynamic TWAP Engine**: Continuous calculation and tracking of Time-Weighted Average Price (TWAP) for standard market timeframes (e.g. 5-minute and 15-minute candles), including opening price tracking, current progress, and per-second trajectory.
-- **Historical Data Reconstruction**: Automatic historical backfill via REST API upon startup to reconstruct pre-existing candles and warm up the in-memory cache without gaps.
-- **Real-Time Interactive Dashboard**: Built-in web console featuring TradingView Lightweight Charts (v5) with live WebSocket streaming, target badges, and sliding timeframe windows.
-- **Data Engineering & Analysis Toolkit**: Python scripts for downloading Binance Futures order books (L2 depth) and exporting time series to Parquet for offline backtesting and analysis.
+Real-time cryptocurrency price aggregation, TWAP (Time-Weighted Average Price) calculation, and automated trading platform designed for Polymarket prediction markets.
 
 ---
 
-## Architecture
+## Architecture & Vision
 
-The system is built on an event-driven, reactive pipeline leveraging Quarkus and Eclipse Vert.x for low latency, thread safety, and minimal memory overhead.
+- 👉 **[Architecture Guide (`ARCHITECTURE.md`)](ARCHITECTURE.md)**: Full module hierarchy, dependency rules, isolation guarantees, and design contracts.
+- 👉 **[Product & Engineering Vision (`VISION.md`)](VISION.md)**: Platform roadmap, multi-token markets (BTC, ETH, SOL), 3-system lifecycle (Backtest $\rightarrow$ Paper $\rightarrow$ Live), and low-latency GCP Dublin deployment principles.
 
-```mermaid
-flowchart TD
-    subgraph External["External Exchanges"]
-        BIN["Binance WS / REST"]
-        CB["Coinbase WS"]
-        KRK["Kraken WS"]
-    end
+---
 
-    subgraph Ingestion["Ingestion & Normalization Layer"]
-        BClient["BinanceWebSocketClient / HistoricalClient"]
-        CBClient["CoinbaseWebSocketClient"]
-        KRKClient["KrakenWebSocketClient"]
-        Parser["ExchangePayloadParser"]
-    end
+## Project Structure
 
-    subgraph Aggregation["Aggregation & State Layer"]
-        Tracker["ExchangePriceTracker (Latest Price per Exchange)"]
-        Median["MedianCalculator (Composite Price)"]
-        Engine["TwapEngine (Per-second loop & lifecycle)"]
-        Cache["HourlyPriceCache (Sliding 1-hour window)"]
-        Calc["TwapCalculator (Math & running TWAP)"]
-    end
+The project is structured as a Maven Multi-Module project with 5 submodules:
 
-    subgraph Web["Presentation & Streaming Layer"]
-        Rest["BtcUsdResource (REST API)"]
-        WS["TwapWebSocketEndpoint (WebSockets Next)"]
-        UI["Web Frontend (Qute HTML + TradingView Charts)"]
-    end
-
-    subgraph Offline["Offline Tooling (Python)"]
-        OB["download_binance_orderbook.py (cryptohftdata)"]
-        EXP["export_series.py (MarketLens / Parquet)"]
-    end
-
-    BIN --> BClient
-    CB --> CBClient
-    KRK --> KRKClient
-
-    BClient --> Parser
-    CBClient --> Parser
-    KRKClient --> Parser
-
-    Parser --> Tracker
-    Tracker --> Median
-    Median --> Engine
-
-    Engine --> Cache
-    Engine --> Calc
-    Engine --> WS
-    Engine --> Rest
-
-    WS --> UI
-    Rest --> UI
-```
-
-### Core Components
-
-1. **Exchange Clients (`cz.polymarket.bot.exchange`)**:
-   - `BinanceWebSocketClient`, `CoinbaseWebSocketClient`, `KrakenWebSocketClient`: Non-blocking Vert.x WebSocket clients with automatic reconnection, ping/pong heartbeats, and payload handling.
-   - `BinanceHistoricalClient`: Queries Binance REST API (1-second K-lines) to reconstruct historical price points across missing seconds upon application startup.
-   - `ExchangePayloadParser`: Parses exchange-specific JSON payloads into normalized internal domain models.
-   - `ExchangePriceTracker`: Thread-safe registry tracking the most recent timestamped price from each exchange.
-
-2. **Calculation & Cache Engine (`cz.polymarket.bot.calculator` & `cz.polymarket.bot.cache`)**:
-   - `MedianCalculator`: Computes the median price across available exchange quotes.
-   - `HourlyPriceCache`: In-memory sliding cache storing second-by-second composite prices for up to one hour (3600 seconds).
-   - `TwapCalculator`: Calculates exact cumulative TWAP values using `BigDecimal` for financial accuracy.
-   - `TwapEngine`: Coordinates the 1-second evaluation loop, candle state transitions (`CandleTwapState`), active timeframes (5m, 15m), and listener notifications.
-
-3. **Web & Streaming Layer (`cz.polymarket.bot.web`)**:
-   - `BtcUsdResource`: REST endpoints rendering the server-side Qute dashboard template (`btc-usd.html`) and supplying historical snapshots.
-   - `TwapWebSocketEndpoint`: Quarkus WebSockets Next endpoint broadcasting per-second updates (`TwapUpdate`) containing timestamp, spot price, open price, TWAP price, and target badges.
-   - `btc-usd.js`: Frontend controller using TradingView Lightweight Charts v5 to render multi-series charts (spot price, TWAP, open price marker, target boundary markers).
-
-4. **Python Data Scripts (`scripts/`)**:
-   - `download_binance_orderbook.py`: Fetches high-frequency Binance Futures order book data using `cryptohftdata`.
-   - `export_series.py`: Reads and exports MarketLens/TWAP series to partitioned Parquet files for quantitative research.
+| Submodule | Type | Description | Default Port |
+| :--- | :--- | :--- | :--- |
+| **`common`** | Library (`jar`) | Shared domain records, math calculators, in-memory price cache, and strategy execution contracts. | N/A |
+| **`trading`** | Library (`jar`) | Exchange clients (Binance, Coinbase, Kraken), `TwapEngine`, Qute templates, web console (`/btc-usd`), and WebSocket endpoints. | N/A |
+| **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
+| **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |
+| **`backtest`** | Application (`jar`) | Standalone runnable Quarkus application for backtesting strategies on historical datasets. | `8083` |
 
 ---
 
@@ -137,26 +62,55 @@ flowchart TD
 - **Maven 3.9+** (or use the included Maven wrapper `mvnw` / `mvnw.cmd`).
 - **Python 3.12+** (optional, for offline data scripts).
 
-### Running in Development Mode
-Start the application in Quarkus Dev Mode with live reload:
-```bash
-./mvnw quarkus:dev
-```
-Once started, navigate to `http://localhost:8080/btc-usd` to view the live TWAP dashboard.
+### Running Applications in Development Mode
 
-### Running Tests
-Execute the full test suite (unit tests, integration tests, and Cucumber scenarios):
+#### 1. Live Trading Application (`live` - Port 8080)
 ```bash
-./mvnw test
+./mvnw quarkus:dev -pl live
+```
+Navigate to `http://localhost:8080/btc-usd`.
+
+#### 2. Paper Trading Application (`paper` - Port 8082)
+```bash
+./mvnw quarkus:dev -pl paper
+```
+Navigate to `http://localhost:8082/btc-usd`.
+
+#### 3. Backtest Engine Application (`backtest` - Port 8083)
+```bash
+./mvnw quarkus:dev -pl backtest
+```
+Navigate to `http://localhost:8083/backtest`.
+
+---
+
+## Running Tests
+
+Execute the full multi-module test suite across all submodules:
+```bash
+./mvnw clean test
 ```
 
-### Running Data Scripts (Python)
+---
+
+## Running Data Scripts (Python)
 ```bash
+# In first run create virtual environment
+py -m venv .venv
+
+# Activate virtual environment
+.venv\Scripts\activate
+
+# Install dependencies (only first run)
+pip install marketlens
+pip install cryptohftdata
+
 # Download Binance Futures order book data
 python scripts/download_binance_orderbook.py --symbol BTCUSDT --start-date 2026-08-01 --end-date 2026-08-02 --data-dir ./data/orderbook
 
+# Export Polymarket historical data from marketlens.trade
+python scripts/export_series.py --after 2026-08-07T00:00:00Z --before 2026-09-07T00:00:00Z
+
 # Run Python script tests
 python -m unittest discover tests
-# or with pytest:
-# pytest tests/
 ```
