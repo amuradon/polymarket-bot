@@ -1,14 +1,14 @@
 # Implementation Plan: Binance Historical Data Downloader
 
 ## Phase 1: Dependencies & Acceptance Testing Harness (BDD & Configuration)
-- [ ] Task: 1.1 Configure backtest dependencies and application properties
-  - [ ] Add Cucumber BDD dependencies (`cucumber-java`, `cucumber-junit-platform-engine`) to `backtest/pom.xml`
-  - [ ] Add Zstandard decompression dependency (`com.github.luben:zstd-jni`) to `backtest/pom.xml`
-  - [ ] Add configuration properties to `backtest/src/main/resources/application.properties` (base data directory default `D:\Crypto\data\Polymarket\Binance`, CryptoHFTData API key, timeouts)
-- [ ] Task: 1.2 Define Cucumber BDD feature and test runner
-  - [ ] Create Gherkin acceptance scenarios in `backtest/src/test/resources/features/binance_data_download.feature`
-  - [ ] Create `RunCucumberTest.java` and scaffold `DataDownloadSteps.java`
-- [ ] Task: 1.3 Phase Verification & Checkpoint (Refer to workflow.md)
+- [x] Task: 1.1 Configure backtest dependencies and application properties
+  - [x] Add Cucumber BDD dependencies (`cucumber-java`, `cucumber-junit-platform-engine`) to `backtest/pom.xml`
+  - [x] Add Zstandard decompression dependency (`com.github.luben:zstd-jni`) to `backtest/pom.xml`
+  - [x] Add configuration properties to `backtest/src/main/resources/application.properties` (base data directory default `D:\Crypto\data\Polymarket\Binance`, CryptoHFTData API key, timeouts)
+- [x] Task: 1.2 Define Cucumber BDD feature and test runner
+  - [x] Create Gherkin acceptance scenarios in `backtest/src/test/resources/features/binance_data_download.feature`
+  - [x] Create `RunCucumberTest.java` and scaffold `DataDownloadSteps.java`
+- [x] Task: 1.3 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 2: Core Downloader Services & TDD Implementation (Domain & Ingestion Logic)
 - [ ] Task: 2.1 Request validation and job state domain models
