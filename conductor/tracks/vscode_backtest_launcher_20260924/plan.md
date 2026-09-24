@@ -7,10 +7,10 @@
 - [x] Task: 1.2 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 2: VS Code Task and Launch Configuration
-- [ ] Task: 2.1 Configure .vscode/tasks.json
-  - [ ] Add `quarkus:dev-backtest` background task
-  - [ ] Add `backtest:compile` and `backtest:test` tasks
-- [ ] Task: 2.2 Configure .vscode/launch.json
-  - [ ] Add `Backtest: Quarkus Dev (Attach 5005)` configuration
-  - [ ] Add `Backtest: Direct Main (Run/Debug)` configuration
-- [ ] Task: 2.3 Phase Verification & Checkpoint (Refer to workflow.md)
+- [x] Task: 2.1 Configure .vscode/tasks.json
+  - [x] Add `quarkus:dev-backtest` background task
+  - [x] Add `backtest:compile` and `backtest:test` tasks
+- [x] Task: 2.2 Configure .vscode/launch.json
+  - [x] Add `Backtest: Quarkus Dev (Attach 5005)` configuration
+  - [x] Add `Backtest: Direct Main (Run/Debug)` configuration
+- [x] Task: 2.3 Phase Verification & Checkpoint (Refer to workflow.md)

@@ -2,11 +2,56 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "quarkus:dev-backtest",
+            "type": "shell",
+            "command": "./mvnw quarkus:dev -pl backtest",
+            "windows": {
+                "command": ".\\mvnw.cmd quarkus:dev -pl backtest"
+            },
+            "isBackground": true,
+            "problemMatcher": [
+                {
+                    "pattern": [
+                        {
+                            "regexp": "\\b\\B",
+                            "file": 1,
+                            "location": 2,
+                            "message": 3
+                        }
+                    ],
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^.*(Quarkus .* starting|Scanning for projects).*",
+                        "endsPattern": "^.*(Quarkus .* started in|Listening on:).*"
+                    }
+                }
+            ],
+            "group": "build"
+        },
+        {
+            "label": "backtest:compile",
+            "type": "shell",
+            "command": "./mvnw compile -pl backtest",
+            "windows": {
+                "command": ".\\mvnw.cmd compile -pl backtest"
+            },
+            "group": "build"
+        },
+        {
+            "label": "backtest:test",
+            "type": "shell",
+            "command": "./mvnw test -pl backtest",
+            "windows": {
+                "command": ".\\mvnw.cmd test -pl backtest"
+            },
+            "group": "test"
+        },
+        {
             "label": "quarkus:dev",
             "type": "shell",
             "command": "./mvnw quarkus:dev",
             "windows": {
-                "command": "mvn quarkus:dev"
+                "command": ".\\mvnw.cmd quarkus:dev"
             },
             "isBackground": true,
             "problemMatcher": [
@@ -31,7 +76,10 @@
         {
             "label": "maven:compile",
             "type": "shell",
-            "command": "mvn clean compile",
+            "command": "./mvnw clean compile",
+            "windows": {
+                "command": ".\\mvnw.cmd clean compile"
+            },
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -40,7 +88,10 @@
         {
             "label": "maven:test",
             "type": "shell",
-            "command": "mvn test",
+            "command": "./mvnw test",
+            "windows": {
+                "command": ".\\mvnw.cmd test"
+            },
             "group": "test"
         }
     ]

@@ -3,6 +3,21 @@
     "configurations": [
         {
             "type": "java",
+            "name": "Backtest: Quarkus Dev (Attach 5005)",
+            "request": "attach",
+            "hostName": "localhost",
+            "port": 5005,
+            "preLaunchTask": "quarkus:dev-backtest"
+        },
+        {
+            "type": "java",
+            "name": "Backtest: Direct Main (Run/Debug)",
+            "request": "launch",
+            "mainClass": "cz.polymarket.bot.backtest.BacktestApplication",
+            "projectName": "backtest"
+        },
+        {
+            "type": "java",
             "name": "Quarkus: Dev (Attach 5005)",
             "request": "attach",
             "hostName": "localhost",
