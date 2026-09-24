@@ -80,7 +80,18 @@ Navigate to `http://localhost:8082/btc-usd`.
 ```bash
 ./mvnw quarkus:dev -pl backtest
 ```
-Navigate to `http://localhost:8083/backtest`.
+- Status: `http://localhost:8083/backtest`
+- Trigger Binance historical data download: `POST http://localhost:8083/api/1/data/download`
+  ```bash
+  curl -X POST http://localhost:8083/api/1/data/download \
+    -H "Content-Type: application/json" \
+    -d '{"symbol":"BTCUSDT","start":"2026-08-01","end":"2026-08-02"}'
+  ```
+  Returns `202 Accepted` with a `jobId`.
+- Query download job status:
+  ```bash
+  curl http://localhost:8083/api/1/data/download/<jobId>
+  ```
 
 ---
 
