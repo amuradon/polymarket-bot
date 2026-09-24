@@ -2,7 +2,25 @@
 
 This repository contains the Polymarket Bot application.
 
-## Architecture & Vision Mandates (CRITICAL)
+---
+
+## 1. Development Lifecycle & Workflow Protocol (NON-NEGOTIABLE)
+
+All agents working on this repository **MUST ALWAYS** follow the engineering protocol defined in:
+
+👉 [`.agents/rules/workflow.md`](.agents/rules/workflow.md)
+
+### Key Lifecycle Mandates:
+
+- **Always Use Conductor Plugin**
+- **Adhere to the Plan**
+- **Clean Code**
+- **Test-Driven Development (TDD)**
+- **Multi-Level Test Pyramid**
+
+---
+
+## 2. Architecture & Vision Mandates (CRITICAL)
 
 Before proposing plans, designing features, or writing any code in this repository, agents **MUST ALWAYS** study and strictly abide by the following foundational documents:
 
@@ -17,7 +35,7 @@ Before proposing plans, designing features, or writing any code in this reposito
 
 ---
 
-## Java & Quarkus Development Rules
+## 3. Java & Quarkus Development Rules
 
 When working on any Java and Quarkus code in this repository, agents **MUST ALWAYS** follow the specific rules and instructions defined in:
 
