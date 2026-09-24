@@ -1,0 +1,8 @@
+{
+  "track_id": "binance_data_download_20260924",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-09-24T09:50:00Z",
+  "updated_at": "2026-09-24T09:50:00Z",
+  "description": "Download Binance historical spot/futures aggTrades and futures orderbook via REST API in backtest module"
+}
