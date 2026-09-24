@@ -11,19 +11,19 @@
 - [x] Task: 1.3 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 2: Core Downloader Services & TDD Implementation (Domain & Ingestion Logic)
-- [ ] Task: 2.1 Request validation and job state domain models
-  - [ ] Write unit tests for request validation (`DownloadRequestTest`)
-  - [ ] Implement `DownloadRequest`, `DownloadJob`, `DownloadResult`, and `DataType` records in `cz.polymarket.bot.backtest.data`
-- [ ] Task: 2.2 Binance Spot & Futures aggTrades downloader
-  - [ ] Write unit tests for `BinanceAggTradesDownloaderTest` (URL resolution, existence check, zip decompression, CSV extraction, skip logging)
-  - [ ] Implement `BinanceAggTradesDownloader`
-- [ ] Task: 2.3 Binance Futures order book downloader (CryptoHFTData Java port)
-  - [ ] Write unit tests for `BinanceOrderBookDownloaderTest` (hourly iteration 00-23, flat naming `<symbol>-orderbook-<yyyy-MM-dd-HH>.parquet`, zstd decompression, skip logging)
-  - [ ] Implement `BinanceOrderBookDownloader`
-- [ ] Task: 2.4 Asynchronous download coordinator & job manager
-  - [ ] Write unit tests for `DataDownloadJobManagerTest`
-  - [ ] Implement `DataDownloadJobManager` coordinating async task execution and state tracking
-- [ ] Task: 2.5 Phase Verification & Checkpoint (Refer to workflow.md)
+- [x] Task: 2.1 Request validation and job state domain models
+  - [x] Write unit tests for request validation (`DownloadRequestTest`)
+  - [x] Implement `DownloadRequest`, `DownloadJob`, `DownloadResult`, and `DataType` records in `cz.polymarket.bot.backtest.data`
+- [x] Task: 2.2 Binance Spot & Futures aggTrades downloader
+  - [x] Write unit tests for `BinanceAggTradesDownloaderTest` (URL resolution, existence check, zip decompression, CSV extraction, skip logging)
+  - [x] Implement `BinanceAggTradesDownloader`
+- [x] Task: 2.3 Binance Futures order book downloader (CryptoHFTData Java port)
+  - [x] Write unit tests for `BinanceOrderBookDownloaderTest` (hourly iteration 00-23, flat naming `<symbol>-orderbook-<yyyy-MM-dd-HH>.parquet`, zstd decompression, skip logging)
+  - [x] Implement `BinanceOrderBookDownloader`
+- [x] Task: 2.4 Asynchronous download coordinator & job manager
+  - [x] Write unit tests for `DataDownloadJobManagerTest`
+  - [x] Implement `DataDownloadJobManager` coordinating async task execution and state tracking
+- [x] Task: 2.5 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 3: REST API Endpoints & Multi-Level Verification
 - [ ] Task: 3.1 REST API endpoints & Quarkus integration tests
