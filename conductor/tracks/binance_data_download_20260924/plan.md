@@ -26,13 +26,13 @@
 - [x] Task: 2.5 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 3: REST API Endpoints & Multi-Level Verification
-- [ ] Task: 3.1 REST API endpoints & Quarkus integration tests
-  - [ ] Write `@QuarkusTest` REST Assured tests in `DataDownloadResourceTest`
-  - [ ] Implement `DataDownloadResource` with `POST /api/1/data/download` (202 Accepted) and `GET /api/1/data/download/{jobId}`
-- [ ] Task: 3.2 Cucumber BDD acceptance tests execution
-  - [ ] Implement complete step definitions in `DataDownloadSteps.java`
-  - [ ] Execute and verify all BDD scenarios pass
-- [ ] Task: 3.3 Multi-Level Test Pyramid & Clean Multi-Module Compilation
-  - [ ] Verify `./mvnw clean compile` succeeds across all 5 submodules
-  - [ ] Run full test suite across the repository
-- [ ] Task: 3.4 Phase Verification & Checkpoint (Refer to workflow.md)
+- [x] Task: 3.1 REST API endpoints & Quarkus integration tests
+  - [x] Write `@QuarkusTest` REST Assured tests in `DataDownloadResourceTest`
+  - [x] Implement `DataDownloadResource` with `POST /api/1/data/download` (202 Accepted) and `GET /api/1/data/download/{jobId}`
+- [x] Task: 3.2 Cucumber BDD acceptance tests execution
+  - [x] Implement complete step definitions in `DataDownloadSteps.java`
+  - [x] Execute and verify all BDD scenarios pass
+- [x] Task: 3.3 Multi-Level Test Pyramid & Clean Multi-Module Compilation
+  - [x] Verify `./mvnw clean compile` succeeds across all 5 submodules
+  - [x] Run full test suite across the repository
+- [x] Task: 3.4 Phase Verification & Checkpoint (Refer to workflow.md)
