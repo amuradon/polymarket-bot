@@ -17,6 +17,7 @@ All agents working on this repository **MUST ALWAYS** follow the engineering pro
 - **Clean Code**
 - **Test-Driven Development (TDD)**
 - **Multi-Level Test Pyramid**
+- **File-First Review & Auxiliary Pane**: Never dump full markdown documents in chat. Always save them first to disk/artifacts, link them, and process user line comments from the Auxiliary Pane.
 
 ---
 

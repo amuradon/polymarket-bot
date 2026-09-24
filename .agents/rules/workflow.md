@@ -31,6 +31,16 @@ This document defines the strict, non-negotiable workflow and development protoc
 - **Step Definitions & Fixtures**: The track plan must explicitly list the creation or extension of step definitions (e.g. `*Steps.java`) and test harnesses (`RunCucumberTest`).
 - **Plan Presentation & Approval**: Present the implementation plan—including the proposed architectural changes, open questions, and defined Cucumber scenarios—to the user and obtain explicit approval before proceeding to the implementation phase.
 
+### File-First Document Review Protocol (Auxiliary Pane)
+- **Mandatory File-First Saving**: Whenever drafting or updating markdown documents for user review and alignment (e.g. Conductor `spec.md`, `plan.md`, `implementation_plan.md`, ADRs, review reports):
+  - The agent **MUST NEVER** output or print the full markdown document directly into the chat stream.
+  - The agent **MUST ALWAYS** first save the markdown file to disk (e.g. `conductor/tracks/<track_id>/spec.md`, `conductor/tracks/<track_id>/plan.md`, or artifact).
+  - In chat, output **ONLY** a concise summary (2-5 bullet points) and a clickable markdown link (`file:///...`) inviting the user to review the document in the **Auxiliary Pane** in Antigravity 2.0.
+- **Mandatory Processing of Line Comments**:
+  - The user will highlight lines and add inline comments in the Auxiliary Pane.
+  - The agent **MUST** process every single line comment (`Selection:` / `Comment:`), update the file on disk accordingly, and request re-review until approved.
+
+
 ---
 
 ## 3. Implementation Standards (Implementace)
