@@ -1,10 +1,10 @@
 # Implementation Plan: VS Code Launchers for Backtester
 
 ## Phase 1: Backtest Application Entry Point
-- [ ] Task: 1.1 Create BacktestApplication and startup test
-  - [ ] Write unit test `BacktestApplicationTest`
-  - [ ] Implement `BacktestApplication` with `@QuarkusMain` and `StartupEvent` listener
-- [ ] Task: 1.2 Phase Verification & Checkpoint (Refer to workflow.md)
+- [x] Task: 1.1 Create BacktestApplication and startup test
+  - [x] Write unit test `BacktestApplicationTest`
+  - [x] Implement `BacktestApplication` with `@QuarkusMain` and `StartupEvent` listener
+- [x] Task: 1.2 Phase Verification & Checkpoint (Refer to workflow.md)
 
 ## Phase 2: VS Code Task and Launch Configuration
 - [ ] Task: 2.1 Configure .vscode/tasks.json
