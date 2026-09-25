@@ -17,8 +17,7 @@ All agents working on this repository **MUST ALWAYS** follow the engineering pro
 - **Clean Code**
 - **Test-Driven Development (TDD)**
 - **Multi-Level Test Pyramid**
-
-
+- **Strict Prohibition of `.humans/`**: The `.humans/` directory is reserved exclusively for human developers. Agents must NEVER read, create, or modify any files inside `.humans/`.
 ---
 
 ## 2. Architecture & Vision Mandates (CRITICAL)

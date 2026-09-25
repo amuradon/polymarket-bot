@@ -1,6 +1,3 @@
----
-trigger: always_on
----
 
 # Development Lifecycle & Engineering Rules
 
@@ -20,6 +17,12 @@ This document defines the strict, non-negotiable workflow and development protoc
   2. Execution with TDD (`conductor-implement`)
   3. Principal Review & Verification (`conductor-review`)
 - **Native Modal UI**: When asking for user decisions, choices, or clarifications within Conductor workflows, the agent MUST use the native interactive modal tool `ask_question` whenever available.
+
+### Strict Prohibition: `.humans/` Directory (HUMANS ONLY)
+- **Human-Only Territory**: The `.humans/` folder is exclusively designated for human team members.
+- **NO Reading**: AI agents are strictly prohibited from reading, viewing, inspecting, listing, or searching any files or subdirectories inside `.humans/`.
+- **NO Writing / Modifying**: AI agents are strictly prohibited from creating, modifying, editing, renaming, moving, or deleting any files or directories inside `.humans/`.
+- **Complete Exclusion**: Exclude `.humans/` from all automated code generation, refactoring, formatting, file discovery, and analysis operations. Treat this directory as completely off-limits and invisible to AI agents.
 
 ---
 
