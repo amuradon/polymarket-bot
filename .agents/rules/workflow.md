@@ -7,14 +7,14 @@ This document defines the strict, non-negotiable workflow and development protoc
 ## 1. General Mandates (Obecné)
 
 ### Always Use Conductor Plugin
-- **Exclusive Workflow Driver**: Every feature, bug fix, architectural refactoring, or chore MUST be planned, tracked, and executed via the **Conductor** plugin skills (`conductor-new-track`, `conductor-implement`, `conductor-review`, `conductor-status`, `conductor-revert`).
+- **Exclusive Workflow Driver**: Every feature, bug fix, architectural refactoring, or chore MUST be tracked and executed via the **Conductor** plugin skills (`conductor-implement`, `conductor-review`, `conductor-status`, `conductor-revert`).
+- **Manual Track Creation Only (NO Auto-Creation)**: New Conductor tracks are **ALWAYS created manually by the user**. The agent **MUST NEVER** automatically or autonomously create, scaffold, or initiate a new track (never run `conductor-new-track` on its own). The agent must only work on an existing track created and specified by the user. If the user requests work without specifying an active track, the agent must ask the user which track to use rather than creating one automatically.
 - **No Ad-Hoc Code Changes**: Never modify production code or create features outside of an active Conductor track.
 - **Environment Bootstrapping**: If Conductor is not initialized in the repository (i.e. `conductor/index.md` or `conductor/tracks.md` does not exist), the agent must first invoke `conductor-setup` to scaffold the foundational Conductor structure (`product.md`, `tech-stack.md`, `workflow.md`, `tracks.md`).
-- **Spec-Driven Development (SDD)**: Strictly follow the Conductor sequence:
-  1. Interactive Specification (`spec.md`)
-  2. Phased Implementation Plan (`plan.md`)
-  3. Execution with TDD (`conductor-implement`)
-  4. Principal Review & Verification (`conductor-review`)
+- **Spec-Driven Development (SDD)**: For the user-created track, strictly follow the execution lifecycle:
+  1. Track created manually by the user (`spec.md` & `plan.md`)
+  2. Execution with TDD (`conductor-implement`)
+  3. Principal Review & Verification (`conductor-review`)
 - **Native Modal UI**: When asking for user decisions, choices, or clarifications within Conductor workflows, the agent MUST use the native interactive modal tool `ask_question` whenever available.
 
 ---

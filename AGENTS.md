@@ -13,6 +13,7 @@ All agents working on this repository **MUST ALWAYS** follow the engineering pro
 ### Key Lifecycle Mandates:
 
 - **Always Use Conductor Plugin**
+- **Manual Track Creation**: New Conductor tracks are ALWAYS created manually by the user. The agent MUST NEVER create or initialize tracks automatically (`conductor-new-track`).
 - **Adhere to the Plan**
 - **Clean Code**
 - **Test-Driven Development (TDD)**

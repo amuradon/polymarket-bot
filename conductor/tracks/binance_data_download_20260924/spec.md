@@ -75,8 +75,26 @@ Base path default: `D:\Crypto\data\Polymarket\Binance` (configurable via `applic
    - Compression: Decompress Zstandard frame (`0x28B52FFD`) to raw Parquet if compressed.
    - Idempotency: If `<symbol>-orderbook-<yyyy-MM-dd-HH>.parquet` exists, log `INFO` and skip.
 
+### 2.3 OpenAPI Specification & Swagger UI
+- **Extension**: Official `io.quarkus:quarkus-smallrye-openapi` extension in `backtest/pom.xml`.
+- **Swagger UI**:
+  - Interactive documentation interface accessible at `/q/swagger-ui`.
+  - Configured to be always included across profiles via `quarkus.swagger-ui.always-include=true`.
+- **OpenAPI Schema**:
+  - Schema accessible at `/q/openapi` (YAML) and `/q/openapi?format=json`.
+  - Application info configured:
+    - Title: `Polymarket Bot - Backtest & Data Ingestion API`
+    - Version: `1.0.0`
+    - Description: Interactive REST API documentation for the backtesting engine and Binance historical market data ingestion.
+- **Endpoint Documentation**:
+  - `POST /api/1/data/download`: Tag `Data Ingestion`, operation summary & description, request body schema & examples, 202 Accepted and 400 Bad Request responses.
+  - `GET /api/1/data/download/{jobId}`: Tag `Data Ingestion`, path parameter description, 200 OK and 404 Not Found responses.
+  - `GET /backtest`: Tag `Backtest Engine`, status check operation documentation.
+- **Schema Models**:
+  - Schema annotations with descriptions and examples on `DownloadRequest`, `DownloadJob`, `DownloadResult`, and `DataType`.
+
 ## 3. Non-Functional Requirements & Architecture
-- **Zero Backtest Leakage**: Ingestion logic, HTTP client, and controllers reside exclusively within the `backtest` module.
+- **Zero Backtest Leakage**: Ingestion logic, HTTP client, OpenAPI annotations, and controllers reside exclusively within the `backtest` module.
 - **Asynchronous Execution**: Long-running downloads run in background managed threads without blocking Quarkus HTTP event loops.
 - **Fail-Fast & Atomic Writes**: Incomplete downloads write to `.part` files and rename atomically upon successful completion.
 
@@ -86,3 +104,6 @@ Base path default: `D:\Crypto\data\Polymarket\Binance` (configurable via `applic
   - Skip existing CSV and Parquet files without downloading.
   - Validate bad requests (invalid date range, blank symbol).
   - Track job progress via status endpoint.
+- OpenAPI & Swagger UI Acceptance:
+  - `GET /q/openapi` returns HTTP 200 with OpenAPI 3.x schema containing `/api/1/data/download` and `/backtest` paths.
+  - `GET /q/swagger-ui` returns HTTP 200 with Swagger UI HTML interface.

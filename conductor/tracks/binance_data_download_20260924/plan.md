@@ -36,3 +36,17 @@
   - [x] Verify `./mvnw clean compile` succeeds across all 5 submodules
   - [x] Run full test suite across the repository
 - [x] Task: 3.4 Phase Verification & Checkpoint (Refer to workflow.md)
+
+## Phase 4: Swagger UI & OpenAPI REST API Documentation
+- [ ] Task: 4.1 Dependency and Configuration Setup
+  - [ ] Add `io.quarkus:quarkus-smallrye-openapi` extension to `backtest/pom.xml`
+  - [ ] Configure OpenAPI metadata (`info-title`, `info-version`, `info-description`) and `quarkus.swagger-ui.always-include=true` in `backtest/src/main/resources/application.properties`
+- [ ] Task: 4.2 OpenAPI & Swagger Annotations
+  - [ ] Add top-level OpenAPI definition and tags
+  - [ ] Annotate `DataDownloadResource` and `BacktestResource` endpoints with `@Operation`, `@APIResponse`, `@Parameter`, `@Tag`
+  - [ ] Annotate DTO models (`DownloadRequest`, `DownloadJob`, `DownloadResult`, `DataType`) with `@Schema` descriptions and examples
+- [ ] Task: 4.3 Automated Verification Tests
+  - [ ] Create integration test `SwaggerUiOpenApiTest` asserting valid OpenAPI 3.x document and Swagger UI HTML availability
+  - [ ] Run test suite (`.\mvnw.cmd test -pl backtest`)
+- [ ] Task: 4.4 Phase Verification & Checkpoint (Refer to workflow.md)
+
