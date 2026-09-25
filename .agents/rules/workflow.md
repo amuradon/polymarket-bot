@@ -1,3 +1,7 @@
+---
+trigger: always_on
+---
+
 # Development Lifecycle & Engineering Rules
 
 This document defines the strict, non-negotiable workflow and development protocol for the **Polymarket Bot** repository. All AI agents and developers **MUST** adhere to these rules at all times.
@@ -109,9 +113,10 @@ This document defines the strict, non-negotiable workflow and development protoc
 
 ## 5. Delivery & Git Protocol (Odevzdání)
 
-### 5.1 Remote Repository Synchronization
-- Stage all relevant modified, created, or deleted files cleanly.
-- Perform `git commit` and `git push` to push changes to the remote Git repository.
+### 5.1 Local Git Commit Only (STRICTLY NO GIT PUSH)
+- **Local Git Commit**: Stage all relevant modified, created, or deleted files cleanly and execute `git commit` after completing the task and verifying that all tests pass.
+- **NEVER Perform Git Push**: The agent **MUST NEVER** execute `git push` under any circumstances.
+- **Manual Push by User**: Pushing commits to the remote repository is strictly reserved for the user after their review. Once the commit is created, inform the user that changes are committed locally and ready for their review and push.
 
 ### 5.2 Commit Message Format with Conductor Track Identifier
 - Every commit message **MUST** explicitly start with the Conductor track identifier.
