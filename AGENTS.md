@@ -12,12 +12,13 @@ All agents working on this repository **MUST ALWAYS** follow the engineering pro
 
 ### Key Lifecycle Mandates:
 
-- **Usage of Conductor Plugin**
+- **Mandatory GitHub Ticket**: Always require a GitHub ticket number for every task and commit (`Resolves #<ticket-id> ...`). If not explicitly provided in the prompt, request it before proceeding.
 - **Adhere to the Plan**
 - **Clean Code**
 - **Test-Driven Development (TDD)**
 - **Multi-Level Test Pyramid**
-- **Strict Prohibition of `.humans/`**: The `.humans/` directory is reserved exclusively for human developers. Agents must NEVER read, create, or modify any files inside `.humans/`.
+- **Local Git Commit Only (NO Git Push)**: Always commit locally after completing the task and verifying all tests pass. Never execute `git push`.
+
 ---
 
 ## 2. Architecture & Vision Mandates (CRITICAL)

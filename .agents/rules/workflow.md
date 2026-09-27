@@ -1,4 +1,3 @@
-
 # Development Lifecycle & Engineering Rules
 
 This document defines the strict, non-negotiable workflow and development protocol for the **Polymarket Bot** repository. All AI agents and developers **MUST** adhere to these rules at all times.
@@ -7,88 +6,83 @@ This document defines the strict, non-negotiable workflow and development protoc
 
 ## 1. General Mandates (Obecné)
 
-### Always Use Conductor Plugin
-- **Exclusive Workflow Driver**: Every feature, bug fix, architectural refactoring, or chore MUST be tracked and executed via the **Conductor** plugin skills (`conductor-implement`, `conductor-review`, `conductor-status`, `conductor-revert`).
-- **Manual Track Creation Only (NO Auto-Creation)**: New Conductor tracks are **ALWAYS created manually by the user**. The agent **MUST NEVER** automatically or autonomously create, scaffold, or initiate a new track (never run `conductor-new-track` on its own). The agent must only work on an existing track created and specified by the user. If the user requests work without specifying an active track, the agent must ask the user which track to use rather than creating one automatically.
-- **No Ad-Hoc Code Changes**: Never modify production code or create features outside of an active Conductor track.
-- **Environment Bootstrapping**: If Conductor is not initialized in the repository (i.e. `conductor/index.md` or `conductor/tracks.md` does not exist), the agent must first invoke `conductor-setup` to scaffold the foundational Conductor structure (`product.md`, `tech-stack.md`, `workflow.md`, `tracks.md`).
-- **Spec-Driven Development (SDD)**: For the user-created track, strictly follow the execution lifecycle:
-  1. Track created manually by the user (`spec.md` & `plan.md`)
-  2. Execution with TDD (`conductor-implement`)
-  3. Principal Review & Verification (`conductor-review`)
-- **Native Modal UI**: When asking for user decisions, choices, or clarifications within Conductor workflows, the agent MUST use the native interactive modal tool `ask_question` whenever available.
-
-### Strict Prohibition: `.humans/` Directory (HUMANS ONLY)
-- **Human-Only Territory**: The `.humans/` folder is exclusively designated for human team members.
-- **NO Reading**: AI agents are strictly prohibited from reading, viewing, inspecting, listing, or searching any files or subdirectories inside `.humans/`.
-- **NO Writing / Modifying**: AI agents are strictly prohibited from creating, modifying, editing, renaming, moving, or deleting any files or directories inside `.humans/`.
-- **Complete Exclusion**: Exclude `.humans/` from all automated code generation, refactoring, formatting, file discovery, and analysis operations. Treat this directory as completely off-limits and invisible to AI agents.
+### Mandatory GitHub Ticket Number
+- **Ticket Required**: For every task, planning session, and commit, a GitHub ticket number is mandatory.
+- **Solicitation Protocol**: If the user has not explicitly provided a GitHub ticket number in their prompt, the agent **MUST** request it before proceeding with any implementation or file modifications.
+- **Commit Association**: The ticket number must be used across all commits (including incremental fixes) belonging to that task.
 
 ---
 
 ## 2. Planning Protocol (Plánování)
 
-### Define Cucumber Acceptance Tests During Planning
-- **Acceptance Criteria as Gherkin Features**: During the planning phase (when authoring `spec.md` and `plan.md`), the agent **MUST** define concrete Cucumber (Gherkin) acceptance scenarios *before* any production code is implemented.
+### 2.1 Implementation Plan & Approval Barrier
+- **Presentation Before Modification**: Before executing any source code changes or running modifying commands, the agent **MUST** author and present an implementation plan.
+- **Required Plan Content**:
+  - **Proposed Changes**: Exact list of files to modify or create and architectural rationale.
+  - **Open Questions**: Direct, concrete questions to resolve any ambiguity, underspecified requirements, or design decisions.
+  - **Cucumber Acceptance Scenarios**: Gherkin test scenarios defining the acceptance criteria.
+  - **Verification Steps**: Step-by-step test commands across all test pyramid levels.
+- **Ticket Check**: If the GitHub ticket number was not provided in the prompt, request it explicitly in this phase.
+- **Mandatory Approval Barrier**: The agent **MUST STOP and wait for explicit user approval** of the plan before proceeding to the implementation phase.
+
+### 2.2 Define Cucumber Acceptance Tests During Planning
+- **Acceptance Criteria as Gherkin Features**: During the planning phase, the agent **MUST** define concrete Cucumber (Gherkin) acceptance scenarios *before* any production code is implemented.
 - **Location**: Feature files must be created or updated under the appropriate module's test resources (e.g. `trading/src/test/resources/features/<feature-name>.feature`).
 - **Standard Syntax**: Scenarios must use clear `Given - When - Then - And` syntax to specify:
   - Normal / happy-path user and system behaviors
   - Boundary conditions and financial edge cases
   - Error and exceptional scenarios (fail-fast behavior)
-- **Step Definitions & Fixtures**: The track plan must explicitly list the creation or extension of step definitions (e.g. `*Steps.java`) and test harnesses (`RunCucumberTest`).
-- **Plan Presentation & Approval**: Present the implementation plan—including the proposed architectural changes, open questions, and defined Cucumber scenarios—to the user and obtain explicit approval before proceeding to the implementation phase.
+- **Step Definitions & Fixtures**: The implementation plan must explicitly list the creation or extension of step definitions (e.g. `*Steps.java`) and test harnesses (`RunCucumberTest`).
 
-### File-First Document Review Protocol (Auxiliary Pane)
-- **Mandatory File-First Saving**: Whenever drafting or updating markdown documents for user review and alignment (e.g. Conductor `spec.md`, `plan.md`, `implementation_plan.md`, ADRs, review reports):
+### 2.3 File-First Document Review Protocol (Auxiliary Pane)
+- **Mandatory File-First Saving**: Whenever drafting or updating markdown documents for user review and alignment (e.g. `spec.md`, `plan.md`, `implementation_plan.md`, ADRs, review reports):
   - The agent **MUST NEVER** output or print the full markdown document directly into the chat stream.
-  - The agent **MUST ALWAYS** first save the markdown file to disk (e.g. `conductor/tracks/<track_id>/spec.md`, `conductor/tracks/<track_id>/plan.md`, or artifact).
+  - The agent **MUST ALWAYS** first save the markdown file to disk (e.g. `plan.md`, `implementation_plan.md`, or artifact).
   - In chat, output **ONLY** a concise summary (2-5 bullet points) and a clickable markdown link (`file:///...`) inviting the user to review the document in the **Auxiliary Pane** in Antigravity 2.0.
 - **Mandatory Processing of Line Comments**:
   - The user will highlight lines and add inline comments in the Auxiliary Pane.
   - The agent **MUST** process every single line comment (`Selection:` / `Comment:`), update the file on disk accordingly, and request re-review until approved.
-
 
 ---
 
 ## 3. Implementation Standards (Implementace)
 
 ### 3.1 Strict Adherence to Implementation Plan
-- Strictly follow the steps and tasks laid out in the approved `plan.md`.
+- Strictly follow the approved implementation plan.
 - Do not introduce out-of-scope refactoring, speculative features, or unplanned dependencies.
-- If unexpected architectural obstacles or requirements appear during implementation, pause and present an updated plan to the user for approval.
+- If unexpected architectural obstacles or requirements appear during implementation, pause, update the plan, and present it to the user for approval.
 
-### 3.2 Clean Code & DRY (Don't Repeat Yourself)
-- **Zero Code Duplication**: Avoid code duplication across modules. Shared domain models, calculators, mathematical formulas, and interfaces belong strictly in `common`.
+### 3.2 Clean Code & Minimize Duplication (DRY)
+- **Minimize Duplication**: Actively eliminate duplicate logic across the entire codebase. Shared domain models, calculators, mathematical formulas, and interfaces belong strictly in `common`.
 - **SOLID Principles**: Keep classes, records, and methods small, focused, and adhering to the Single Responsibility Principle (SRP).
 - **Domain-Accurate Naming**: Use explicit, unambiguous names reflecting financial, market microstructure, and prediction market concepts (e.g. `CandleTwapState`, `TwapPoint`, `Timeframe`, `PriceSnapshot`).
 
-### 3.3 Zero Dead or Unused Code
+### 3.3 Zero Dead or Unused Code & Overloads
 - **Complete Cleanup**: After completing modifications, audit the codebase to ensure no dead, orphaned, or unreferenced code remains.
 - **No Unused Imports or Fields**: Remove all unused imports, unused private fields, and unreachable code branches.
-- **No Unused Method or Constructor Overloads**: There must be **NO** unused method or constructor overloads. If a method or constructor signature is changed, refactor all call sites across the entire project and delete obsolete overloads completely.
+- **No Unused Method or Constructor Overloads**: There must be **NO** unused method or constructor overloads left in the code. If a method or constructor signature is changed, refactor all call sites across the entire project and delete obsolete overloads completely.
 
 ### 3.4 No Backward Compatibility – Refactor the Entire Codebase
-- **Zero Legacy Compatibility Layers**: Never implement backward-compatibility wrappers, deprecation shims (`@Deprecated`), dual-path APIs, or fallback adapter layers.
-- **Full Codebase Refactoring**: When changing an interface, signature, domain contract, or configuration property, immediately refactor all call sites across all submodules (`common`, `trading`, `live`, `paper`, `backtest`), tests, and scripts to the new solution.
+- **Zero Legacy Compatibility Layers**: Never make changes backward-compatible. Do NOT create backward-compatibility wrappers, deprecation shims (`@Deprecated`), dual-path APIs, or fallback adapter layers.
+- **Full Codebase Refactoring**: Always refactor the entire codebase immediately to adopt the new solution uniformly across all submodules (`common`, `trading`, `live`, `paper`, `backtest`), tests, and scripts.
 
 ### 3.5 No Fallback Logic or Heuristics (Fail Fast)
 - **Exact Execution**: The solution must execute strictly according to specification.
-- **No Silent Fallbacks**: Never implement silent fallbacks to previous behavior, heuristic approximations, or swallowed exceptions to hide unexpected states.
-- **Fail Fast**: If inputs are invalid, exchange streams are corrupted, or invariant preconditions fail, throw an explicit, descriptive runtime exception immediately.
+- **No Fallbacks or Heuristics**: Do NOT create any fallback to previous functionality or other heuristics. The solution must work exactly as defined or throw an explicit, descriptive error immediately (fail-fast principle).
 
 ### 3.6 No Test-Only Methods in Production Code
-- **Production Code Integrity**: Production classes (`src/main/java`) must **NEVER** contain methods, getters, setters, constructors, or internal hooks whose only caller is a test class.
+- **Production Code Integrity**: Never create methods, getters, setters, constructors, or internal hooks in production code (`src/main/java`) that are only used in tests.
 - **Contract-Based Testing**: Test production classes strictly through their public contracts or clean package-private boundaries. Test fixtures, test doubles, and reflection helpers belong strictly in `src/test/java`.
 
 ### 3.7 Test-Driven Development (TDD)
 - Strictly follow TDD (Red-Green-Refactor) for every class, method, and component:
-  1. **Red**: Write a failing unit or component test asserting the intended functionality.
-  2. **Green**: Implement the minimal production code necessary to make the test pass.
+  1. **Red**: Before implementing any class, method, or component, define tests specifying the intended functionality.
+  2. **Green**: Implement the minimal production code necessary to make the tests pass.
   3. **Refactor**: Clean up the implementation, eliminate duplication, and verify all tests remain green.
-- Never write production code before its corresponding tests exist.
+- After implementation, all written tests must pass.
 
 ### 3.8 Constructor Injection for Dependency Injection
-- **Mandatory Constructor Injection**: Always use constructor injection (`@Inject public MyService(...)`) for all CDI beans and Quarkus components.
+- **Mandatory Constructor Injection**: Always prefer and use constructor injection (`@Inject public MyService(...)`) for all CDI beans and Quarkus components.
 - **Immutable Fields**: All injected dependencies must be assigned to `private final` fields.
 - **No Field Injection**: Field injection (`@Inject private SomeService svc;`) is **strictly forbidden**. Constructor injection guarantees immutability, thread-safety, and seamless unit testing without container reflection.
 
@@ -103,7 +97,7 @@ This document defines the strict, non-negotiable workflow and development protoc
   ```
 
 ### 4.2 Multi-Level Test Pyramid Execution
-- Execute and verify all levels of the testing pyramid before completing a task:
+- After implementation, verify complete functionality by running and passing tests across all levels:
   1. **Unit Tests**: Isolated unit tests validating domain math, calculators, and parsers (`JUnit 5`, `AssertJ`, `Mockito`).
   2. **Component & Integration Tests**: Quarkus component tests verifying caching, Vert.x event loops, and CDI wiring (`@QuarkusTest`, `Awaitility`).
   3. **API & WebSocket Tests**: REST endpoint tests (`RestAssured`) and WebSocket streaming tests (`quarkus-websockets-next`).
@@ -117,15 +111,15 @@ This document defines the strict, non-negotiable workflow and development protoc
 ## 5. Delivery & Git Protocol (Odevzdání)
 
 ### 5.1 Local Git Commit Only (STRICTLY NO GIT PUSH)
-- **Local Git Commit**: Stage all relevant modified, created, or deleted files cleanly and execute `git commit` after completing the task and verifying that all tests pass.
+- **Local Git Commit**: Stage all relevant modified, created, or deleted files cleanly and execute `git commit` to the local Git repository after completing the task and verifying that all tests pass.
 - **NEVER Perform Git Push**: The agent **MUST NEVER** execute `git push` under any circumstances.
 - **Manual Push by User**: Pushing commits to the remote repository is strictly reserved for the user after their review. Once the commit is created, inform the user that changes are committed locally and ready for their review and push.
 
-### 5.2 Commit Message Format with Conductor Track Identifier
-- Every commit message **MUST** explicitly start with the Conductor track identifier.
-- Format:
+### 5.2 Mandatory GitHub Ticket Number & Commit Message Format
+- **Mandatory GitHub Ticket**: Every commit message **MUST** explicitly start with the GitHub ticket number.
+- **Format**:
   ```
-  Resolves #<track-id> <Clear, imperative description of the changes>
+  Resolves #<ticket-id> <Clear, imperative description of the changes>
   ```
   *Example*: `Resolves #38 Implement Kraken fee schedule parser and Cucumber acceptance tests`
-- Use the identical track identifier for all subsequent commits, including bug fixes and review refinements, belonging to that track until a new track is started.
+- **Scope & Continuity**: Use the identical ticket number for every subsequent commit, including bug fixes and review refinements, in the same conversation until a new ticket number is given.
