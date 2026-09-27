@@ -15,13 +15,7 @@ This document defines the strict, non-negotiable workflow and development protoc
 
 ## 2. Planning Protocol (Plánování)
 
-- **Presentation Before Modification**: Before executing any source code changes or running modifying commands, the agent **MUST** author and present an implementation plan.
-- **Required Plan Content**:
-  - **Proposed Changes**: Exact list of files to modify or create and architectural rationale.
-  - **Open Questions**: Direct, concrete questions to resolve any ambiguity, underspecified requirements, or design decisions.
-  - **Verification Steps**: Step-by-step test commands across all test pyramid levels.
-- **Ticket Check**: If the GitHub ticket number was not provided in the prompt, request it explicitly in this phase.
-- **Mandatory Approval Barrier**: The agent **MUST STOP and wait for explicit user approval** of the plan before proceeding to the implementation phase.
+- **Presentation Before Modification**: Before executing any source code changes always use /plan command and present native Implementation Plan artifact to the user for the review
 
 ---
 
