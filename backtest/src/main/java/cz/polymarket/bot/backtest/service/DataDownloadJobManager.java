@@ -23,17 +23,20 @@ public class DataDownloadJobManager {
     private final BinanceAggTradesDownloader aggTradesDownloader;
     private final BinanceOrderBookDownloader orderBookDownloader;
     private final ExecutorService executorService;
+    private final ServerHaltTracker serverHaltTracker;
     private final Map<String, DownloadJob> jobs = new ConcurrentHashMap<>();
 
     @Inject
     public DataDownloadJobManager(
             BinanceAggTradesDownloader aggTradesDownloader,
             BinanceOrderBookDownloader orderBookDownloader,
-            ExecutorService executorService
+            ExecutorService executorService,
+            ServerHaltTracker serverHaltTracker
     ) {
         this.aggTradesDownloader = aggTradesDownloader;
         this.orderBookDownloader = orderBookDownloader;
         this.executorService = executorService;
+        this.serverHaltTracker = serverHaltTracker;
     }
 
     public DownloadJob submitJob(DownloadRequest request) {
@@ -58,6 +61,8 @@ public class DataDownloadJobManager {
                 job.jobId(), request.symbol(), request.startDate(), request.endDate());
 
         try {
+            serverHaltTracker.reset();
+
             for (DataType type : request.dataTypes()) {
                 switch (type) {
                     case SPOT_TRADES -> {

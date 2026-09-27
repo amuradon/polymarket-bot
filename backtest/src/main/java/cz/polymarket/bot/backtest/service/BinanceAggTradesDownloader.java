@@ -12,6 +12,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -20,6 +22,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -33,18 +36,21 @@ public class BinanceAggTradesDownloader {
     private final String spotTradesUrl;
     private final String futuresTradesUrl;
     private final HttpClient httpClient;
+    private final ServerHaltTracker serverHaltTracker;
 
     @Inject
     public BinanceAggTradesDownloader(
             @ConfigProperty(name = "polymarket.data.base-dir") String baseDir,
             @ConfigProperty(name = "polymarket.data.binance.spot-trades-url") String spotTradesUrl,
             @ConfigProperty(name = "polymarket.data.binance.futures-trades-url") String futuresTradesUrl,
-            HttpClient httpClient
+            HttpClient httpClient,
+            ServerHaltTracker serverHaltTracker
     ) {
         this.basePath = Path.of(baseDir);
         this.spotTradesUrl = spotTradesUrl;
         this.futuresTradesUrl = futuresTradesUrl;
         this.httpClient = httpClient;
+        this.serverHaltTracker = serverHaltTracker;
     }
 
     public DownloadResult downloadSpotTrades(String symbol, LocalDate startDate, LocalDate endDate) {
@@ -84,13 +90,21 @@ public class BinanceAggTradesDownloader {
             String csvFilename = symbol + "-aggTrades-" + dateStr + ".csv";
             Path targetCsv = targetDir.resolve(csvFilename);
 
+            if (serverHaltTracker.isHalted(baseUrl)) {
+                String haltReason = serverHaltTracker.getHaltReason(baseUrl).orElse("Server halted");
+                LOG.warnf("Skipping %s aggTrades download for %s %s: %s", market, symbol, dateStr, haltReason);
+                skipped++;
+                current = current.plusDays(1);
+                continue;
+            }
+
             if (Files.exists(targetCsv)) {
                 LOG.infof("File %s already exists, skipping download.", targetCsv);
                 skipped++;
             } else {
                 String zipUrl = baseUrl + "/" + symbol + "/" + symbol + "-aggTrades-" + dateStr + ".zip";
                 try {
-                    FetchResult res = fetchAndExtractZip(zipUrl, targetCsv, csvFilename);
+                    FetchResult res = fetchAndExtractZip(market, symbol, dateStr, zipUrl, targetCsv, csvFilename);
                     if (res.success()) {
                         downloaded++;
                     } else {
@@ -99,7 +113,8 @@ public class BinanceAggTradesDownloader {
                     }
                 } catch (Exception e) {
                     failed++;
-                    String err = "Error downloading " + zipUrl + ": " + e.getMessage();
+                    String err = String.format("Error downloading %s aggTrades for %s %s (URL: %s): %s",
+                            market, symbol, dateStr, zipUrl, e.getMessage());
                     LOG.error(err, e);
                     errors.add(err);
                 }
@@ -113,32 +128,65 @@ public class BinanceAggTradesDownloader {
 
     private record FetchResult(boolean success, String error) {}
 
-    private FetchResult fetchAndExtractZip(String zipUrl, Path targetCsv, String expectedCsvName)
-            throws IOException, InterruptedException {
+    private FetchResult fetchAndExtractZip(
+            String market,
+            String symbol,
+            String dateStr,
+            String zipUrl,
+            Path targetCsv,
+            String expectedCsvName
+    ) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(zipUrl))
                 .timeout(Duration.ofSeconds(30))
                 .GET()
                 .build();
 
-        HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        } catch (HttpTimeoutException e) {
+            String err = String.format("Timeout downloading %s aggTrades for %s %s (URL: %s after 30s): %s",
+                    market, symbol, dateStr, zipUrl, e.getMessage());
+            LOG.error(err);
+            return new FetchResult(false, err);
+        }
+
         int statusCode = response.statusCode();
 
+        if (statusCode == 429) {
+            String bodyStr = response.body() != null && response.body().length > 0
+                    ? new String(response.body(), StandardCharsets.UTF_8)
+                    : "<empty body>";
+            Optional<String> retryAfter = response.headers().firstValue("Retry-After");
+            String retryAfterInfo = retryAfter.map(s -> " (Retry-After: " + s + ")").orElse("");
+            String err = String.format("HTTP 429 Too Many Requests downloading %s aggTrades for %s %s (URL: %s)%s: %s",
+                    market, symbol, dateStr, zipUrl, retryAfterInfo, bodyStr);
+            LOG.error(err);
+            serverHaltTracker.haltServer(zipUrl, "HTTP 429 Too Many Requests" + retryAfterInfo);
+            return new FetchResult(false, err);
+        }
+
         if (statusCode == 404) {
-            String msg = "Archive not found (HTTP 404): " + zipUrl;
+            String msg = String.format("Archive not found (HTTP 404) for %s %s (%s): %s", symbol, dateStr, market, zipUrl);
             LOG.warn(msg);
             return new FetchResult(false, msg);
         }
 
         if (statusCode != 200) {
-            String msg = "Failed to download " + zipUrl + ": HTTP status " + statusCode;
+            String bodyStr = response.body() != null && response.body().length > 0
+                    ? new String(response.body(), StandardCharsets.UTF_8)
+                    : "<empty body>";
+            String msg = String.format("HTTP %d error downloading %s aggTrades for %s %s (URL: %s): %s",
+                    statusCode, market, symbol, dateStr, zipUrl, bodyStr);
             LOG.error(msg);
             return new FetchResult(false, msg);
         }
 
         byte[] body = response.body();
         if (body == null || body.length == 0) {
-            String msg = "Empty response body for " + zipUrl;
+            String msg = String.format("Empty response body (HTTP 200) for %s aggTrades %s %s: %s",
+                    market, symbol, dateStr, zipUrl);
             LOG.error(msg);
             return new FetchResult(false, msg);
         }
@@ -161,7 +209,8 @@ public class BinanceAggTradesDownloader {
 
         if (!extracted) {
             Files.deleteIfExists(partFile);
-            String msg = "No matching CSV entry found inside archive " + zipUrl;
+            String msg = String.format("No matching CSV entry found inside archive for %s %s: %s",
+                    symbol, dateStr, zipUrl);
             LOG.error(msg);
             return new FetchResult(false, msg);
         }

@@ -10,17 +10,22 @@ import org.mockito.Mockito;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,16 +35,19 @@ class BinanceOrderBookDownloaderTest {
     Path tempDir;
 
     private HttpClient mockHttpClient;
+    private ServerHaltTracker serverHaltTracker;
     private BinanceOrderBookDownloader downloader;
 
     @BeforeEach
     void setUp() {
         mockHttpClient = Mockito.mock(HttpClient.class);
+        serverHaltTracker = new ServerHaltTracker();
         downloader = new BinanceOrderBookDownloader(
                 tempDir.toString(),
                 "https://api.cryptohftdata.com/v1",
                 Optional.of("test-api-key"),
-                mockHttpClient
+                mockHttpClient,
+                serverHaltTracker
         );
     }
 
@@ -124,6 +132,83 @@ class BinanceOrderBookDownloaderTest {
         // 404 is normal for hours without trades or missing objects in cryptohftdata
         assertThat(result.downloaded()).isEqualTo(0);
         assertThat(result.skipped()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldHaltServerAndSkipRemainingOnHttp429() throws Exception {
+        String symbol = "BTCUSDT";
+        LocalDate date = LocalDate.of(2026, 8, 1);
+        byte[] body = "{\"error\":\"rate_limited\",\"message\":\"Too many requests\"}".getBytes(StandardCharsets.UTF_8);
+
+        HttpResponse<byte[]> mockResponse = Mockito.mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(429);
+        when(mockResponse.body()).thenReturn(body);
+        HttpHeaders headers = HttpHeaders.of(Map.of("Retry-After", List.of("60")), (k, v) -> true);
+        when(mockResponse.headers()).thenReturn(headers);
+
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        // Download full day (24 hours): hour 0 should hit 429, hours 1..23 must be skipped without HTTP requests
+        DownloadResult result = downloader.downloadOrderBook(symbol, date, date);
+
+        assertThat(result.downloaded()).isEqualTo(0);
+        assertThat(result.failed()).isEqualTo(1);
+        assertThat(result.skipped()).isEqualTo(23);
+        assertThat(result.errors()).hasSize(1);
+        assertThat(result.errors().get(0))
+                .contains("HTTP 429 Too Many Requests")
+                .contains("Retry-After: 60")
+                .contains("rate_limited");
+
+        // The HTTP client should only be called once (for hour 0), not for hours 1..23!
+        verify(mockHttpClient, times(1)).send(any(), any());
+        assertThat(serverHaltTracker.isHalted("https://api.cryptohftdata.com/v1")).isTrue();
+        assertThat(serverHaltTracker.isHalted("api.cryptohftdata.com")).isTrue();
+    }
+
+    @Test
+    void shouldLogAndRecordTimeout() throws Exception {
+        String symbol = "BTCUSDT";
+        LocalDate date = LocalDate.of(2026, 8, 1);
+
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenThrow(new HttpTimeoutException("request timed out"));
+
+        DownloadResult result = downloader.downloadOrderBookHour(symbol, date, 7);
+
+        assertThat(result.downloaded()).isEqualTo(0);
+        assertThat(result.skipped()).isEqualTo(0);
+        assertThat(result.failed()).isEqualTo(1);
+        assertThat(result.errors()).hasSize(1);
+        assertThat(result.errors().get(0))
+                .contains("Timeout")
+                .contains("30s")
+                .contains("hour 07");
+    }
+
+    @Test
+    void shouldLogAndRecordHttp500WithResponseBody() throws Exception {
+        String symbol = "BTCUSDT";
+        LocalDate date = LocalDate.of(2026, 8, 1);
+        byte[] body = "Internal Server Error Occurred".getBytes(StandardCharsets.UTF_8);
+
+        HttpResponse<byte[]> mockResponse = Mockito.mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(500);
+        when(mockResponse.body()).thenReturn(body);
+
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        DownloadResult result = downloader.downloadOrderBookHour(symbol, date, 8);
+
+        assertThat(result.downloaded()).isEqualTo(0);
+        assertThat(result.failed()).isEqualTo(1);
+        assertThat(result.errors()).hasSize(1);
+        assertThat(result.errors().get(0))
+                .contains("HTTP 500")
+                .contains("Internal Server Error Occurred")
+                .contains("hour 08");
     }
 
     private byte[] compressZstd(byte[] data) throws IOException {

@@ -5,6 +5,7 @@ import cz.polymarket.bot.backtest.data.DownloadJob;
 import cz.polymarket.bot.backtest.service.BinanceAggTradesDownloader;
 import cz.polymarket.bot.backtest.service.BinanceOrderBookDownloader;
 import cz.polymarket.bot.backtest.service.DataDownloadJobManager;
+import cz.polymarket.bot.backtest.service.ServerHaltTracker;
 import cz.polymarket.bot.backtest.web.DataDownloadResource;
 import cz.polymarket.bot.backtest.web.DataDownloadResource.DownloadApiRequest;
 import io.cucumber.java.en.Given;
@@ -52,21 +53,25 @@ public class DataDownloadSteps {
         mockHttpClient = Mockito.mock(HttpClient.class);
         executorService = Executors.newVirtualThreadPerTaskExecutor();
 
+        ServerHaltTracker serverHaltTracker = new ServerHaltTracker();
+
         BinanceAggTradesDownloader aggTradesDownloader = new BinanceAggTradesDownloader(
                 tempBaseDir.toString(),
                 "https://data.binance.vision/data/spot/daily/aggTrades",
                 "https://data.binance.vision/data/futures/um/daily/aggTrades",
-                mockHttpClient
+                mockHttpClient,
+                serverHaltTracker
         );
 
         BinanceOrderBookDownloader orderBookDownloader = new BinanceOrderBookDownloader(
                 tempBaseDir.toString(),
                 "https://api.cryptohftdata.com/v1",
                 Optional.of("test-key"),
-                mockHttpClient
+                mockHttpClient,
+                serverHaltTracker
         );
 
-        jobManager = new DataDownloadJobManager(aggTradesDownloader, orderBookDownloader, executorService);
+        jobManager = new DataDownloadJobManager(aggTradesDownloader, orderBookDownloader, executorService, serverHaltTracker);
         resource = new DataDownloadResource(jobManager);
     }
 

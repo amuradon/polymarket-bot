@@ -24,16 +24,19 @@ class DataDownloadJobManagerTest {
 
     private BinanceAggTradesDownloader aggTradesDownloader;
     private BinanceOrderBookDownloader orderBookDownloader;
+    private ServerHaltTracker serverHaltTracker;
     private DataDownloadJobManager jobManager;
 
     @BeforeEach
     void setUp() {
         aggTradesDownloader = Mockito.mock(BinanceAggTradesDownloader.class);
         orderBookDownloader = Mockito.mock(BinanceOrderBookDownloader.class);
+        serverHaltTracker = new ServerHaltTracker();
         jobManager = new DataDownloadJobManager(
                 aggTradesDownloader,
                 orderBookDownloader,
-                Executors.newSingleThreadExecutor()
+                Executors.newSingleThreadExecutor(),
+                serverHaltTracker
         );
     }
 
@@ -64,6 +67,38 @@ class DataDownloadJobManagerTest {
         assertThat(job.completedAt()).isNotNull();
 
         assertThat(jobManager.getJob(job.jobId())).contains(job);
+    }
+
+    @Test
+    void shouldContinueWithOtherServerWhenOneServerHaltedOnHttp429() {
+        String symbol = "BTCUSDT";
+        LocalDate start = LocalDate.of(2026, 8, 1);
+        LocalDate end = LocalDate.of(2026, 8, 1);
+
+        // OrderBook server returns 429: 1 failed, 23 skipped
+        when(orderBookDownloader.downloadOrderBook(eq(symbol), eq(start), eq(end)))
+                .thenReturn(new DownloadResult(0, 23, 1, List.of("HTTP 429 Too Many Requests: Rate limit exceeded")));
+
+        // Spot trades from other server (Binance vision) succeeds: 1 downloaded
+        when(aggTradesDownloader.downloadSpotTrades(eq(symbol), eq(start), eq(end)))
+                .thenReturn(new DownloadResult(1, 0, 0, List.of()));
+
+        DownloadRequest request = DownloadRequest.of(
+                "BTCUSDT",
+                "2026-08-01",
+                "2026-08-01",
+                Set.of(DataType.SPOT_TRADES, DataType.ORDER_BOOK)
+        );
+        DownloadJob job = jobManager.submitJob(request);
+
+        await().untilAsserted(() -> assertThat(job.status()).isEqualTo(DownloadJobStatus.COMPLETED));
+
+        // Both servers executed: orderbook was rate-limited and skipped, spot trades succeeded
+        assertThat(job.downloadedFiles()).isEqualTo(1);
+        assertThat(job.skippedFiles()).isEqualTo(23);
+        assertThat(job.failedFiles()).isEqualTo(1);
+        assertThat(job.errors()).hasSize(1);
+        assertThat(job.errors().get(0)).contains("HTTP 429 Too Many Requests");
     }
 
     @Test
