@@ -43,7 +43,6 @@ The project is structured as a Maven Multi-Module project with 5 submodules:
 
 ### Testing & QA
 - **JUnit 5 / QuarkusTest**: Unit, integration, and reactive resource testing.
-- **Cucumber (BDD)**: Gherkin feature specifications (`twap.feature`) validating TWAP calculations and business requirements.
 - **AssertJ & Awaitility**: Fluent assertions and asynchronous polling assertions for WebSocket/concurrent flows.
 - **Mockito**: Mocking external services and HTTP endpoints.
 - **pytest**: Automated unit testing for Python tooling.

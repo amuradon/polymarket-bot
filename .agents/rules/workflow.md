@@ -15,33 +15,13 @@ This document defines the strict, non-negotiable workflow and development protoc
 
 ## 2. Planning Protocol (Plánování)
 
-### 2.1 Implementation Plan & Approval Barrier
 - **Presentation Before Modification**: Before executing any source code changes or running modifying commands, the agent **MUST** author and present an implementation plan.
 - **Required Plan Content**:
   - **Proposed Changes**: Exact list of files to modify or create and architectural rationale.
   - **Open Questions**: Direct, concrete questions to resolve any ambiguity, underspecified requirements, or design decisions.
-  - **Cucumber Acceptance Scenarios**: Gherkin test scenarios defining the acceptance criteria.
   - **Verification Steps**: Step-by-step test commands across all test pyramid levels.
 - **Ticket Check**: If the GitHub ticket number was not provided in the prompt, request it explicitly in this phase.
 - **Mandatory Approval Barrier**: The agent **MUST STOP and wait for explicit user approval** of the plan before proceeding to the implementation phase.
-
-### 2.2 Define Cucumber Acceptance Tests During Planning
-- **Acceptance Criteria as Gherkin Features**: During the planning phase, the agent **MUST** define concrete Cucumber (Gherkin) acceptance scenarios *before* any production code is implemented.
-- **Location**: Feature files must be created or updated under the appropriate module's test resources (e.g. `trading/src/test/resources/features/<feature-name>.feature`).
-- **Standard Syntax**: Scenarios must use clear `Given - When - Then - And` syntax to specify:
-  - Normal / happy-path user and system behaviors
-  - Boundary conditions and financial edge cases
-  - Error and exceptional scenarios (fail-fast behavior)
-- **Step Definitions & Fixtures**: The implementation plan must explicitly list the creation or extension of step definitions (e.g. `*Steps.java`) and test harnesses (`RunCucumberTest`).
-
-### 2.3 File-First Document Review Protocol (Auxiliary Pane)
-- **Mandatory File-First Saving**: Whenever drafting or updating markdown documents for user review and alignment (e.g. `spec.md`, `plan.md`, `implementation_plan.md`, ADRs, review reports):
-  - The agent **MUST NEVER** output or print the full markdown document directly into the chat stream.
-  - The agent **MUST ALWAYS** first save the markdown file to disk (e.g. `plan.md`, `implementation_plan.md`, or artifact).
-  - In chat, output **ONLY** a concise summary (2-5 bullet points) and a clickable markdown link (`file:///...`) inviting the user to review the document in the **Auxiliary Pane** in Antigravity 2.0.
-- **Mandatory Processing of Line Comments**:
-  - The user will highlight lines and add inline comments in the Auxiliary Pane.
-  - The agent **MUST** process every single line comment (`Selection:` / `Comment:`), update the file on disk accordingly, and request re-review until approved.
 
 ---
 
@@ -102,8 +82,6 @@ This document defines the strict, non-negotiable workflow and development protoc
   2. **Component & Integration Tests**: Quarkus component tests verifying caching, Vert.x event loops, and CDI wiring (`@QuarkusTest`, `Awaitility`).
   3. **API & WebSocket Tests**: REST endpoint tests (`RestAssured`) and WebSocket streaming tests (`quarkus-websockets-next`).
   4. **UI Tests**: Web interface rendering, Qute templates, and chart component bindings.
-  5. **Cucumber BDD Acceptance Tests**: End-to-end acceptance scenarios via `RunCucumberTest`.
-  6. **Python Script Tests**: Verification of offline data tools via `python -m unittest discover tests`.
 - **100% Pass Requirement**: Every single test across all levels must pass (0 failures, 0 errors, 0 broken tests).
 
 ---
@@ -121,5 +99,5 @@ This document defines the strict, non-negotiable workflow and development protoc
   ```
   Resolves #<ticket-id> <Clear, imperative description of the changes>
   ```
-  *Example*: `Resolves #38 Implement Kraken fee schedule parser and Cucumber acceptance tests`
+  *Example*: `Resolves #38 Implement Kraken fee schedule parser and unit tests`
 - **Scope & Continuity**: Use the identical ticket number for every subsequent commit, including bug fixes and review refinements, in the same conversation until a new ticket number is given.

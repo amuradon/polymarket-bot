@@ -26,7 +26,6 @@
         <quarkus.platform.version>3.39.2</quarkus.platform.version>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
         <jandex-plugin.version>3.2.7</jandex-plugin.version>
-        <cucumber.version>7.21.1</cucumber.version>
         <assertj.version>3.27.3</assertj.version>
         <awaitility.version>4.2.2</awaitility.version>
         <mockito.version>5.15.2</mockito.version>
@@ -71,18 +70,6 @@
                 <groupId>org.mockito</groupId>
                 <artifactId>mockito-core</artifactId>
                 <version>${mockito.version}</version>
-                <scope>test</scope>
-            </dependency>
-            <dependency>
-                <groupId>io.cucumber</groupId>
-                <artifactId>cucumber-java</artifactId>
-                <version>${cucumber.version}</version>
-                <scope>test</scope>
-            </dependency>
-            <dependency>
-                <groupId>io.cucumber</groupId>
-                <artifactId>cucumber-junit-platform-engine</artifactId>
-                <version>${cucumber.version}</version>
                 <scope>test</scope>
             </dependency>
         </dependencies>
