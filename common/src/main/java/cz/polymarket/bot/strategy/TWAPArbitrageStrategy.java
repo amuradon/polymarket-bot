@@ -53,6 +53,39 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private volatile boolean trailingStopArmed = false;
     private volatile boolean positionClosed = false;
     private volatile String activeClientOrderId = null;
+    private volatile double currentBasisBps = 0.0;
+    private volatile double distTwapOverride = 0.0;
+
+    public void setCurrentBasisBps(double basisBps) {
+        this.currentBasisBps = basisBps;
+    }
+
+    public void setDistTwapOverride(double distTwapOverride) {
+        this.distTwapOverride = distTwapOverride;
+    }
+
+    @Override
+    public void reset() {
+        candleHistory.clear();
+        activeCandleStart.set(0);
+        activeCandleEnd.set(0);
+        twapOpenPrice = 0.0;
+        currentSpotPrice = 0.0;
+        currentTimestampSec = 0;
+        currentBasisBps = 0.0;
+        distTwapOverride = 0.0;
+        phase1Evaluated = false;
+        phase2Evaluated = false;
+        hasPosition = false;
+        positionSide = TradeDirection.NO_TRADE;
+        entryPrice = 0.0;
+        sizeUsd = 0.0;
+        shares = 0.0;
+        maxObservedPrice = 0.0;
+        trailingStopArmed = false;
+        positionClosed = false;
+        activeClientOrderId = null;
+    }
 
     @Inject
     public TWAPArbitrageStrategy(
@@ -193,6 +226,9 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         phase1Evaluated = true;
 
         List<MarketCandle> history = Collections.unmodifiableList(new ArrayList<>(candleHistory));
+        if (history.size() < 4) {
+            return;
+        }
         VwapCalculator.VwapResult vwapRes = vwapCalculator.calculate(history, currentSpotPrice);
         double vol4h = volCalculator.calculate4hRealizedVolatility(history);
         boolean isLowVol = volCalculator.isVolatilityTooLow(vol4h);
@@ -200,13 +236,15 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         double spotDelta = 0.0;
         double futDelta = 0.0;
         double futH1Delta = 0.0;
-        double basisBps = 0.0;
+        double basisBps = (currentBasisBps != 0.0) ? currentBasisBps : 0.0;
 
         if (!history.isEmpty()) {
             MarketCandle last = history.get(history.size() - 1);
             spotDelta = last.spotDeltaBtc();
             futDelta = last.futuresDeltaBtc();
-            basisBps = last.basisOpenBps();
+            if (basisBps == 0.0) {
+                basisBps = last.basisOpenBps();
+            }
 
             int h1Start = Math.max(0, history.size() - 4);
             for (int i = h1Start; i < history.size(); i++) {
@@ -214,13 +252,17 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
             }
         }
 
+        double distTwap = (distTwapOverride != 0.0)
+                ? distTwapOverride
+                : ((twapOpenPrice > 0.0) ? (currentSpotPrice - twapOpenPrice) : 0.0);
+
         StrategySignal signal = probabilityModel.evaluate(
                 vwapRes.zScore(),
                 spotDelta,
                 futDelta,
                 futH1Delta,
                 basisBps,
-                0.0, // distTwap = 0 at phase 1
+                distTwap,
                 quote.bestAskUp(),
                 quote.bestAskDown(),
                 quote.estimatedFillPriceUp(),
