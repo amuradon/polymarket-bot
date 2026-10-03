@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Bot :: Paper Trading</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #1e293b;
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --green: #22c55e;
+            --green-bg: rgba(34, 197, 94, 0.15);
+            --red: #ef4444;
+            --red-bg: rgba(239, 68, 68, 0.15);
+            --blue: #3b82f6;
+            --blue-bg: rgba(59, 130, 246, 0.15);
+            --orange: #f59e0b;
+            --orange-bg: rgba(245, 158, 11, 0.15);
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: var(--font-family);
+            line-height: 1.5;
+            padding: 24px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-secondary);
+            padding: 16px 24px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 24px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-live {
+            background: var(--green-bg);
+            color: var(--green);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-strategy {
+            background: var(--blue-bg);
+            color: var(--blue);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .badge-up {
+            background: var(--green-bg);
+            color: var(--green);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-down {
+            background: var(--red-bg);
+            color: var(--red);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge-armed {
+            background: var(--orange-bg);
+            color: var(--orange);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 14px;
+        }
+
+        .header-stat {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value-large {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .metric-card .title {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .metric-card .value {
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        .metric-card .subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .text-green { color: var(--green); }
+        .text-red { color: var(--red); }
+        .text-blue { color: var(--blue); }
+        .text-orange { color: var(--orange); }
+
+        .section-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .position-box {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .pos-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .pos-item .pos-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .pos-item .pos-val {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 12px 14px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.04em;
+        }
+
+        td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .no-data {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 32px;
+            font-style: italic;
+        }
+
+        .refresh-btn {
+            background: #334155;
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .refresh-btn:hover {
+            background: #475569;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-left">
+            <h1>Polymarket Bot :: Paper Trading</h1>
+            <span class="badge badge-strategy">{strategyName}</span>
+            <span class="badge badge-live">● {status}</span>
+        </div>
+        <div class="header-right">
+            <div class="header-stat">
+                <span class="stat-label">Order Latency</span>
+                <span class="stat-value-large text-orange">{latencyMs} ms</span>
+            </div>
+            <div class="header-stat">
+                <span class="stat-label">Initial Capital</span>
+                <span class="stat-value-large">${initialCapital}</span>
+            </div>
+            <div class="header-stat">
+                <span class="stat-label">Current Balance</span>
+                <span class="stat-value-large {#if currentBalance >= initialCapital}text-green{#else}text-red{/if}">
+                    ${currentBalance}
+                </span>
+            </div>
+            <button class="refresh-btn" onclick="window.location.reload()">⟳ Refresh</button>
+        </div>
+    </header>
+
+    <!-- Metrics Overview Grid -->
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <span class="title">Total Trades</span>
+            <span class="value">{metrics.totalTrades}</span>
+            <span class="subtitle">{metrics.winningTrades} Wins / {metrics.losingTrades} Losses</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Win Rate</span>
+            <span class="value {#if metrics.winRatePct >= 50}text-green{#else}text-orange{/if}">
+                {metrics.winRatePct}%
+            </span>
+            <span class="subtitle">Threshold: 50.0%</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Total Net PnL</span>
+            <span class="value {#if metrics.totalNetPnl >= 0}text-green{#else}text-red{/if}">
+                ${metrics.totalNetPnl}
+            </span>
+            <span class="subtitle">Gross: ${metrics.grossPnl}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Profit Factor</span>
+            <span class="value {#if metrics.profitFactor >= 1}text-green{#else}text-blue{/if}">
+                {metrics.profitFactor}
+            </span>
+            <span class="subtitle">G-Profit: ${metrics.grossProfit}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Max Drawdown</span>
+            <span class="value text-red">${metrics.maxDrawdownUsd}</span>
+            <span class="subtitle">{metrics.maxDrawdownPct}% from peak</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">EV Per Trade</span>
+            <span class="value {#if metrics.expectedValuePerTrade >= 0}text-green{#else}text-red{/if}">
+                ${metrics.expectedValuePerTrade}
+            </span>
+            <span class="subtitle">Expectancy</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Sharpe / Sortino</span>
+            <span class="value">{metrics.sharpeRatio} / {metrics.sortinoRatio}</span>
+            <span class="subtitle">Brier Score: {metrics.brierScore}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Total Fees</span>
+            <span class="value text-orange">${metrics.totalFees}</span>
+            <span class="subtitle">7% Polymarket formula</span>
+        </div>
+    </div>
+
+    <!-- Active Open Position Section -->
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Active Position</span>
+            {#if activePosition != null}
+                <span class="badge {#if activePosition.side == 'UP'}badge-up{#else}badge-down{/if}">{activePosition.side}</span>
+            {#else}
+                <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-secondary);">IDLE</span>
+            {/if}
+        </div>
+        {#if activePosition != null}
+            <div class="position-box">
+                <div class="pos-item">
+                    <span class="pos-label">Order ID</span>
+                    <span class="pos-val">{activePosition.clientOrderId}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Side</span>
+                    <span class="pos-val {#if activePosition.side == 'UP'}text-green{#else}text-red{/if}">{activePosition.side}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Entry Price</span>
+                    <span class="pos-val">${activePosition.entryPrice}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Size (USD)</span>
+                    <span class="pos-val">${activePosition.sizeUsd}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Shares</span>
+                    <span class="pos-val">{activePosition.shares}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Entry Fee</span>
+                    <span class="pos-val text-orange">${activePosition.entryFee}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Trailing Stop</span>
+                    <span class="pos-val">
+                        {#if activePosition.trailingStopArmed}
+                            <span class="badge badge-armed">ARMED (+0.05 locked)</span>
+                        {#else}
+                            <span style="color: var(--text-secondary);">Pending (+0.14)</span>
+                        {/if}
+                    </span>
+                </div>
+            </div>
+        {#else}
+            <div class="no-data">
+                No active position. Strategy '{strategyName}' is monitoring 15m candle TWAP opportunities.
+            </div>
+        {/if}
+    </div>
+
+    <!-- Trade History Table -->
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Execution History ({trades.size} Trades)</span>
+            <a href="/api/paper/trades" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Raw JSON ↗</a>
+        </div>
+        {#if trades.isEmpty}
+            <div class="no-data">
+                No paper trades recorded yet. As orders execute, trades will be appended here and saved to trades.jsonl.
+            </div>
+        {#else}
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Time (UTC)</th>
+                        <th>Side</th>
+                        <th>Entry Price</th>
+                        <th>Exit Price</th>
+                        <th>Size (USD)</th>
+                        <th>Fee (USD)</th>
+                        <th>Net PnL</th>
+                        <th>Result</th>
+                        <th>Exit Reason</th>
+                        <th>Balance</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for trade in trades}
+                        <tr>
+                            <td>{trade_iteration}</td>
+                            <td>{trade.entryTimeUtc}</td>
+                            <td>
+                                <span class="badge {#if trade.side == 'UP'}badge-up{#else}badge-down{/if}">{trade.side}</span>
+                            </td>
+                            <td>${trade.entryPrice}</td>
+                            <td>${trade.exitPrice}</td>
+                            <td>${trade.sizeUsd}</td>
+                            <td class="text-orange">${trade.feeUsd}</td>
+                            <td class="{#if trade.isWin}text-green{#else}text-red{/if}">
+                                ${trade.netPnl}
+                            </td>
+                            <td>
+                                {#if trade.isWin}
+                                    <span class="badge badge-up">WIN</span>
+                                {#else}
+                                    <span class="badge badge-down">LOSS</span>
+                                {/if}
+                            </td>
+                            <td style="color: var(--text-secondary);">{trade.exitReason}</td>
+                            <td><strong>${trade.balanceAfterTrade}</strong></td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+</div>
+
+<script>
+    // Auto-refresh every 10 seconds if page is visible
+    setInterval(() => {
+        if (!document.hidden) {
+            window.location.reload();
+        }
+    }, 10000);
+</script>
+</body>
+</html>
