@@ -12,6 +12,9 @@ import static org.hamcrest.Matchers.notNullValue;
 @QuarkusTest
 class PaperDashboardResourceTest {
 
+    @jakarta.inject.Inject
+    cz.polymarket.bot.paper.storage.PaperTradeRepository repository;
+
     @Test
     void shouldServeDashboardOnRootPath() {
         given()
@@ -24,6 +27,37 @@ class PaperDashboardResourceTest {
                 .body(containsString("Initial Capital"))
                 .body(containsString("Current Balance"))
                 .body(containsString("Execution History"));
+    }
+
+    @Test
+    void shouldServeDashboardWithRecordedTradesOnRootPath() {
+        repository.recordTrade(new cz.polymarket.bot.domain.TradeRecord(
+                "2026-10-04T12:00:00Z",
+                1728043200L,
+                cz.polymarket.bot.strategy.TradeDirection.UP,
+                0.60,
+                0.70,
+                300.0,
+                500.0,
+                4.5,
+                45.5,
+                "Take Profit (0.70)",
+                0.75,
+                0.60,
+                0.15,
+                true,
+                10045.5
+        ));
+
+        given()
+                .when().get("/")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.HTML)
+                .body(containsString("Polymarket Bot :: Paper Trading"))
+                .body(containsString("WIN"))
+                .body(containsString("Take Profit (0.70)"))
+                .body(containsString("$10045.5"));
     }
 
     @Test

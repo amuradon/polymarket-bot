@@ -433,7 +433,7 @@
                     <tbody>
                     {#for trade in trades}
                         <tr>
-                            <td>{trade_iteration}</td>
+                            <td>{trade_count}</td>
                             <td>{trade.entryTimeUtc}</td>
                             <td>
                                 <span class="badge {#if trade.side == 'UP'}badge-up{#else}badge-down{/if}">{trade.side}</span>
