@@ -43,4 +43,29 @@ class BinanceHistoricalClientTest {
         assertThat(klines.get(1788437619L)).isEqualByComparingTo("78032.17");
         assertThat(klines.get(1788437620L)).isEqualByComparingTo("78032.16");
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldFetchAndParse15mKlines() throws Exception {
+        HttpClient httpClient = mock(HttpClient.class);
+        HttpResponse<String> httpResponse = mock(HttpResponse.class);
+
+        String sampleKlines = """
+                [
+                  [1700000000000,"90000.00","90500.00","89900.00","90200.00","10.00000000",1700000899999,"902000.00000000",150,"7.00000000","631400.00000000","0"]
+                ]
+                """;
+
+        when(httpResponse.statusCode()).thenReturn(200);
+        when(httpResponse.body()).thenReturn(sampleKlines);
+        when(httpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenReturn(httpResponse);
+
+        ExchangePayloadParser parser = new ExchangePayloadParser(new ObjectMapper());
+        BinanceHistoricalClient client = new BinanceHistoricalClient("https://api.binance.com/api/v3", parser, httpClient);
+
+        var candles = client.fetch15mKlines(24);
+        assertThat(candles).hasSize(1);
+        assertThat(candles.get(0).spotClose()).isEqualTo(90200.0);
+        assertThat(candles.get(0).spotDeltaBtc()).isEqualTo(4.0);
+    }
 }

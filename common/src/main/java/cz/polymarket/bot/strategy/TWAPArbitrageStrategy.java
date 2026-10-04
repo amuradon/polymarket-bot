@@ -55,6 +55,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private volatile String activeClientOrderId = null;
     private volatile double currentBasisBps = 0.0;
     private volatile double distTwapOverride = 0.0;
+    private volatile boolean isLateArbPosition = false;
 
     public void setCurrentBasisBps(double basisBps) {
         this.currentBasisBps = basisBps;
@@ -74,6 +75,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         currentTimestampSec = 0;
         currentBasisBps = 0.0;
         distTwapOverride = 0.0;
+        isLateArbPosition = false;
         phase1Evaluated = false;
         phase2Evaluated = false;
         hasPosition = false;
@@ -120,8 +122,18 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     }
 
     @Override
+    public Timeframe getTimeframe() {
+        return Timeframe.FIFTEEN_MINUTES;
+    }
+
+    @Override
     public void onTwapUpdate(TwapUpdate update) {
         if (update == null) {
+            return;
+        }
+
+        // Only process updates corresponding to the strategy's target 15m timeframe
+        if (update.timeframe() != null && update.timeframe() != Timeframe.FIFTEEN_MINUTES) {
             return;
         }
 
@@ -141,6 +153,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
             trailingStopArmed = false;
             positionClosed = false;
             activeClientOrderId = null;
+            isLateArbPosition = false;
         }
 
         if (update.openPrice() != null) {
@@ -271,6 +284,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         );
 
         if (signal.isTrade()) {
+            this.isLateArbPosition = false;
             submitEntryOrder(signal);
         }
     }
@@ -295,11 +309,17 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         );
 
         if (signal.isTrade()) {
+            this.isLateArbPosition = true;
             submitEntryOrder(signal);
         }
     }
 
     private void evaluatePositionExit(OrderBookQuote quote) {
+        if (isLateArbPosition) {
+            // According to Iteration 20: late arbitrations are held to resolution (payout 1.00 USD)
+            return;
+        }
+
         double currentPrice = (positionSide == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
         if (currentPrice > maxObservedPrice) {
             maxObservedPrice = currentPrice;

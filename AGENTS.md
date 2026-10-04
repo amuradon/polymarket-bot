@@ -34,6 +34,9 @@ Before proposing plans, designing features, or writing any code in this reposito
    - Agents must study the platform vision (multi-token support for BTC, ETH, SOL; 15m/5m/1h timeframes; GCP Dublin deployment near London data centers).
    - All code must be designed to be easily extensible, modular, and optimized for ultra-low latency (Java 25, GC-free hot path, non-blocking Vert.x event loops).
 
+3. 👉 [`DEPLOYMENT.md`](DEPLOYMENT.md):
+   - When deploying paper or live applications to GCP Cloud Run, agents and developers **MUST ALWAYS** configure `--no-cpu-throttling` and `--min-instances 1` to ensure continuous 24/7 background execution without container freezing.
+
 ---
 
 ## 3. Java & Quarkus Development Rules

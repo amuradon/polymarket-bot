@@ -41,8 +41,9 @@ class TwapEngineTest {
         BinanceWebSocketClient binanceClient = mock(BinanceWebSocketClient.class);
         CoinbaseWebSocketClient coinbaseClient = mock(CoinbaseWebSocketClient.class);
         KrakenWebSocketClient krakenClient = mock(KrakenWebSocketClient.class);
+        io.vertx.core.Vertx vertx = mock(io.vertx.core.Vertx.class);
 
-        engine = new TwapEngine(priceTracker, reconstructor, cache, twapCalculator, binanceClient, coinbaseClient, krakenClient, "5m");
+        engine = new TwapEngine(priceTracker, reconstructor, cache, twapCalculator, binanceClient, coinbaseClient, krakenClient, "5m", vertx);
     }
 
     @Test
@@ -217,5 +218,31 @@ class TwapEngineTest {
         assertThat(switched.timeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
         assertThat(switched.openPrice()).isEqualByComparingTo("95.00");
         assertThat(engine.getActiveTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
+    }
+
+    @Test
+    void shouldClampForwardFillOnLargeTimeGap() {
+        Instant t0 = Instant.parse("2026-09-03T14:00:00Z");
+        List<TwapPoint> initialPoints = new ArrayList<>();
+        initialPoints.add(new TwapPoint(t0.getEpochSecond(), new BigDecimal("100.00"), new BigDecimal("100.00")));
+
+        CandleTwapState mockState = new CandleTwapState(
+                Timeframe.FIVE_MINUTES,
+                t0.getEpochSecond(),
+                t0.plusSeconds(300).getEpochSecond(),
+                new BigDecimal("100.00"),
+                initialPoints
+        );
+        when(reconstructor.reconstructCandle(any(Timeframe.class), eq(t0))).thenReturn(mockState);
+        engine.initialize(t0);
+
+        // Gap of 3600 seconds (1 hour)
+        Instant tHourLater = t0.plusSeconds(3600);
+        when(priceTracker.getLast60SecondsMedians(anyLong())).thenReturn(List.of(new BigDecimal("100.00")));
+
+        engine.onBinanceTick(tHourLater.toEpochMilli());
+
+        // Clamped to at most 60 seconds of forward fill (from 3600 - 60 = 3540 to 3599)
+        verify(priceTracker, atMost(60)).recordForwardFilledMedian(anyLong());
     }
 }

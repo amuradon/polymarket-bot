@@ -24,6 +24,13 @@ public interface TradingStrategy {
     default void reset() {}
 
     /**
+     * The primary market timeframe for which this strategy evaluates TWAP candles.
+     */
+    default cz.polymarket.bot.domain.Timeframe getTimeframe() {
+        return cz.polymarket.bot.domain.Timeframe.FIFTEEN_MINUTES;
+    }
+
+    /**
      * Initializes the strategy with the execution context.
      *
      * @param context the execution context providing market data and order placement capabilities

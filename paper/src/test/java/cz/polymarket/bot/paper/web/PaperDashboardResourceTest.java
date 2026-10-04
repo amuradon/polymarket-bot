@@ -60,4 +60,15 @@ class PaperDashboardResourceTest {
                 .statusCode(200)
                 .contentType(ContentType.JSON);
     }
+
+    @Test
+    void shouldHandleResetApi() {
+        given()
+                .when().post("/api/paper/reset")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("status", equalTo("SUCCESS"))
+                .body("currentBalance", notNullValue());
+    }
 }

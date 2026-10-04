@@ -8,6 +8,7 @@ Real-time cryptocurrency price aggregation, TWAP (Time-Weighted Average Price) c
 
 - 👉 **[Architecture Guide (`ARCHITECTURE.md`)](ARCHITECTURE.md)**: Full module hierarchy, dependency rules, isolation guarantees, and design contracts.
 - 👉 **[Product & Engineering Vision (`VISION.md`)](VISION.md)**: Platform roadmap, multi-token markets (BTC, ETH, SOL), 3-system lifecycle (Backtest $\rightarrow$ Paper $\rightarrow$ Live), and low-latency GCP Dublin deployment principles.
+- 👉 **[Deployment Guide (`DEPLOYMENT.md`)](DEPLOYMENT.md)**: GCP Cloud Run deployment instructions and mandatory continuous execution flags (`--no-cpu-throttling`, `--min-instances 1`).
 
 ---
 

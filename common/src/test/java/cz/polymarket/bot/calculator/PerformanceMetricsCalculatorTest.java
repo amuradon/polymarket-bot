@@ -97,4 +97,24 @@ class PerformanceMetricsCalculatorTest {
         assertThat(metrics.maxDrawdownUsd()).isCloseTo(1100.0, within(0.01));
         assertThat(metrics.maxDrawdownPct()).isCloseTo((1100.0 / 10500.0) * 100.0, within(0.01));
     }
+
+    @Test
+    @DisplayName("Should handle 100% win rate (0 losses) with finite profit factor and no NaN")
+    void shouldHandleZeroLossesWithoutInfinity() {
+        TradeRecord winTrade = new TradeRecord(
+                "2026-08-07 00:00:00+00:00", 1723000000L, TradeDirection.UP,
+                0.50, 1.00, 100.0, 200.0, 3.5, 96.5,
+                "Resolution (TWAP 60s)", 0.65, 0.50, 0.15, true, 10096.5
+        );
+
+        PerformanceMetrics metrics = calculator.calculate(List.of(winTrade), 10000.0);
+
+        assertThat(metrics.totalTrades()).isEqualTo(1);
+        assertThat(metrics.winningTrades()).isEqualTo(1);
+        assertThat(metrics.losingTrades()).isZero();
+        assertThat(metrics.winRatePct()).isEqualTo(100.0);
+        assertThat(Double.isInfinite(metrics.profitFactor())).isFalse();
+        assertThat(Double.isNaN(metrics.profitFactor())).isFalse();
+        assertThat(metrics.profitFactor()).isEqualTo(999.99);
+    }
 }

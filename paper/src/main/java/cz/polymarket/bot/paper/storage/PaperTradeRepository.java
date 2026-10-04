@@ -148,6 +148,31 @@ public class PaperTradeRepository {
         }
     }
 
+    public synchronized void reset() {
+        trades.clear();
+        this.currentBalance = initialCapital;
+        this.currentMetrics = PerformanceMetrics.empty(initialCapital);
+
+        Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
+        try {
+            Files.deleteIfExists(tradesFile);
+        } catch (IOException e) {
+            LOG.warnf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
+        }
+
+        Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
+        try {
+            String metricsJson = objectMapper.writeValueAsString(currentMetrics);
+            Files.writeString(metricsFile, metricsJson,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE);
+        } catch (IOException e) {
+            LOG.warnf("Failed to write metrics.json during reset: %s", e.getMessage());
+        }
+        LOG.infof("Reset paper trade storage to initial capital: $%.2f", initialCapital);
+    }
+
     public List<TradeRecord> getTrades() {
         return Collections.unmodifiableList(trades);
     }

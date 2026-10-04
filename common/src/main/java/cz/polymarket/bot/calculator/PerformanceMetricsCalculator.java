@@ -71,7 +71,16 @@ public class PerformanceMetricsCalculator {
         int losingTrades = totalTrades - winningTrades;
         double winRatePct = totalTrades > 0 ? ((double) winningTrades / totalTrades * 100.0) : 0.0;
         double grossPnl = totalNetPnl + totalFees;
-        double profitFactor = grossLoss > 0.0 ? (grossProfit / grossLoss) : (grossProfit > 0.0 ? Double.POSITIVE_INFINITY : 0.0);
+
+        double profitFactor;
+        if (grossLoss > 0.0) {
+            profitFactor = grossProfit / grossLoss;
+        } else if (grossProfit > 0.0) {
+            profitFactor = 999.99;
+        } else {
+            profitFactor = 0.0;
+        }
+
         double evPerTrade = totalTrades > 0 ? (totalNetPnl / totalTrades) : 0.0;
 
         double sharpe = 0.0;
@@ -126,21 +135,28 @@ public class PerformanceMetricsCalculator {
                 totalTrades,
                 winningTrades,
                 losingTrades,
-                winRatePct,
-                totalNetPnl,
-                totalFees,
-                grossPnl,
-                grossProfit,
-                grossLoss,
-                profitFactor,
-                maxDrawdownUsd,
-                maxDrawdownPct,
-                evPerTrade,
-                sharpe,
-                sortino,
-                brierScore,
-                initialCapital,
-                currentBalance
+                sanitizeDouble(winRatePct, 0.0),
+                sanitizeDouble(totalNetPnl, 0.0),
+                sanitizeDouble(totalFees, 0.0),
+                sanitizeDouble(grossPnl, 0.0),
+                sanitizeDouble(grossProfit, 0.0),
+                sanitizeDouble(grossLoss, 0.0),
+                sanitizeDouble(profitFactor, 0.0),
+                sanitizeDouble(maxDrawdownUsd, 0.0),
+                sanitizeDouble(maxDrawdownPct, 0.0),
+                sanitizeDouble(evPerTrade, 0.0),
+                sanitizeDouble(sharpe, 0.0),
+                sanitizeDouble(sortino, 0.0),
+                sanitizeDouble(brierScore, 0.25),
+                sanitizeDouble(initialCapital, 10000.0),
+                sanitizeDouble(currentBalance, initialCapital)
         );
+    }
+
+    private static double sanitizeDouble(double val, double defaultValue) {
+        if (Double.isNaN(val) || Double.isInfinite(val)) {
+            return defaultValue;
+        }
+        return val;
     }
 }

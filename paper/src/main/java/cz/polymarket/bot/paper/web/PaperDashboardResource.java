@@ -94,4 +94,18 @@ public class PaperDashboardResource {
     public Response getTrades() {
         return Response.ok(repository.getTrades()).build();
     }
+
+    @jakarta.ws.rs.POST
+    @Path("/api/paper/reset")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response reset() {
+        engine.reset();
+        repository.reset();
+        return Response.ok(java.util.Map.of(
+                "status", "SUCCESS",
+                "message", "Paper trading history and metrics reset successfully",
+                "initialCapital", repository.getInitialCapital(),
+                "currentBalance", repository.getCurrentBalance()
+        )).build();
+    }
 }

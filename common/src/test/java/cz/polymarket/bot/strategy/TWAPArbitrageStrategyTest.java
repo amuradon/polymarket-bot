@@ -401,4 +401,34 @@ class TWAPArbitrageStrategyTest {
         double fee = strategy.calculateTakerFee(300.0 / 0.56, 0.56);
         assertThat(fee).isCloseTo(9.24, within(1e-4));
     }
+
+    @Test
+    @DisplayName("Should ignore non-15m timeframe updates")
+    void shouldIgnoreNon15mTimeframeUpdates() {
+        strategy.init(context);
+        long start15m = 10000L;
+        strategy.onTwapUpdate(new TwapUpdate(
+                Timeframe.FIFTEEN_MINUTES,
+                start15m,
+                start15m + 900L,
+                BigDecimal.valueOf(60000.0),
+                new TwapPoint(start15m + 10, BigDecimal.valueOf(60000.0), BigDecimal.valueOf(60000.0)),
+                false
+        ));
+        assertThat(strategy.getActiveCandleStart()).isEqualTo(start15m);
+
+        // Send 5m update with different candle start
+        strategy.onTwapUpdate(new TwapUpdate(
+                Timeframe.FIVE_MINUTES,
+                20000L,
+                20300L,
+                BigDecimal.valueOf(65000.0),
+                new TwapPoint(20010L, BigDecimal.valueOf(65000.0), BigDecimal.valueOf(65000.0)),
+                false
+        ));
+
+        // State must remain 15m
+        assertThat(strategy.getActiveCandleStart()).isEqualTo(start15m);
+        assertThat(strategy.getTwapOpenPrice()).isEqualTo(60000.0);
+    }
 }

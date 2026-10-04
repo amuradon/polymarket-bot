@@ -14,6 +14,7 @@ import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
 import cz.polymarket.bot.exchange.KrakenWebSocketClient;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -45,6 +46,7 @@ public class TwapEngine {
     private final CoinbaseWebSocketClient coinbaseClient;
     private final KrakenWebSocketClient krakenClient;
     private final String defaultTimeframeCode;
+    private final Vertx vertx;
 
     private final AtomicReference<Timeframe> activeTimeframe = new AtomicReference<>();
     private final Map<Timeframe, CandleTwapState> candleStates = new ConcurrentHashMap<>();
@@ -61,7 +63,8 @@ public class TwapEngine {
             BinanceWebSocketClient binanceClient,
             CoinbaseWebSocketClient coinbaseClient,
             KrakenWebSocketClient krakenClient,
-            @ConfigProperty(name = "polymarket.twap.default-timeframe", defaultValue = "5m") String defaultTimeframeCode) {
+            @ConfigProperty(name = "polymarket.twap.default-timeframe", defaultValue = "5m") String defaultTimeframeCode,
+            Vertx vertx) {
         this.priceTracker = priceTracker;
         this.reconstructor = reconstructor;
         this.cache = cache;
@@ -70,6 +73,7 @@ public class TwapEngine {
         this.coinbaseClient = coinbaseClient;
         this.krakenClient = krakenClient;
         this.defaultTimeframeCode = defaultTimeframeCode;
+        this.vertx = vertx;
         this.activeTimeframe.set(Timeframe.fromCode(defaultTimeframeCode));
         if (this.binanceClient != null) {
             this.binanceClient.setTickListener(this::onBinanceTick);
@@ -77,7 +81,26 @@ public class TwapEngine {
     }
 
     void onStart(@Observes StartupEvent ev) {
-        LOG.info("Starting Exchange WebSocket streams...");
+        LOG.info("Initializing TWAP Engine and starting Exchange WebSocket streams...");
+        if (vertx != null) {
+            vertx.executeBlocking(() -> {
+                initialize(Instant.now());
+                return null;
+            }).onComplete(ar -> {
+                if (ar.succeeded()) {
+                    LOG.info("TWAP Engine historical reconstruction completed successfully");
+                } else {
+                    LOG.warnf("TWAP Engine historical reconstruction encountered error: %s", ar.cause().getMessage());
+                }
+            });
+        } else {
+            try {
+                initialize(Instant.now());
+            } catch (Exception e) {
+                LOG.warnf("TWAP Engine historical reconstruction error: %s", e.getMessage());
+            }
+        }
+
         binanceClient.start();
         coinbaseClient.start();
         krakenClient.start();
@@ -115,7 +138,14 @@ public class TwapEngine {
         long currentSec = eventTimeMs / 1000L;
 
         if (!initialized) {
-            initialize(Instant.ofEpochSecond(currentSec));
+            if (vertx != null) {
+                vertx.executeBlocking(() -> {
+                    initialize(Instant.ofEpochSecond(currentSec));
+                    return null;
+                });
+            } else {
+                initialize(Instant.ofEpochSecond(currentSec));
+            }
             lastProcessedSecond.set(currentSec);
             priceTracker.getSnapshot(Instant.ofEpochSecond(currentSec));
             processSecond(currentSec);
@@ -134,8 +164,15 @@ public class TwapEngine {
             return;
         }
 
+        // In case of a large gap > 60s (network stall, container unfreeze), clamp forward fill to at most 60 seconds
+        long startGap = lastSec + 1;
+        if (currentSec - lastSec > 60) {
+            LOG.warnf("Detected time gap of %d seconds in Binance ticks. Clamping forward fill to last 60 seconds.", (currentSec - lastSec));
+            startGap = currentSec - 60;
+        }
+
         // In case of low activity / gap: forward fill missing seconds with last known price
-        for (long s = lastSec + 1; s < currentSec; s++) {
+        for (long s = startGap; s < currentSec; s++) {
             priceTracker.recordForwardFilledMedian(s);
             processSecond(s);
         }
