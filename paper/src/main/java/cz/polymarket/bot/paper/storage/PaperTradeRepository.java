@@ -60,7 +60,16 @@ public class PaperTradeRepository {
             throw new IllegalArgumentException("metricsCalculator cannot be null");
         }
 
-        this.dataDirectory = Path.of(dataDir);
+        Path path = Path.of(dataDir);
+        if (!path.isAbsolute()) {
+            Path workCandidate = Path.of("/work").resolve(dataDir);
+            if (Files.exists(workCandidate)) {
+                path = workCandidate;
+            } else {
+                path = path.toAbsolutePath();
+            }
+        }
+        this.dataDirectory = path;
         this.initialCapital = initialCapital;
         this.objectMapper = objectMapper;
         this.metricsCalculator = metricsCalculator;
@@ -71,6 +80,14 @@ public class PaperTradeRepository {
     private synchronized void initialize() {
         try {
             Files.createDirectories(dataDirectory);
+            LOG.infof("Initializing paper trade storage in directory: %s", dataDirectory.toAbsolutePath());
+            try (var stream = Files.list(dataDirectory)) {
+                List<String> files = stream.map(p -> p.getFileName().toString()).toList();
+                LOG.infof("Existing files in %s: %s", dataDirectory.toAbsolutePath(), files);
+            } catch (Exception e) {
+                LOG.warnf("Could not list files in %s: %s", dataDirectory, e.getMessage());
+            }
+
             Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
             if (Files.exists(tradesFile)) {
                 List<TradeRecord> loaded = new ArrayList<>();
@@ -91,6 +108,8 @@ public class PaperTradeRepository {
                 }
                 trades.addAll(loaded);
                 LOG.infof("Restored %d trades from %s", trades.size(), tradesFile.toAbsolutePath());
+            } else {
+                LOG.infof("No trades file found at %s - starting with fresh balance $%.2f", tradesFile.toAbsolutePath(), initialCapital);
             }
 
             if (trades.isEmpty()) {
@@ -133,7 +152,7 @@ public class PaperTradeRepository {
             throw new RuntimeException("Failed to persist trade to " + tradesFile, e);
         }
 
-        // 2. Atomically write metrics.json
+        // 2. Write metrics.json snapshot (using REPLACE_EXISTING with direct write fallback for Cloud Storage / GCSFuse)
         Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
         Path tempFile = dataDirectory.resolve(METRICS_FILENAME + ".tmp");
         try {
@@ -142,9 +161,17 @@ public class PaperTradeRepository {
                     StandardOpenOption.CREATE,
                     StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE);
-            Files.move(tempFile, metricsFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            LOG.warnf("Failed to write atomic metrics snapshot: %s", e.getMessage());
+            Files.move(tempFile, metricsFile, StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            try {
+                String metricsJson = objectMapper.writeValueAsString(currentMetrics);
+                Files.writeString(metricsFile, metricsJson,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE);
+            } catch (IOException ex) {
+                LOG.warnf("Failed to write metrics snapshot: %s", ex.getMessage());
+            }
         }
     }
 

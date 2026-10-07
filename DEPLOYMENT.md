@@ -41,11 +41,15 @@ docker push europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-
 ```
 
 ### Step 3: Deploy / Update Cloud Run Service
-Deploy the service ensuring all mandatory flags are provided:
+Deploy the service ensuring all mandatory flags and persistent GCS storage mounts are provided:
 
 ```bash
 gcloud run deploy polymarket-bot-paper \
   --image europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest \
+  --add-volume "name=paper-storage,type=cloud-storage,bucket=polymarket-paper-storage-508306" \
+  --add-volume-mount "volume=paper-storage,mount-path=/work/data/paper" \
+  --set-env-vars POLYMARKET_PAPER_DATA_DIR=/work/data/paper \
+  --execution-environment gen2 \
   --platform managed \
   --region europe-west1 \
   --project polymarket-bots-508306 \
@@ -58,9 +62,14 @@ gcloud run deploy polymarket-bot-paper \
   --allow-unauthenticated
 ```
 
-To update an existing service without re-specifying the full image:
+To update an existing service:
 ```bash
 gcloud run services update polymarket-bot-paper \
+  --image europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest \
+  --add-volume "name=paper-storage,type=cloud-storage,bucket=polymarket-paper-storage-508306" \
+  --add-volume-mount "volume=paper-storage,mount-path=/work/data/paper" \
+  --set-env-vars POLYMARKET_PAPER_DATA_DIR=/work/data/paper \
+  --execution-environment gen2 \
   --no-cpu-throttling \
   --min-instances 1 \
   --project polymarket-bots-508306 \
