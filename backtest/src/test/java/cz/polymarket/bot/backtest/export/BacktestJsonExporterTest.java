@@ -58,7 +58,7 @@ class BacktestJsonExporterTest {
 
         BacktestResult result = new BacktestResult(
                 "TWAPArbitrageStrategy",
-                "D:/Polymarket/btc_nextCandle/unified_market_data.parquet",
+                "BTCUSDT",
                 Instant.parse("2026-10-03T10:00:00Z"),
                 5100,
                 metrics,

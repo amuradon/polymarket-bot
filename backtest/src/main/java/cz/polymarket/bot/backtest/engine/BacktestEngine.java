@@ -92,7 +92,6 @@ public class BacktestEngine {
             String symbol,
             String startDate,
             String endDate,
-            String datasetPath,
             Double initialCapital,
             String outputDirectory) {
 
@@ -107,7 +106,7 @@ public class BacktestEngine {
         double capital = (initialCapital != null && initialCapital > 0) ? initialCapital : defaultCapital;
         String resolvedOutputDir = (outputDirectory != null && !outputDirectory.isBlank()) ? outputDirectory : defaultOutputDir;
 
-        List<BacktestMarketRow> rows = dataCacheService.loadMarketData(sym, startDate, endDate, datasetPath);
+        List<BacktestMarketRow> rows = dataCacheService.loadMarketData(sym, startDate, endDate);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("No market rows available for backtest for symbol " + sym);
         }
@@ -166,7 +165,7 @@ public class BacktestEngine {
                 } else if (event instanceof BacktestEvent.BinanceFuturesOrderBookEvent e) {
                     indicatorEngine.onFuturesOrderBook(e.timestampMs(), e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
                     for (IndicatorType type : strategy.getRequiredIndicators()) {
-                        if (type == IndicatorType.ORDER_BOOK_IMBALANCE || type == IndicatorType.BINANCE_OBI || type == IndicatorType.MICRO_PRICE) {
+                        if (type == IndicatorType.ORDER_BOOK_IMBALANCE || type == IndicatorType.MICRO_PRICE) {
                             strategy.onIndicatorUpdate(type, indicatorEngine.getIndicatorValue(type), e.timestampMs());
                         }
                     }
@@ -222,11 +221,9 @@ public class BacktestEngine {
         double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
         PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier);
 
-        String effectiveDatasetPath = (datasetPath != null && !datasetPath.isBlank()) ? datasetPath : ("Cache: " + sym);
-
         BacktestResult rawResult = new BacktestResult(
                 strategy.getName(),
-                effectiveDatasetPath,
+                sym,
                 Instant.now(),
                 rows.size(),
                 metrics,

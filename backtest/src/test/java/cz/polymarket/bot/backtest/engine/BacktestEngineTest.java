@@ -43,9 +43,8 @@ class BacktestEngineTest {
                 tempDir.resolve("Binance").toString(),
                 tempDir.resolve("Polymarket").toString()
         );
-        ParquetDatasetLoader datasetLoader = new ParquetDatasetLoader();
         BacktestDataCacheService dataCacheService = new BacktestDataCacheService(
-                cacheService, processor, datasetLoader, missingRegistry, null
+                cacheService, processor, missingRegistry
         );
 
         // Pre-populate representative synthesized test dataset in binary cache
@@ -132,7 +131,6 @@ class BacktestEngineTest {
                 "BTCUSDT",
                 "2026-08-01",
                 "2026-08-01",
-                null,
                 10000.0,
                 tempDir.toString()
         );
@@ -156,15 +154,16 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should throw IllegalArgumentException when unknown strategy requested")
     void shouldThrowWhenUnknownStrategy() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest("UnknownStrategy", "BTCUSDT", null, null, null, 10000.0, null))
+        assertThatThrownBy(() -> backtestEngine.runBacktest("UnknownStrategy", "BTCUSDT", null, null, 10000.0, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown strategy");
     }
 
     @Test
-    @DisplayName("Should throw IllegalArgumentException when dataset file not found")
-    void shouldThrowWhenDatasetNotFound() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest("TWAPArbitrageStrategy", "BTCUSDT", null, null, "invalid/path.parquet", 10000.0, null))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("Should throw IllegalArgumentException when no market rows available")
+    void shouldThrowWhenNoMarketRowsAvailable() {
+        assertThatThrownBy(() -> backtestEngine.runBacktest("TWAPArbitrageStrategy", "UNKNOWN_SYMBOL", null, null, 10000.0, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("No market rows available");
     }
 }

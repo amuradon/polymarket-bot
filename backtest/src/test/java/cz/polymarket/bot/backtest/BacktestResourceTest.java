@@ -55,36 +55,42 @@ class BacktestResourceTest {
                 .body("error", containsString("Unknown strategy"));
     }
 
+    @jakarta.inject.Inject
+    cz.polymarket.bot.backtest.cache.BinaryMarketCacheService cacheService;
+
     @Test
     @DisplayName("Should execute backtest for TWAPArbitrageStrategy and return 200 with metrics")
     void shouldExecuteBacktestSuccessfully() {
-        File datasetFile = new File("D:/Polymarket/btc_nextCandle/unified_market_data.parquet");
-        if (!datasetFile.exists()) {
-            return;
-        }
-
-        File sampleFile = new File("target/test_sample.parquet");
-        if (!sampleFile.exists()) {
-            sampleFile.getParentFile().mkdirs();
-            try (var conn = java.sql.DriverManager.getConnection("jdbc:duckdb:");
-                 var stmt = conn.createStatement()) {
-                stmt.execute("COPY (SELECT * FROM read_parquet('" + datasetFile.getAbsolutePath().replace('\\', '/') + "') LIMIT 5) TO '" + sampleFile.getAbsolutePath().replace('\\', '/') + "' (FORMAT PARQUET)");
-            } catch (Exception ignored) {
-            }
-        }
+        long tStart = 1785542400L;
+        cacheService.writeMarketRowsCache("BTCUSDT", "2026-08", java.util.List.of(
+                new cz.polymarket.bot.backtest.cache.CachedMarketRow(
+                        tStart, tStart + 900L,
+                        60000.0, 60050.0, 59950.0, 60000.0,
+                        10.0, 600000.0, 0.0,
+                        60000.0, 60050.0, 59950.0, 60000.0,
+                        10.0, 600000.0, 0.0,
+                        true,
+                        0.50, 0.48, 0.50, 0.48, 0.50, 0.48, 0.50, 0.48,
+                        0.50, 0.015, 0.50, 0.015,
+                        0.55, 0.45, 300.0, 300.0
+                )
+        ));
 
         given()
                 .contentType(ContentType.JSON)
                 .body(Map.of(
                         "strategyName", "TWAPArbitrageStrategy",
-                        "datasetPath", sampleFile.getAbsolutePath()
+                        "symbol", "BTCUSDT",
+                        "startDate", "2026-08-01",
+                        "endDate", "2026-08-01"
                 ))
                 .when().post("/backtest/run")
                 .then()
                 .statusCode(200)
                 .contentType(ContentType.JSON)
                 .body("strategyName", equalTo("TWAPArbitrageStrategy"))
-                .body("totalMarkets", equalTo(5))
+                .body("symbol", equalTo("BTCUSDT"))
+                .body("totalMarkets", equalTo(1))
                 .body("jsonFilePath", notNullValue());
     }
 }

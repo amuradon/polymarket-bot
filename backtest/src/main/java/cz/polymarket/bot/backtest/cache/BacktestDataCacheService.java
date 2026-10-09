@@ -1,10 +1,8 @@
 package cz.polymarket.bot.backtest.cache;
 
 import cz.polymarket.bot.backtest.data.BacktestMarketRow;
-import cz.polymarket.bot.backtest.data.ParquetDatasetLoader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import java.io.File;
@@ -33,51 +31,26 @@ public class BacktestDataCacheService {
 
     private final BinaryMarketCacheService cacheService;
     private final RawMarketDataProcessor processor;
-    private final ParquetDatasetLoader parquetDatasetLoader;
     private final MissingRawDataRegistry missingRegistry;
-    private final String defaultPrecomputedParquet;
 
     @Inject
     public BacktestDataCacheService(
             BinaryMarketCacheService cacheService,
             RawMarketDataProcessor processor,
-            ParquetDatasetLoader parquetDatasetLoader,
-            MissingRawDataRegistry missingRegistry,
-            @ConfigProperty(name = "polymarket.backtest.dataset-path", defaultValue = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
-            String defaultPrecomputedParquet) {
+            MissingRawDataRegistry missingRegistry) {
         this.cacheService = cacheService;
         this.processor = processor;
-        this.parquetDatasetLoader = parquetDatasetLoader;
         this.missingRegistry = missingRegistry;
-        this.defaultPrecomputedParquet = defaultPrecomputedParquet;
     }
 
-    public BacktestDataCacheService(
-            BinaryMarketCacheService cacheService,
-            RawMarketDataProcessor processor,
-            ParquetDatasetLoader parquetDatasetLoader,
-            MissingRawDataRegistry missingRegistry) {
-        this(cacheService, processor, parquetDatasetLoader, missingRegistry, "D:/Polymarket/btc_nextCandle/unified_market_data.parquet");
-    }
-
-    public List<BacktestMarketRow> loadMarketData(String symbol, String startDateStr, String endDateStr, String overrideDatasetPath) {
+    public List<BacktestMarketRow> loadMarketData(String symbol, String startDateStr, String endDateStr) {
         String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
 
-        // 1. If explicit datasetPath is provided, validate and load
-        if (overrideDatasetPath != null && !overrideDatasetPath.isBlank()) {
-            File f = new File(overrideDatasetPath);
-            if (!f.exists() || !f.isFile()) {
-                throw new IllegalArgumentException("Specified dataset file does not exist: " + overrideDatasetPath);
-            }
-            LOG.infof("Loading market rows from explicit dataset path: %s", overrideDatasetPath);
-            return parquetDatasetLoader.loadDataset(overrideDatasetPath);
-        }
-
-        // 2. Determine target months
+        // 1. Determine target months
         List<String> targetMonths = resolveTargetMonths(sym, startDateStr, endDateStr);
         LOG.infof("Resolved target months for %s: %s", sym, targetMonths);
 
-        // 3. For each month, ensure it exists in binary cache
+        // 2. For each month, ensure it exists in binary cache
         for (String month : targetMonths) {
             if (!cacheService.hasMarketRowsCache(sym, month)) {
                 LOG.infof("Cache miss for %s %s. Attempting to ingest...", sym, month);
@@ -148,25 +121,6 @@ public class BacktestDataCacheService {
     }
 
     private void ensureMonthCached(String symbol, String month) {
-        // If unified_market_data.parquet is available and covers this month (e.g. 2026-08 or 2026-09), import from it
-        File defaultParquetFile = new File(defaultPrecomputedParquet);
-        if (defaultParquetFile.exists() && ("2026-08".equals(month) || "2026-09".equals(month))) {
-            LOG.infof("Bootstrapping cache for %s from precomputed parquet %s...", month, defaultPrecomputedParquet);
-            List<BacktestMarketRow> rows = parquetDatasetLoader.loadDataset(defaultPrecomputedParquet);
-            List<BacktestMarketRow> monthRows = new ArrayList<>();
-            for (BacktestMarketRow r : rows) {
-                if (r.dateStr() != null && r.dateStr().startsWith(month)) {
-                    monthRows.add(r);
-                }
-            }
-            if (!monthRows.isEmpty()) {
-                processor.importMarketRows(symbol, month, monthRows);
-                LOG.infof("Imported %d rows for %s into cache", monthRows.size(), month);
-                return;
-            }
-        }
-
-        // Otherwise process raw data directly
         LOG.infof("Processing raw datasets for %s %s...", symbol, month);
         processor.processRawDataForMonth(symbol, month);
     }

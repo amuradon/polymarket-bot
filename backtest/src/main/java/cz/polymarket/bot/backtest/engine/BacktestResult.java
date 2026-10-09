@@ -14,7 +14,7 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record BacktestResult(
         String strategyName,
-        String datasetPath,
+        String symbol,
         Instant executionTimeUtc,
         int totalMarkets,
         PerformanceMetrics metrics,
@@ -24,7 +24,7 @@ public record BacktestResult(
     public BacktestResult withJsonFilePath(String path) {
         return new BacktestResult(
                 strategyName,
-                datasetPath,
+                symbol,
                 executionTimeUtc,
                 totalMarkets,
                 metrics,

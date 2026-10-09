@@ -21,7 +21,6 @@ class BacktestDataCacheServiceTest {
     private BinaryMarketCacheService cacheService;
     private MissingRawDataRegistry missingRegistry;
     private RawMarketDataProcessor processor;
-    private ParquetDatasetLoader parquetDatasetLoader;
     private BacktestDataCacheService dataCacheService;
 
     @BeforeEach
@@ -33,8 +32,7 @@ class BacktestDataCacheServiceTest {
         cacheService = new BinaryMarketCacheService(cacheDir.toString());
         missingRegistry = new MissingRawDataRegistry("BTCUSDT");
         processor = new RawMarketDataProcessor(cacheService, missingRegistry, binanceDir.toString(), polymarketDir.toString());
-        parquetDatasetLoader = new ParquetDatasetLoader();
-        dataCacheService = new BacktestDataCacheService(cacheService, processor, parquetDatasetLoader, missingRegistry);
+        dataCacheService = new BacktestDataCacheService(cacheService, processor, missingRegistry);
     }
 
     @Test
@@ -59,7 +57,7 @@ class BacktestDataCacheServiceTest {
         processor.importMarketRows(symbol, month, List.of(sampleRow));
 
         // Load via service
-        List<BacktestMarketRow> loaded = dataCacheService.loadMarketData(symbol, "2026-10-01", "2026-10-01", null);
+        List<BacktestMarketRow> loaded = dataCacheService.loadMarketData(symbol, "2026-10-01", "2026-10-01");
 
         assertThat(loaded).hasSize(1);
         BacktestMarketRow r = loaded.get(0);

@@ -10,9 +10,7 @@ public enum IndicatorType {
     VWAP,
     VWAP_ZSCORE,
     CVD,
-    REALIZED_VOLATILITY,
     VOLATILITY_4H,
-    BINANCE_OBI,
     ORDER_BOOK_IMBALANCE,
     MICRO_PRICE
 }

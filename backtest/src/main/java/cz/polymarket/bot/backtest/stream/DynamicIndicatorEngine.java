@@ -118,10 +118,9 @@ public class DynamicIndicatorEngine {
     }
 
     public void onFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {
-        if (requiredIndicators.contains(IndicatorType.ORDER_BOOK_IMBALANCE) || requiredIndicators.contains(IndicatorType.BINANCE_OBI)) {
+        if (requiredIndicators.contains(IndicatorType.ORDER_BOOK_IMBALANCE)) {
             this.currentObi = obi;
             currentValues.put(IndicatorType.ORDER_BOOK_IMBALANCE, obi);
-            currentValues.put(IndicatorType.BINANCE_OBI, obi);
         }
 
         if (requiredIndicators.contains(IndicatorType.MICRO_PRICE)) {
@@ -136,10 +135,9 @@ public class DynamicIndicatorEngine {
     }
 
     private void recalculateAll() {
-        if (requiredIndicators.contains(IndicatorType.VOLATILITY_4H) || requiredIndicators.contains(IndicatorType.REALIZED_VOLATILITY)) {
+        if (requiredIndicators.contains(IndicatorType.VOLATILITY_4H)) {
             double vol4h = volCalculator.calculate4hRealizedVolatility(candleHistory);
             currentValues.put(IndicatorType.VOLATILITY_4H, vol4h);
-            currentValues.put(IndicatorType.REALIZED_VOLATILITY, vol4h);
         }
 
         if (requiredIndicators.contains(IndicatorType.VWAP_ZSCORE)) {

@@ -177,7 +177,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
         switch (type) {
             case VWAP_ZSCORE, VWAP -> this.currentVwapZScore = value;
-            case VOLATILITY_4H, REALIZED_VOLATILITY -> this.currentVol4h = value;
+            case VOLATILITY_4H -> this.currentVol4h = value;
             case CVD -> {
                 this.currentSpotCvd = value;
                 this.currentFutCvd = value;

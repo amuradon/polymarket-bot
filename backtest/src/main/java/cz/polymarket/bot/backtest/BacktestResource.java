@@ -76,15 +76,13 @@ public class BacktestResource {
                     request.symbol(),
                     request.startDate(),
                     request.endDate(),
-                    request.datasetPath(),
                     request.initialCapital(),
                     request.outputDirectory()
             );
 
             BacktestRunResponse response = new BacktestRunResponse(
                     result.strategyName(),
-                    request.symbol() != null ? request.symbol() : "BTCUSDT",
-                    result.datasetPath(),
+                    result.symbol(),
                     result.executionTimeUtc(),
                     result.totalMarkets(),
                     result.metrics(),
@@ -125,9 +123,6 @@ public class BacktestResource {
             @Schema(description = "Optional end date filter (yyyy-MM-dd)", example = "2026-10-06")
             String endDate,
 
-            @Schema(description = "Optional override path to a precomputed Parquet dataset file", example = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
-            String datasetPath,
-
             @Schema(description = "Optional initial capital in USD", example = "10000.0")
             Double initialCapital,
 
@@ -142,9 +137,6 @@ public class BacktestResource {
 
             @Schema(description = "Evaluated symbol", example = "BTCUSDT")
             String symbol,
-
-            @Schema(description = "Dataset source path or cache reference", example = "Cache: BTCUSDT")
-            String datasetPath,
 
             @Schema(description = "Execution timestamp", example = "2026-10-03T11:45:00Z")
             Instant executionTimeUtc,
