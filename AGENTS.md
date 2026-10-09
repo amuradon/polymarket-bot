@@ -16,6 +16,8 @@ All agents working on this repository **MUST ALWAYS** follow the engineering pro
 - **Adhere to the Plan**
 - **Clean Code**
 - **Test-Driven Development (TDD)**
+- **Synthetic Test Data Only**: Never use live or production data in automated tests; always use deterministic synthetic test fixtures.
+- **Human-Readable JavaDoc**: Document classes, records, interfaces, constructors, public methods, and non-trivial methods with clear, concise JavaDoc for human clarity.
 - **Multi-Level Test Pyramid**
 - **Local Git Commit Only (NO Git Push)**: Always commit locally after completing the task and verifying all tests pass. Never execute `git push`.
 

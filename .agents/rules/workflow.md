@@ -60,6 +60,14 @@ This document defines the strict, non-negotiable workflow and development protoc
 - **Immutable Fields**: All injected dependencies must be assigned to `private final` fields.
 - **No Field Injection**: Field injection (`@Inject private SomeService svc;`) is **strictly forbidden**. Constructor injection guarantees immutability, thread-safety, and seamless unit testing without container reflection.
 
+### 3.9 Synthetic Test Data Only (Zero Production / Live Data in Tests)
+- **Strict Prohibition of Live Data**: Never use real, live, or production data in automated tests under any circumstances.
+- **Deterministic Synthetic Fixtures**: All test datasets, market data fixtures, order books, price feeds, and mock payloads across all test levels (unit, component, integration, API, Cucumber) must be purely synthetic, deterministic, and isolated.
+
+### 3.10 Human-Readable JavaDoc Documentation
+- **Clear & Concise Element Purpose**: All Java elements—specifically classes, records, interfaces, constructors, public methods, and non-trivial methods—must include concise JavaDoc documenting their purpose and intent.
+- **Human-Friendly Explanations**: JavaDoc descriptions must be clearly understandable for human developers, explaining what the component or method does and why it exists without unnecessary verbosity.
+
 ---
 
 ## 4. Verification & Quality Assurance (Ověření)
@@ -71,7 +79,7 @@ This document defines the strict, non-negotiable workflow and development protoc
   ```
 
 ### 4.2 Multi-Level Test Pyramid Execution
-- After implementation, verify complete functionality by running and passing tests across all levels:
+- After implementation, verify complete functionality by running and passing tests across all levels using purely synthetic test data:
   1. **Unit Tests**: Isolated unit tests validating domain math, calculators, and parsers (`JUnit 5`, `AssertJ`, `Mockito`).
   2. **Component & Integration Tests**: Quarkus component tests verifying caching, Vert.x event loops, and CDI wiring (`@QuarkusTest`, `Awaitility`).
   3. **API & WebSocket Tests**: REST endpoint tests (`RestAssured`) and WebSocket streaming tests (`quarkus-websockets-next`).
