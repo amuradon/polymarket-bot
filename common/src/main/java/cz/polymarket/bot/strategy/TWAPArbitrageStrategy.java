@@ -215,8 +215,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
 
     @Override
     public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-        this.currentSpotPrice = price;
-        this.currentTimestampSec = timestampMs / 1000L;
+        if (price > 0.0) {
+            this.currentSpotPrice = price;
+        }
+        if (timestampMs > 0) {
+            this.currentTimestampSec = timestampMs / 1000L;
+        }
     }
 
     @Override
@@ -229,16 +233,6 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     @Override
     public void onMarketCandleCompleted(MarketCandle candle) {
         // Strategy relies on engine to compute historical indicator metrics
-    }
-
-    @Override
-    public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-        if (price > 0.0) {
-            this.currentSpotPrice = price;
-        }
-        if (timestampMs > 0) {
-            this.currentTimestampSec = timestampMs / 1000L;
-        }
     }
 
     @Override
