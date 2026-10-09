@@ -28,6 +28,17 @@ public class NextCandleProbabilityModel {
     private final double lateArbDist;
     private final double lateArbProb;
 
+    /**
+     * Constructs probability model with customizable statistical threshold parameters.
+     *
+     * @param positionSizer quarter-Kelly position sizer
+     * @param minProb minimum directional probability required to enter a trade
+     * @param minEdge minimum positive edge (modelProb - marketPrice) required
+     * @param slippageCap maximum allowed execution slippage (fillPrice - marketPrice)
+     * @param sigmoidK logistic sigmoid slope constant
+     * @param lateArbDist minimum spot price distance from TWAP open to trigger late arbitrage
+     * @param lateArbProb directional probability assigned during late oracle arbitrage lock-in
+     */
     @Inject
     public NextCandleProbabilityModel(
             KellyPositionSizer positionSizer,
@@ -49,11 +60,32 @@ public class NextCandleProbabilityModel {
         this.lateArbProb = lateArbProb;
     }
 
+    /**
+     * Constructs probability model using default empirical constants from Iteration 20.
+     *
+     * @param positionSizer quarter-Kelly position sizer
+     */
     public NextCandleProbabilityModel(KellyPositionSizer positionSizer) {
         this(positionSizer, DEFAULT_MIN_PROB, DEFAULT_MIN_EDGE, DEFAULT_SLIPPAGE_CAP,
                 DEFAULT_SIGMOID_K, DEFAULT_LATE_ARB_DIST, DEFAULT_LATE_ARB_PROB);
     }
 
+    /**
+     * Evaluates statistical signals and calculates directional probability, expected edge, and position sizing.
+     *
+     * @param zVwap rolling VWAP Z-score
+     * @param spotDelta spot cumulative volume delta in BTC
+     * @param futDelta futures cumulative volume delta in BTC
+     * @param futH1Delta 1-hour futures cumulative volume delta in BTC
+     * @param basisOpenBps basis spread at candle open in basis points
+     * @param distTwap current spot price distance from TWAP open in USD
+     * @param marketPriceUp best ask for UP contract
+     * @param marketPriceDown best ask for DOWN contract
+     * @param execPriceUp estimated fill price for UP contract
+     * @param execPriceDown estimated fill price for DOWN contract
+     * @param isLowVolatility true if market volatility is below minimum threshold
+     * @return StrategySignal containing trade direction, probabilities, edge, and suggested size
+     */
     public StrategySignal evaluate(
             double zVwap,
             double spotDelta,
@@ -148,26 +180,44 @@ public class NextCandleProbabilityModel {
         return new StrategySignal(direction, chosenModelP, chosenMarketP, chosenEdge, sizeUsd, "Signal confirmed");
     }
 
+    /**
+     * Minimum directional probability required for taking a trade.
+     */
     public double getMinProb() {
         return minProb;
     }
 
+    /**
+     * Minimum positive edge required (model probability minus market price).
+     */
     public double getMinEdge() {
         return minEdge;
     }
 
+    /**
+     * Maximum tolerated slippage between estimated execution fill price and book price.
+     */
     public double getSlippageCap() {
         return slippageCap;
     }
 
+    /**
+     * Logistic sigmoid curve slope constant.
+     */
     public double getSigmoidK() {
         return sigmoidK;
     }
 
+    /**
+     * Threshold distance in USD from TWAP open triggering late oracle arbitrage.
+     */
     public double getLateArbDist() {
         return lateArbDist;
     }
 
+    /**
+     * Locked-in directional probability assigned when late oracle arbitrage condition is met.
+     */
     public double getLateArbProb() {
         return lateArbProb;
     }

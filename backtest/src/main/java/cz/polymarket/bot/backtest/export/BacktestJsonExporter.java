@@ -29,6 +29,12 @@ public class BacktestJsonExporter {
     private final ObjectMapper objectMapper;
     private final String defaultOutputDir;
 
+    /**
+     * Constructs a {@link BacktestJsonExporter} configuring a pretty-printing Jackson mapper with JSR-310 datetime support.
+     *
+     * @param objectMapper Jackson object mapper to configure for JSON serialization
+     * @param defaultOutputDir default destination directory configured in application properties
+     */
     @Inject
     public BacktestJsonExporter(
             ObjectMapper objectMapper,
@@ -46,6 +52,14 @@ public class BacktestJsonExporter {
                 : "D:/Crypto/data/Polymarket/backtesting";
     }
 
+    /**
+     * Serializes a backtest result object into a timestamped JSON file and creates/updates a copy as {@code latest.json}.
+     *
+     * @param result completed backtest result model containing metrics and trade history
+     * @param outputDirectory optional custom directory path (falls back to default directory if null/blank)
+     * @return {@link Path} to the newly created timestamped JSON report file
+     * @throws IOException if directory creation or file writing fails
+     */
     public Path export(BacktestResult result, String outputDirectory) throws IOException {
         if (result == null) {
             throw new IllegalArgumentException("result cannot be null");
@@ -72,6 +86,11 @@ public class BacktestJsonExporter {
         return targetFile;
     }
 
+    /**
+     * Returns the default directory path where exported JSON reports are saved.
+     *
+     * @return output directory path string
+     */
     public String getDefaultOutputDir() {
         return defaultOutputDir;
     }

@@ -20,17 +20,30 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import java.time.Instant;
 import java.util.Map;
 
+/**
+ * REST controller exposing endpoints for backtest engine status checks and simulation execution.
+ */
 @Path("/backtest")
 @Tag(name = "Backtest Engine", description = "Backtest simulation engine status and lifecycle controls")
 public class BacktestResource {
 
     private final BacktestEngine backtestEngine;
 
+    /**
+     * Constructs a new {@link BacktestResource} with the injected backtest simulation engine.
+     *
+     * @param backtestEngine the backtesting engine responsible for orchestrating historical simulations
+     */
     @Inject
     public BacktestResource(BacktestEngine backtestEngine) {
         this.backtestEngine = backtestEngine;
     }
 
+    /**
+     * Returns the operational readiness status and identification of the simulation backtesting engine.
+     *
+     * @return engine readiness response object
+     */
     @GET
     @Produces(MediaType.APPLICATION_JSON)
     @Operation(
@@ -46,6 +59,12 @@ public class BacktestResource {
         return new BacktestStatusResponse("READY", "backtest", "In-Memory Simulation Engine");
     }
 
+    /**
+     * Executes an end-to-end backtest simulation for a specified trading strategy and parameter set.
+     *
+     * @param request parameter payload containing strategy name, symbol, date range, initial capital, and output dir
+     * @return HTTP 200 with backtest performance summary on success, or HTTP 400 on validation/argument error
+     */
     @POST
     @Path("/run")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -97,6 +116,13 @@ public class BacktestResource {
         }
     }
 
+    /**
+     * Response payload representing the operational readiness status of the backtesting engine.
+     *
+     * @param status status indicator (e.g., READY)
+     * @param module submodule identifier
+     * @param engine description of the simulation engine
+     */
     @Schema(name = "BacktestStatusResponse", description = "Readiness status of the backtesting engine.")
     public record BacktestStatusResponse(
             @Schema(description = "Engine status", example = "READY")
@@ -109,6 +135,16 @@ public class BacktestResource {
             String engine
     ) {}
 
+    /**
+     * Request payload for launching a backtest simulation run.
+     *
+     * @param strategyName mandatory name of the registered trading strategy to test
+     * @param symbol trading pair symbol (defaults to BTCUSDT if null)
+     * @param startDate optional ISO date string (yyyy-MM-dd) defining the simulation start bound
+     * @param endDate optional ISO date string (yyyy-MM-dd) defining the simulation end bound
+     * @param initialCapital optional starting account balance in USD (defaults to 10000.0)
+     * @param outputDirectory optional directory path where exported trade logs and metrics should be saved
+     */
     @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
     public record BacktestRunRequest(
             @Schema(description = "Mandatory trading strategy name to execute", example = "TWAPArbitrageStrategy", required = true)
@@ -130,6 +166,17 @@ public class BacktestResource {
             String outputDirectory
     ) {}
 
+    /**
+     * Response payload returning summary performance results and output file reference for a completed backtest run.
+     *
+     * @param strategyName name of the strategy evaluated
+     * @param symbol evaluated market asset pair
+     * @param executionTimeUtc timestamp when the simulation finished
+     * @param totalMarkets count of processed 15-minute market intervals
+     * @param metrics calculated financial and risk metrics (PnL, Sharpe ratio, win rate, etc.)
+     * @param tradeCount count of executed trades
+     * @param jsonFilePath absolute path to the generated JSON report file
+     */
     @Schema(name = "BacktestRunResponse", description = "Backtest simulation run results including performance metrics and output file location")
     public record BacktestRunResponse(
             @Schema(description = "Executed strategy name", example = "TWAPArbitrageStrategy")

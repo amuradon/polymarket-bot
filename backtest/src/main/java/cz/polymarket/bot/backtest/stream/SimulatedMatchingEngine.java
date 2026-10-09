@@ -33,6 +33,12 @@ public class SimulatedMatchingEngine {
     private String exitReason = null;
     private double exitFee = 0.0;
 
+    /**
+     * Constructs the simulated matching engine.
+     *
+     * @param orderBook reconstructed Polymarket L2 order book
+     * @param latencyMs simulated network and execution latency in milliseconds (e.g. 50ms)
+     */
     public SimulatedMatchingEngine(PolymarketOrderBook orderBook, long latencyMs) {
         if (orderBook == null) {
             throw new IllegalArgumentException("orderBook cannot be null");
@@ -41,10 +47,18 @@ public class SimulatedMatchingEngine {
         this.latencyMs = Math.max(0L, latencyMs);
     }
 
+    /**
+     * Registers the event scheduler consumer to dispatch delayed execution reports.
+     *
+     * @param eventScheduler consumer scheduling future BacktestEvents
+     */
     public void setEventScheduler(Consumer<BacktestEvent> eventScheduler) {
         this.eventScheduler = eventScheduler;
     }
 
+    /**
+     * Resets trade tracking state between candle intervals.
+     */
     public void resetForCandle() {
         this.hasActiveTrade = false;
         this.side = TradeDirection.NO_TRADE;
@@ -125,6 +139,16 @@ public class SimulatedMatchingEngine {
         }
     }
 
+    /**
+     * Resolves and finalizes an active trade against actual candle outcome or prior market exit.
+     * Computes net PnL after entry and exit fees, resulting account balance, and win/loss classification.
+     *
+     * @param candleStartSec candle interval start in epoch seconds
+     * @param datetimeUtc ISO-8601 formatted datetime UTC
+     * @param actualOutcome settled binary outcome direction
+     * @param currentBalance account balance before trade payout
+     * @return constructed TradeRecord, or null if no trade was active
+     */
     public TradeRecord finalizeTrade(long candleStartSec, String datetimeUtc, TradeDirection actualOutcome, double currentBalance) {
         if (!hasActiveTrade) {
             return null;
@@ -169,18 +193,30 @@ public class SimulatedMatchingEngine {
         );
     }
 
+    /**
+     * Checks if the matching engine currently holds an active trade.
+     */
     public boolean hasActiveTrade() {
         return hasActiveTrade;
     }
 
+    /**
+     * Returns the execution entry price of the active position.
+     */
     public double getEntryPrice() {
         return entryPrice;
     }
 
+    /**
+     * Returns the quantity of shares in the active position.
+     */
     public double getShares() {
         return shares;
     }
 
+    /**
+     * Returns the directional side of the active position.
+     */
     public TradeDirection getSide() {
         return side;
     }

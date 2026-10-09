@@ -23,6 +23,9 @@ public class PolymarketOrderBook {
     private double lastTradedPrice = 0.50;
     private long lastUpdateTimeMs = 0L;
 
+    /**
+     * Clears all bids, asks, and trading state in the book.
+     */
     public void clear() {
         bids.clear();
         asks.clear();
@@ -30,6 +33,13 @@ public class PolymarketOrderBook {
         lastUpdateTimeMs = 0L;
     }
 
+    /**
+     * Replaces the entire book depth from raw JSON snapshot strings.
+     *
+     * @param bidsJson JSON array string of bid price/size objects
+     * @param asksJson JSON array string of ask price/size objects
+     * @param timestampMs snapshot timestamp in milliseconds UTC
+     */
     public void applySnapshot(String bidsJson, String asksJson, long timestampMs) {
         bids.clear();
         asks.clear();
@@ -39,6 +49,14 @@ public class PolymarketOrderBook {
         parseBookLevels(asksJson, asks);
     }
 
+    /**
+     * Applies an incremental Level 2 delta update to the book.
+     *
+     * @param side order side ("BUY" modifies bids, "SELL" modifies asks)
+     * @param price price level
+     * @param size updated depth size (0 removes level)
+     * @param timestampMs delta update timestamp in milliseconds UTC
+     */
     public void applyDelta(String side, double price, double size, long timestampMs) {
         this.lastUpdateTimeMs = timestampMs;
         if ("BUY".equalsIgnoreCase(side)) {
@@ -56,6 +74,14 @@ public class PolymarketOrderBook {
         }
     }
 
+    /**
+     * Applies a reported trade execution to update the last traded price.
+     *
+     * @param price execution price
+     * @param size trade size
+     * @param side aggressor side
+     * @param timestampMs trade timestamp in milliseconds UTC
+     */
     public void applyTrade(double price, double size, String side, long timestampMs) {
         this.lastUpdateTimeMs = timestampMs;
         if (price > 0.0 && price < 1.0) {
@@ -63,6 +89,11 @@ public class PolymarketOrderBook {
         }
     }
 
+    /**
+     * Overwrites book top-of-book levels from a discrete {@link OrderBookQuote}.
+     *
+     * @param quote discrete quote instance
+     */
     public void applyQuote(OrderBookQuote quote) {
         if (quote == null) {
             return;
@@ -78,22 +109,37 @@ public class PolymarketOrderBook {
         }
     }
 
+    /**
+     * Returns best bid price for UP (YES) token.
+     */
     public double getBestBidUp() {
         return bids.isEmpty() ? 0.49 : bids.firstKey();
     }
 
+    /**
+     * Returns best ask price for UP (YES) token.
+     */
     public double getBestAskUp() {
         return asks.isEmpty() ? 0.50 : asks.firstKey();
     }
 
+    /**
+     * Returns derived best bid price for DOWN (NO) token via complementarity: P_bid_down = 1 - P_ask_up.
+     */
     public double getBestBidDown() {
         return Math.max(0.001, 1.0 - getBestAskUp());
     }
 
+    /**
+     * Returns derived best ask price for DOWN (NO) token via complementarity: P_ask_down = 1 - P_bid_up.
+     */
     public double getBestAskDown() {
         return Math.max(0.001, 1.0 - getBestBidUp());
     }
 
+    /**
+     * Calculates cumulative liquidity depth within 1 cent of best ask for UP.
+     */
     public double getDepth1cUp() {
         double bestAsk = getBestAskUp();
         double sum = 0.0;
@@ -107,6 +153,9 @@ public class PolymarketOrderBook {
         return sum > 0.0 ? sum : 300.0;
     }
 
+    /**
+     * Calculates cumulative liquidity depth within 1 cent of best bid for UP.
+     */
     public double getDepth1cDown() {
         double bestBid = getBestBidUp();
         double sum = 0.0;
@@ -120,6 +169,12 @@ public class PolymarketOrderBook {
         return sum > 0.0 ? sum : 300.0;
     }
 
+    /**
+     * Converts current book state into a unified {@link OrderBookQuote} snapshot.
+     *
+     * @param timestampMs current clock timestamp in milliseconds UTC
+     * @return constructed OrderBookQuote
+     */
     public OrderBookQuote toOrderBookQuote(long timestampMs) {
         double bAskUp = getBestAskUp();
         double bBidUp = getBestBidUp();
@@ -241,6 +296,9 @@ public class PolymarketOrderBook {
         return new FillResult(avgPrice, executedShares, fee);
     }
 
+    /**
+     * Parses raw JSON array string into navigable price-to-size map levels.
+     */
     private void parseBookLevels(String json, NavigableMap<Double, Double> map) {
         if (json == null || json.isBlank() || json.equals("null") || json.equals("[]")) {
             return;
@@ -264,5 +322,12 @@ public class PolymarketOrderBook {
         }
     }
 
+    /**
+     * Execution outcome of a simulated book sweep order.
+     *
+     * @param avgPrice volume-weighted average fill price
+     * @param executedShares total executed contract shares
+     * @param fee calculated taker fee in USD
+     */
     public record FillResult(double avgPrice, double executedShares, double fee) {}
 }

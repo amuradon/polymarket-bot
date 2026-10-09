@@ -33,6 +33,13 @@ public class BacktestDataCacheService {
     private final RawMarketDataProcessor processor;
     private final MissingRawDataRegistry missingRegistry;
 
+    /**
+     * Constructs the high-level backtest data cache service.
+     *
+     * @param cacheService low-level memory-mapped binary cache service
+     * @param processor raw market data ingestion processor
+     * @param missingRegistry registry recording missing datasets
+     */
     @Inject
     public BacktestDataCacheService(
             BinaryMarketCacheService cacheService,
@@ -43,6 +50,15 @@ public class BacktestDataCacheService {
         this.missingRegistry = missingRegistry;
     }
 
+    /**
+     * Loads, verifies, and merges cached market intervals and technical indicators for backtesting.
+     * Automatically triggers raw data ingestion on cache misses.
+     *
+     * @param symbol trading asset pair (e.g. BTCUSDT)
+     * @param startDateStr optional start date filter string (yyyy-MM-dd)
+     * @param endDateStr optional end date filter string (yyyy-MM-dd)
+     * @return chronologically sorted unmodifiable list of BacktestMarketRow instances
+     */
     public List<BacktestMarketRow> loadMarketData(String symbol, String startDateStr, String endDateStr) {
         String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
 
@@ -120,11 +136,17 @@ public class BacktestDataCacheService {
         return Collections.unmodifiableList(result);
     }
 
+    /**
+     * Ingests and binary-caches raw datasets for a specific month when a cache miss occurs.
+     */
     private void ensureMonthCached(String symbol, String month) {
         LOG.infof("Processing raw datasets for %s %s...", symbol, month);
         processor.processRawDataForMonth(symbol, month);
     }
 
+    /**
+     * Resolves the list of target months (YYYY-MM) needed to satisfy the date range or available cached/raw files.
+     */
     private List<String> resolveTargetMonths(String symbol, String startDateStr, String endDateStr) {
         List<String> months = new ArrayList<>();
         if (startDateStr != null && !startDateStr.isBlank() && endDateStr != null && !endDateStr.isBlank()) {

@@ -37,6 +37,11 @@ public class BinaryMarketCacheService {
 
     private final Path cacheDir;
 
+    /**
+     * Constructs the binary cache service pointing to the configured storage directory.
+     *
+     * @param cacheDirPath path to directory holding binary cache files
+     */
     @Inject
     public BinaryMarketCacheService(
             @ConfigProperty(name = "polymarket.backtest.cache-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting/cache")
@@ -52,28 +57,69 @@ public class BinaryMarketCacheService {
         }
     }
 
+    /**
+     * Returns the base directory where binary cache files are located.
+     *
+     * @return cache directory path
+     */
     public Path getCacheDir() {
         return cacheDir;
     }
 
+    /**
+     * Resolves the binary cache file path for base market rows.
+     *
+     * @param symbol trading asset pair (e.g. BTCUSDT)
+     * @param month target month in YYYY-MM format
+     * @return market binary File
+     */
     public File getMarketFile(String symbol, String month) {
         return cacheDir.resolve(String.format("market_%s_%s.bin", symbol.toUpperCase(), month)).toFile();
     }
 
+    /**
+     * Resolves the binary cache file path for a specific indicator.
+     *
+     * @param symbol trading asset pair (e.g. BTCUSDT)
+     * @param indicatorId unique indicator identifier (e.g. twap, basis, cvd)
+     * @param month target month in YYYY-MM format
+     * @return indicator binary File
+     */
     public File getIndicatorFile(String symbol, String indicatorId, String month) {
         return cacheDir.resolve(String.format("ind_%s_%s_%s.bin", symbol.toUpperCase(), indicatorId.toLowerCase(), month)).toFile();
     }
 
+    /**
+     * Checks whether valid cached market rows exist on disk for the given symbol and month.
+     *
+     * @param symbol asset symbol
+     * @param month target month (YYYY-MM)
+     * @return true if valid cache file exists
+     */
     public boolean hasMarketRowsCache(String symbol, String month) {
         File file = getMarketFile(symbol, month);
         return file.exists() && file.isFile() && file.length() >= 8;
     }
 
+    /**
+     * Checks whether valid cached indicator values exist on disk.
+     *
+     * @param symbol asset symbol
+     * @param indicatorId indicator identifier
+     * @param month target month (YYYY-MM)
+     * @return true if valid cache file exists
+     */
     public boolean hasIndicatorCache(String symbol, String indicatorId, String month) {
         File file = getIndicatorFile(symbol, indicatorId, month);
         return file.exists() && file.isFile() && file.length() >= 6;
     }
 
+    /**
+     * Lists all cached months available on disk for a given symbol.
+     *
+     * @param symbol asset symbol (e.g. BTCUSDT)
+     * @return sorted list of available months in YYYY-MM format
+     */
     public List<String> getAvailableMonths(String symbol) {
         File[] files = cacheDir.toFile().listFiles((dir, name) ->
                 name.startsWith(String.format("market_%s_", symbol.toUpperCase())) && name.endsWith(".bin"));
@@ -91,6 +137,15 @@ public class BinaryMarketCacheService {
         return Collections.unmodifiableList(months);
     }
 
+    /**
+     * Writes dynamic indicator values to memory-mapped binary cache format (magic IND1).
+     *
+     * @param symbol asset pair symbol
+     * @param indicatorId indicator identifier
+     * @param month month string (YYYY-MM)
+     * @param keys ordered list of metric column names
+     * @param records map of interval start timestamps to indicator metric values
+     */
     public void writeIndicatorCache(
             String symbol,
             String indicatorId,
@@ -159,6 +214,14 @@ public class BinaryMarketCacheService {
         }
     }
 
+    /**
+     * Reads cached indicator records from memory-mapped binary file using zero-copy reading.
+     *
+     * @param symbol trading asset pair
+     * @param indicatorId indicator identifier
+     * @param month target month (YYYY-MM)
+     * @return unmodifiable map of interval timestamps to metric key-value pairs
+     */
     public Map<Long, Map<String, Double>> readIndicatorCache(String symbol, String indicatorId, String month) {
         File file = getIndicatorFile(symbol, indicatorId, month);
         if (!file.exists() || file.length() == 0) {
@@ -207,6 +270,13 @@ public class BinaryMarketCacheService {
         return Collections.unmodifiableMap(result);
     }
 
+    /**
+     * Serializes base market intervals into high-performance binary format (magic MKT1).
+     *
+     * @param symbol trading asset pair
+     * @param month target month (YYYY-MM)
+     * @param rows list of cached market rows
+     */
     public void writeMarketRowsCache(String symbol, String month, List<CachedMarketRow> rows) {
         if (rows == null) {
             return;
@@ -289,6 +359,13 @@ public class BinaryMarketCacheService {
         }
     }
 
+    /**
+     * Reads all cached market rows for a month using zero-copy memory-mapped file channels.
+     *
+     * @param symbol trading asset pair
+     * @param month target month (YYYY-MM)
+     * @return unmodifiable list of parsed CachedMarketRow instances
+     */
     public List<CachedMarketRow> readMarketRowsCache(String symbol, String month) {
         File file = getMarketFile(symbol, month);
         if (!file.exists() || file.length() == 0) {

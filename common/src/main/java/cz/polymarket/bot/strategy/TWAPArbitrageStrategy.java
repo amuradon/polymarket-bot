@@ -58,6 +58,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private volatile String activeClientOrderId = null;
     private volatile boolean isLateArbPosition = false;
 
+    /**
+     * Declares the set of technical indicators required by this strategy.
+     * The engine ensures these are calculated and updated dynamically.
+     *
+     * @return the set of required indicator types
+     */
     @Override
     public Set<IndicatorType> getRequiredIndicators() {
         return Set.of(
@@ -69,10 +75,18 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         );
     }
 
+    /**
+     * Explicitly sets the current basis spread in basis points (used in testing or calibration).
+     *
+     * @param basisBps basis spread in basis points
+     */
     public void setCurrentBasisBps(double basisBps) {
         this.currentBasisBps = basisBps;
     }
 
+    /**
+     * Resets the internal state of the strategy between candles or test runs.
+     */
     @Override
     public void reset() {
         activeCandleStart.set(0);
@@ -101,6 +115,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         activeClientOrderId = null;
     }
 
+    /**
+     * Constructs the TWAPArbitrageStrategy with injected statistical probability model and configuration.
+     *
+     * @param probabilityModel predictive model computing directional probability and edge
+     * @param config empirical strategy threshold and parameter configuration bean
+     */
     @Inject
     public TWAPArbitrageStrategy(
             NextCandleProbabilityModel probabilityModel,
@@ -115,6 +135,11 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         this.config = config;
     }
 
+    /**
+     * Initializes the strategy with the execution context (routing and price caches).
+     *
+     * @param context the strategy execution context
+     */
     @Override
     public void init(StrategyContext context) {
         if (context == null) {
@@ -123,11 +148,21 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         this.context = context;
     }
 
+    /**
+     * Returns the primary market timeframe evaluated by this strategy (15 minutes).
+     *
+     * @return 15-minute timeframe
+     */
     @Override
     public Timeframe getTimeframe() {
         return Timeframe.FIFTEEN_MINUTES;
     }
 
+    /**
+     * Handles incoming aggregate TWAP reference price updates, advancing active candle state.
+     *
+     * @param update latest aggregate TWAP sample update
+     */
     @Override
     public void onTwapUpdate(TwapUpdate update) {
         if (update == null) {
@@ -170,6 +205,13 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Receives dynamically calculated indicator updates from the engine on-the-fly.
+     *
+     * @param type technical indicator type
+     * @param value newly computed indicator value
+     * @param timestampMs event timestamp in milliseconds UTC
+     */
     @Override
     public void onIndicatorUpdate(IndicatorType type, double value, long timestampMs) {
         if (type == null) {
@@ -189,6 +231,11 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Handles order execution feedback from matching engine or exchange (fills, rejections).
+     *
+     * @param report execution report containing order status and executed price/size
+     */
     @Override
     public void onExecutionReport(ExecutionReport report) {
         if (report == null || report.clientOrderId() == null) {
@@ -213,6 +260,14 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Updates current spot asset price and clock upon receiving a Binance Spot aggTrade.
+     *
+     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param price execution price
+     * @param quantity trade volume
+     * @param isBuyerMaker true if maker was buyer (aggressive sell), false if aggressive buy
+     */
     @Override
     public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
         if (price > 0.0) {
@@ -223,6 +278,14 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Updates basis spread upon receiving a Binance Futures aggTrade.
+     *
+     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param price futures execution price
+     * @param quantity trade volume
+     * @param isBuyerMaker true if maker was buyer, false if aggressive buy
+     */
     @Override
     public void onBinanceFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
         if (this.currentSpotPrice > 0.0) {
@@ -230,11 +293,21 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Handles candle completion notification for historical metrics tracking.
+     *
+     * @param candle completed market candle interval
+     */
     @Override
     public void onMarketCandleCompleted(MarketCandle candle) {
         // Strategy relies on engine to compute historical indicator metrics
     }
 
+    /**
+     * Evaluates entry or exit decisions upon receiving an updated Polymarket order book quote.
+     *
+     * @param quote current order book quote with best bids, asks, and depth
+     */
     @Override
     public void onOrderBookQuote(OrderBookQuote quote) {
         if (quote == null || context == null) {
@@ -266,6 +339,11 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Handles binary contract outcome resolution at candle close (payout 1.0 or 0.0).
+     *
+     * @param actualOutcome settled binary outcome direction (UP or DOWN)
+     */
     @Override
     public void onCandleResolution(TradeDirection actualOutcome) {
         if (!hasPosition || positionClosed || context == null) {
@@ -281,6 +359,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Evaluates statistical entry criteria during Phase 1 (typically at t = 60s).
+     * Combines mean-reversion VWAP z-score, CVD delta flows, and basis spread.
+     *
+     * @param quote current order book quote
+     */
     private void evaluatePhase1Entry(OrderBookQuote quote) {
         phase1Evaluated = true;
 
@@ -307,6 +391,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Evaluates late oracle lock-in arbitrage during Phase 2 (typically at t = 600s / 10m).
+     * Locks in high-probability outcome when spot distance from TWAP open exceeds threshold.
+     *
+     * @param quote current order book quote
+     */
     private void evaluatePhase2LateArb(OrderBookQuote quote) {
         phase2Evaluated = true;
 
@@ -332,6 +422,11 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Evaluates exit conditions for an open position: Take-Profit (0.70) or Trailing Stop (+0.05).
+     *
+     * @param quote current order book quote
+     */
     private void evaluatePositionExit(OrderBookQuote quote) {
         double currentContractPrice = (positionSide == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
 
@@ -356,6 +451,11 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    /**
+     * Submits a market/taker buy order to enter a position based on strategy signal.
+     *
+     * @param signal directional trade signal with suggested size and market price
+     */
     private void submitEntryOrder(StrategySignal signal) {
         String clientOrderId = "twap-entry-" + UUID.randomUUID();
         this.activeClientOrderId = clientOrderId;
@@ -381,6 +481,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         context.getExecutionRouter().submitOrder(command);
     }
 
+    /**
+     * Submits a sell order to close an existing open position before candle resolution.
+     *
+     * @param exitPrice target limit price for the exit order
+     * @param reason human-readable justification (e.g. Take Profit or Trailing Stop)
+     */
     private void submitExitOrder(double exitPrice, String reason) {
         positionClosed = true;
         String clientOrderId = "twap-exit-" + UUID.randomUUID();
@@ -403,59 +509,131 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         context.getExecutionRouter().submitOrder(command);
     }
 
+    /**
+     * Calculates Polymarket crypto binary option taker fee based on fee curve formula:
+     * Fee = shares * feeRate * price * (1.0 - price).
+     *
+     * @param shares trade volume in shares
+     * @param price execution contract price between 0.0 and 1.0
+     * @return calculated fee in USD
+     */
     public double calculateTakerFee(double shares, double price) {
         return shares * config.takerFeeRate() * price * (1.0 - price);
     }
 
-    // Getters for strategy introspection & unit testing
+    /**
+     * Checks whether the strategy currently holds an active open contract position.
+     *
+     * @return true if holding an open position
+     */
     public boolean hasPosition() {
         return hasPosition;
     }
 
+    /**
+     * Returns the side of the currently held position (UP, DOWN, or NO_TRADE).
+     *
+     * @return active position direction
+     */
     public TradeDirection getPositionSide() {
         return positionSide;
     }
 
+    /**
+     * Returns the execution entry price of the active position.
+     *
+     * @return entry price
+     */
     public double getEntryPrice() {
         return entryPrice;
     }
 
+    /**
+     * Returns the total position capital invested in USD.
+     *
+     * @return position size in USD
+     */
     public double getSizeUsd() {
         return sizeUsd;
     }
 
+    /**
+     * Returns the quantity of contract shares purchased.
+     *
+     * @return share volume
+     */
     public double getShares() {
         return shares;
     }
 
+    /**
+     * Checks whether trailing stop profit-protection has been armed.
+     *
+     * @return true if trailing stop is armed
+     */
     public boolean isTrailingStopArmed() {
         return trailingStopArmed;
     }
 
+    /**
+     * Checks whether the active position has been closed prior to resolution.
+     *
+     * @return true if position is closed
+     */
     public boolean isPositionClosed() {
         return positionClosed;
     }
 
+    /**
+     * Returns the starting epoch second of the current 15-minute candle.
+     *
+     * @return start timestamp in seconds UTC
+     */
     public long getActiveCandleStart() {
         return activeCandleStart.get();
     }
 
+    /**
+     * Returns the ending epoch second of the current 15-minute candle.
+     *
+     * @return end timestamp in seconds UTC
+     */
     public long getActiveCandleEnd() {
         return activeCandleEnd.get();
     }
 
+    /**
+     * Returns the opening reference spot price used for TWAP comparison.
+     *
+     * @return TWAP open price
+     */
     public double getTwapOpenPrice() {
         return twapOpenPrice;
     }
 
+    /**
+     * Returns the current observed Binance spot price.
+     *
+     * @return current spot price
+     */
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
     }
 
+    /**
+     * Returns the current basis spread in basis points.
+     *
+     * @return basis in bps
+     */
     public double getCurrentBasisBps() {
         return currentBasisBps;
     }
 
+    /**
+     * Returns the strategy configuration bean.
+     *
+     * @return strategy config
+     */
     public TWAPArbitrageStrategyConfig getConfig() {
         return config;
     }

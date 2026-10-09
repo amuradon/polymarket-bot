@@ -33,28 +33,56 @@ public class ChronologicalEventStreamer {
 
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>();
 
+    /**
+     * Checks if there are pending events in the priority queue.
+     *
+     * @return true if more events exist
+     */
     public boolean hasNext() {
         return !queue.isEmpty();
     }
 
+    /**
+     * Retrieves and removes the next chronological event from the priority queue.
+     *
+     * @return next event, or null if queue is empty
+     */
     public BacktestEvent next() {
         return queue.poll();
     }
 
+    /**
+     * Inspects the next chronological event without removing it from the queue.
+     *
+     * @return next event, or null if queue is empty
+     */
     public BacktestEvent peek() {
         return queue.peek();
     }
 
+    /**
+     * Schedules a future or immediate event into the chronological queue.
+     *
+     * @param event BacktestEvent to schedule
+     */
     public void scheduleEvent(BacktestEvent event) {
         if (event != null) {
             queue.add(event);
         }
     }
 
+    /**
+     * Clears all pending events from the queue.
+     */
     public void clear() {
         queue.clear();
     }
 
+    /**
+     * Returns the number of events currently queued.
+     *
+     * @return queue size
+     */
     public int size() {
         return queue.size();
     }
@@ -62,6 +90,11 @@ public class ChronologicalEventStreamer {
     /**
      * Loads events for a specific 15-minute candle interval into the priority queue.
      * Uses raw data files if available, otherwise synthesizes events from candle metrics.
+     *
+     * @param candle candle interval market row
+     * @param preferRawFiles true to attempt loading granular raw Parquet events
+     * @param rawProcessor processor providing raw directory locations and reading
+     * @param symbol trading asset pair
      */
     public void loadCandleEvents(
             BacktestMarketRow candle,
@@ -108,6 +141,14 @@ public class ChronologicalEventStreamer {
         }
     }
 
+    /**
+     * Attempts to read raw Level 2 Polymarket book snapshots, deltas, and trades from Parquet file.
+     *
+     * @param candle market row
+     * @param rawProcessor processor resolving directory paths
+     * @param symbol asset symbol
+     * @return true if raw events were successfully read and scheduled
+     */
     private boolean tryLoadFromRawFiles(BacktestMarketRow candle, RawMarketDataProcessor rawProcessor, String symbol) {
         long tStart = candle.tStart();
         long tEnd = candle.tEnd();
@@ -156,7 +197,7 @@ public class ChronologicalEventStreamer {
         scheduleEvent(new BacktestEvent.TwapUpdateEvent(
                 (tStart + 60L) * 1000L,
                 new TwapUpdate(
-                        Timeframe.FIFTEEN_MINUTES,
+                    Timeframe.FIFTEEN_MINUTES,
                         tStart,
                         tEnd,
                         BigDecimal.valueOf(candle.twapOpen()),
@@ -172,6 +213,12 @@ public class ChronologicalEventStreamer {
         return loadedCount > 0;
     }
 
+    /**
+     * Synthesizes representative intra-candle events (t=0s open, t=60s Phase 1, t=300s Phase 2, t=900s close)
+     * using metrics stored in the cached market row.
+     *
+     * @param candle candle market row
+     */
     private void loadSynthesizedCandleEvents(BacktestMarketRow candle) {
         long tStart = candle.tStart();
         long tEnd = candle.tEnd();

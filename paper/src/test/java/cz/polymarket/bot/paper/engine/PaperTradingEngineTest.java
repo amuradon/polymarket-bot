@@ -119,7 +119,9 @@ class PaperTradingEngineTest {
         assertThat(engine.getActivePosition()).isNull();
 
         // Wait for latency expiration
-        Thread.sleep(60);
+        for (int i = 0; i < 50 && engine.getActivePosition() == null; i++) {
+            Thread.sleep(20);
+        }
 
         PaperPosition pos = engine.getActivePosition();
         assertThat(pos).isNotNull();

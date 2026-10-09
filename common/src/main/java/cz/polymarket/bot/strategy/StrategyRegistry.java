@@ -19,6 +19,11 @@ public class StrategyRegistry {
     private final Map<String, TradingStrategy> strategies;
     private final Map<String, TradingStrategy> lowercaseIndex;
 
+    /**
+     * CDI constructor dynamically injecting all discovered {@link TradingStrategy} beans.
+     *
+     * @param strategyInstances iterable instance of discovered strategy CDI beans
+     */
     @Inject
     public StrategyRegistry(Instance<TradingStrategy> strategyInstances) {
         Map<String, TradingStrategy> map = new HashMap<>();
@@ -33,6 +38,11 @@ public class StrategyRegistry {
         this.lowercaseIndex = Collections.unmodifiableMap(lowerMap);
     }
 
+    /**
+     * Programmatic constructor registering an explicit map of trading strategies.
+     *
+     * @param strategies map of strategy names to strategy implementations
+     */
     public StrategyRegistry(Map<String, TradingStrategy> strategies) {
         Map<String, TradingStrategy> map = new HashMap<>();
         Map<String, TradingStrategy> lowerMap = new HashMap<>();
@@ -46,6 +56,13 @@ public class StrategyRegistry {
         this.lowercaseIndex = Collections.unmodifiableMap(lowerMap);
     }
 
+    /**
+     * Resolves a trading strategy by its case-insensitive name.
+     *
+     * @param name name of the strategy to find (e.g. "TWAPArbitrageStrategy")
+     * @return matching TradingStrategy instance
+     * @throws IllegalArgumentException if name is blank or strategy is not registered
+     */
     public TradingStrategy getStrategy(String name) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Strategy name cannot be null or blank");
@@ -60,6 +77,11 @@ public class StrategyRegistry {
         return strategy;
     }
 
+    /**
+     * Returns the set of all registered strategy names.
+     *
+     * @return unmodifiable set of available strategy names
+     */
     public Set<String> getAvailableStrategies() {
         return strategies.keySet();
     }

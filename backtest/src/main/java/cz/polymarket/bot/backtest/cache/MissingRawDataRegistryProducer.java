@@ -6,9 +6,19 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.nio.file.Path;
 
+/**
+ * CDI Producer providing application-scoped singleton of {@link MissingRawDataRegistry}.
+ * Loads existing tracked missing raw data from disk on startup.
+ */
 @ApplicationScoped
 public class MissingRawDataRegistryProducer {
 
+    /**
+     * Produces the application-wide MissingRawDataRegistry instance for BTCUSDT.
+     *
+     * @param cacheDir path to backtesting cache directory
+     * @return loaded or freshly initialized MissingRawDataRegistry
+     */
     @Produces
     @ApplicationScoped
     public MissingRawDataRegistry produceRegistry(

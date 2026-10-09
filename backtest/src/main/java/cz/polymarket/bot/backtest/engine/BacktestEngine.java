@@ -45,6 +45,17 @@ public class BacktestEngine {
     private final String defaultOutputDir;
     private final double defaultCapital;
 
+    /**
+     * Primary constructor with all dependencies injected.
+     *
+     * @param dataCacheService high-level market data caching service
+     * @param rawMarketDataProcessor processor for optional raw trade/orderbook streaming
+     * @param strategyRegistry registry resolving requested strategies
+     * @param metricsCalculator performance metrics calculation service
+     * @param jsonExporter exporter serializing backtest results to disk
+     * @param defaultOutputDir default destination directory for output JSON artifacts
+     * @param defaultCapital default initial trading balance in USD
+     */
     @Inject
     public BacktestEngine(
             BacktestDataCacheService dataCacheService,
@@ -77,6 +88,16 @@ public class BacktestEngine {
         this.defaultCapital = defaultCapital;
     }
 
+    /**
+     * Convenience constructor omitting optional raw data processor.
+     *
+     * @param dataCacheService high-level market data caching service
+     * @param strategyRegistry registry resolving requested strategies
+     * @param metricsCalculator performance metrics calculation service
+     * @param jsonExporter exporter serializing backtest results to disk
+     * @param defaultOutputDir default destination directory for output JSON artifacts
+     * @param defaultCapital default initial trading balance in USD
+     */
     public BacktestEngine(
             BacktestDataCacheService dataCacheService,
             StrategyRegistry strategyRegistry,
@@ -87,6 +108,19 @@ public class BacktestEngine {
         this(dataCacheService, null, strategyRegistry, metricsCalculator, jsonExporter, defaultOutputDir, defaultCapital);
     }
 
+    /**
+     * Executes an event-driven backtest simulation for a specified strategy over historical market data.
+     * Emulates live streaming WebSocket events, on-the-fly dynamic indicators, realistic order matching
+     * with execution latency, and exports final metrics and trade log to JSON.
+     *
+     * @param strategyName registered name of trading strategy (e.g. "TWAPArbitrageStrategy")
+     * @param symbol trading asset pair (e.g. "BTCUSDT")
+     * @param startDate optional start date string (yyyy-MM-dd)
+     * @param endDate optional end date string (yyyy-MM-dd)
+     * @param initialCapital optional initial account balance in USD (default 10,000)
+     * @param outputDirectory optional directory path to store output JSON
+     * @return BacktestResult containing summary metrics, trade records, and exported file path
+     */
     public BacktestResult runBacktest(
             String strategyName,
             String symbol,

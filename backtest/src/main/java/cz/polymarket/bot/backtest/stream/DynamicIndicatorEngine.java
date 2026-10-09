@@ -44,17 +44,31 @@ public class DynamicIndicatorEngine {
     private double currentObi = 0.0;
     private double currentMicroPrice = 0.0;
 
+    /**
+     * Constructs the dynamic indicator engine configured with the indicators required by the active strategy.
+     *
+     * @param requiredIndicators set of indicator types to compute
+     */
     public DynamicIndicatorEngine(Set<IndicatorType> requiredIndicators) {
         this.requiredIndicators = (requiredIndicators != null) ? requiredIndicators : Collections.emptySet();
         reset();
     }
 
+    /**
+     * Resets the entire engine state including historical candles and computed indicator caches.
+     */
     public void reset() {
         candleHistory.clear();
         currentValues.clear();
         resetActiveCandle(0L, 0.0);
     }
 
+    /**
+     * Resets intra-candle rolling accumulators for a new active candle interval.
+     *
+     * @param startMs candle start timestamp in milliseconds UTC
+     * @param openPrice candle opening spot price
+     */
     public void resetActiveCandle(long startMs, double openPrice) {
         this.activeCandleStartMs = startMs;
         this.twapOpenPrice = openPrice;
@@ -66,6 +80,11 @@ public class DynamicIndicatorEngine {
         recalculateAll();
     }
 
+    /**
+     * Appends a completed market candle to historical memory and recalculates multi-candle indicators.
+     *
+     * @param candle completed domain market candle
+     */
     public void onMarketCandleCompleted(MarketCandle candle) {
         if (candle != null) {
             candleHistory.add(candle);
@@ -73,6 +92,14 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    /**
+     * Updates rolling price, TWAP, VWAP, CVD, and Basis indicators upon receiving a spot trade.
+     *
+     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param price spot execution price
+     * @param quantity trade volume in BTC
+     * @param isBuyerMaker true if maker was buyer (aggressive sell), false if aggressive buy
+     */
     public void onSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
         this.currentSpotPrice = price;
 
@@ -108,6 +135,14 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    /**
+     * Updates futures reference price and basis spread upon receiving a futures trade.
+     *
+     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param price futures execution price
+     * @param quantity trade volume
+     * @param isBuyerMaker true if maker was buyer, false if aggressive buy
+     */
     public void onFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
         this.currentFuturesPrice = price;
 
@@ -117,6 +152,16 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    /**
+     * Updates order book imbalance (OBI) and depth-weighted micro price from book depth.
+     *
+     * @param timestampMs event timestamp in milliseconds UTC
+     * @param bestBid best bid price
+     * @param bestAsk best ask price
+     * @param depthBids total depth of top bids
+     * @param depthAsks total depth of top asks
+     * @param obi order book imbalance ratio
+     */
     public void onFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {
         if (requiredIndicators.contains(IndicatorType.ORDER_BOOK_IMBALANCE)) {
             this.currentObi = obi;
@@ -134,6 +179,9 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    /**
+     * Recalculates indicators that depend on completed candle history or base parameters.
+     */
     private void recalculateAll() {
         if (requiredIndicators.contains(IndicatorType.VOLATILITY_4H)) {
             double vol4h = volCalculator.calculate4hRealizedVolatility(candleHistory);
@@ -159,26 +207,49 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    /**
+     * Returns the current on-the-fly value of the requested indicator type.
+     *
+     * @param type indicator type
+     * @return indicator value, or Double.NaN if uncomputed
+     */
     public double getIndicatorValue(IndicatorType type) {
         return currentValues.getOrDefault(type, Double.NaN);
     }
 
+    /**
+     * Returns an unmodifiable snapshot of all currently computed indicators.
+     *
+     * @return map of indicator types to values
+     */
     public Map<IndicatorType, Double> getAllIndicators() {
         return Collections.unmodifiableMap(currentValues);
     }
 
+    /**
+     * Returns the latest observed spot asset price.
+     */
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
     }
 
+    /**
+     * Returns the latest observed futures asset price.
+     */
     public double getCurrentFuturesPrice() {
         return currentFuturesPrice;
     }
 
+    /**
+     * Returns the current basis spread in basis points.
+     */
     public double getCurrentBasisBps() {
         return currentBasisBps;
     }
 
+    /**
+     * Returns the opening reference price for TWAP comparison.
+     */
     public double getTwapOpenPrice() {
         return twapOpenPrice;
     }

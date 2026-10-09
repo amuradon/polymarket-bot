@@ -57,6 +57,14 @@ public class RawMarketDataProcessor {
     private final Path binanceBaseDir;
     private final Path polymarketBaseDir;
 
+    /**
+     * Constructs the processor injecting cache service, missing registry, and base file paths.
+     *
+     * @param cacheService binary market cache service
+     * @param missingRegistry registry tracking missing parquet/csv files
+     * @param binanceBaseDirStr path to Binance raw data root directory
+     * @param polymarketBaseDirStr path to Polymarket raw data root directory
+     */
     @Inject
     public RawMarketDataProcessor(
             BinaryMarketCacheService cacheService,
@@ -71,14 +79,26 @@ public class RawMarketDataProcessor {
         this.polymarketBaseDir = Path.of(polymarketBaseDirStr);
     }
 
+    /**
+     * Returns the underlying binary cache service.
+     */
     public BinaryMarketCacheService getCacheService() {
         return cacheService;
     }
 
+    /**
+     * Returns the missing raw data registry.
+     */
     public MissingRawDataRegistry getMissingRegistry() {
         return missingRegistry;
     }
 
+    /**
+     * Resolves the Polymarket raw Parquet directory for the given symbol (e.g. btc-up-or-down-15m).
+     *
+     * @param symbol asset symbol (e.g. BTCUSDT)
+     * @return Path to directory containing raw Polymarket 15m Parquet files
+     */
     public Path getPolymarketDir(String symbol) {
         // e.g. D:/Crypto/data/Polymarket/btc-up-or-down-15m
         if (symbol != null && symbol.toUpperCase().startsWith("BTC")) {
@@ -95,6 +115,12 @@ public class RawMarketDataProcessor {
         return polymarketBaseDir.resolve("btc-up-or-down-15m");
     }
 
+    /**
+     * Resolves the Binance Futures OrderBook Parquet directory.
+     *
+     * @param symbol asset symbol
+     * @return Path to Binance Futures orderbook directory
+     */
     public Path getBinanceFuturesOrderBookDir(String symbol) {
         // baseBinanceDir may be D:/Crypto/data/Polymarket/Binance or D:/Crypto/data/Polymarket
         Path direct = binanceBaseDir.resolve("futures").resolve(symbol.toUpperCase()).resolve("orderBook");
@@ -108,6 +134,12 @@ public class RawMarketDataProcessor {
         return direct;
     }
 
+    /**
+     * Resolves the Binance Spot aggTrades CSV directory.
+     *
+     * @param symbol asset symbol
+     * @return Path to Binance Spot aggTrades directory
+     */
     public Path getBinanceSpotAggTradesDir(String symbol) {
         Path direct = binanceBaseDir.resolve("spot").resolve(symbol.toUpperCase()).resolve("aggTrades");
         if (Files.exists(direct)) {
@@ -120,6 +152,12 @@ public class RawMarketDataProcessor {
         return direct;
     }
 
+    /**
+     * Resolves the Binance Futures aggTrades CSV directory.
+     *
+     * @param symbol asset symbol
+     * @return Path to Binance Futures aggTrades directory
+     */
     public Path getBinanceFuturesAggTradesDir(String symbol) {
         Path direct = binanceBaseDir.resolve("futures").resolve(symbol.toUpperCase()).resolve("aggTrades");
         if (Files.exists(direct)) {
@@ -132,6 +170,13 @@ public class RawMarketDataProcessor {
         return direct;
     }
 
+    /**
+     * Checks for presence of raw Polymarket and OrderBook files and registers any missing entries.
+     *
+     * @param symbol asset symbol
+     * @param tStart interval start timestamp in seconds
+     * @param dateHour formatted date-hour string
+     */
     public void checkAndRecordMissingRawFiles(String symbol, long tStart, String dateHour) {
         Path pmFile = getPolymarketDir(symbol).resolve(tStart + ".parquet");
         if (!Files.exists(pmFile)) {
@@ -148,7 +193,11 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Imports market rows into memory-mapped cache files, splitting indicators into separate binary files.
+     * Imports market rows into memory-mapped binary cache files, splitting indicators into separate binary files.
+     *
+     * @param symbol trading asset pair (e.g. BTCUSDT)
+     * @param month target month in YYYY-MM format
+     * @param rows list of aggregated BacktestMarketRow instances
      */
     public void importMarketRows(String symbol, String month, List<BacktestMarketRow> rows) {
         if (rows == null || rows.isEmpty()) {
@@ -212,7 +261,13 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Computes technical indicators: VWAP, CVD, and 4h Realized Volatility.
+     * Computes technical indicators across sequential market intervals:
+     * - Rolling VWAP and Z-score
+     * - Cumulative Volume Delta (15m, 1h, 4h) and order absorption divergence
+     * - 4-hour realized volatility
+     *
+     * @param rows sequence of cached market intervals
+     * @return map of indicator identifier to map of interval start epoch seconds to metric key-value pairs
      */
     public Map<String, Map<Long, Map<String, Double>>> computeIndicators(List<CachedMarketRow> rows) {
         Map<String, Map<Long, Map<String, Double>>> result = new HashMap<>();
@@ -312,7 +367,12 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Processes raw multi-source data for a given month (e.g. "2026-10") and populates the binary cache.
+     * Ingests, processes, aggregates, and caches multi-source raw market data for a given month.
+     * Merges Binance Spot CSVs, Binance Futures CSVs, Binance Futures OrderBook Parquets,
+     * and Polymarket 15m Parquet books.
+     *
+     * @param symbol trading asset pair (e.g. BTCUSDT)
+     * @param month target month string (YYYY-MM)
      */
     public void processRawDataForMonth(String symbol, String month) {
         LOG.infof("Starting raw data processing for symbol %s month %s...", symbol, month);
@@ -481,6 +541,14 @@ public class RawMarketDataProcessor {
         }
     }
 
+    /**
+     * Reconstructs Polymarket orderbook and trade activity for a 15-minute interval from Parquet.
+     * Extracts best quotes at t=0s, 60s, 180s, 300s, simulated fills for $100 orders, and depth.
+     *
+     * @param pmFile Path to Polymarket parquet file for the interval
+     * @param tStartSec interval start timestamp in seconds
+     * @return PolymarketExtractedData containing snapshot quotes and execution benchmarks
+     */
     public PolymarketExtractedData extractPolymarketData(Path pmFile, long tStartSec) {
         String normPath = pmFile.toAbsolutePath().toString().replace('\\', '/');
         String query = "SELECT event_type, t, price, size, side, bids, asks FROM read_parquet('" + normPath + "') ORDER BY t ASC";
@@ -587,6 +655,14 @@ public class RawMarketDataProcessor {
         );
     }
 
+    /**
+     * Extracts Binance Futures Order Book Imbalance (OBI) at a target timestamp from hourly Parquet.
+     * Computes imbalance across top 5 bid and ask depth levels.
+     *
+     * @param obFile Path to Binance Futures orderbook Parquet file
+     * @param targetSec target epoch second
+     * @return BinanceObiExtractedData containing OBI ratio, mid price, and depth sums
+     */
     public BinanceObiExtractedData extractBinanceObi(Path obFile, long targetSec) {
         String normPath = obFile.toAbsolutePath().toString().replace('\\', '/');
         long targetMs = targetSec * 1000L;
@@ -649,6 +725,9 @@ public class RawMarketDataProcessor {
         return new BinanceObiExtractedData(obi, mid, vb, va);
     }
 
+    /**
+     * Parses JSON representation of book price levels into the destination map.
+     */
     private void parseBookJson(String json, Map<Double, Double> target) {
         target.clear();
         if (json == null || json.isBlank()) return;
@@ -667,6 +746,9 @@ public class RawMarketDataProcessor {
         }
     }
 
+    /**
+     * Returns best ask price from asks map, or fallback if empty.
+     */
     private double getBestAsk(Map<Double, Double> asks, double fallback) {
         if (asks == null || asks.isEmpty()) return fallback;
         double min = Double.MAX_VALUE;
@@ -676,6 +758,9 @@ public class RawMarketDataProcessor {
         return (min != Double.MAX_VALUE) ? min : fallback;
     }
 
+    /**
+     * Returns best bid price from bids map, or fallback if empty.
+     */
     private double getBestBid(Map<Double, Double> bids, double fallback) {
         if (bids == null || bids.isEmpty()) return fallback;
         double max = -1.0;
@@ -685,6 +770,9 @@ public class RawMarketDataProcessor {
         return (max > 0.0) ? max : fallback;
     }
 
+    /**
+     * Calculates cumulative liquidity depth within 1 cent of best price.
+     */
     private double getDepthWithin1c(Map<Double, Double> book, double bestPrice, boolean isAsk) {
         if (book == null || book.isEmpty()) return 300.0;
         double depth = 0.0;
@@ -700,6 +788,9 @@ public class RawMarketDataProcessor {
         return depth > 0.0 ? depth : 300.0;
     }
 
+    /**
+     * Simulates walking the book levels for a trade size, calculating volume-weighted fill price and taker fee.
+     */
     private FillFeeResult calculateFillAndFee(Map<Double, Double> levels, double sizeUsd, boolean isUp) {
         if (levels == null || levels.isEmpty()) {
             return new FillFeeResult(0.50, 0.015);
@@ -745,6 +836,9 @@ public class RawMarketDataProcessor {
         return new FillFeeResult(0.50, 0.015);
     }
 
+    /**
+     * Reads Binance Spot aggTrades from CSV file (transact_time in microseconds).
+     */
     private List<TradeRecordSimple> readSpotTrades(File csvFile) {
         List<TradeRecordSimple> trades = new ArrayList<>();
         try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
@@ -767,6 +861,9 @@ public class RawMarketDataProcessor {
         return trades;
     }
 
+    /**
+     * Reads Binance Futures aggTrades from CSV file (transact_time in milliseconds).
+     */
     private List<TradeRecordSimple> readFuturesTrades(File csvFile) {
         List<TradeRecordSimple> trades = new ArrayList<>();
         try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
@@ -789,6 +886,9 @@ public class RawMarketDataProcessor {
         return trades;
     }
 
+    /**
+     * Aggregates fine-grained trades into 15-minute interval OHLCV and CVD candles.
+     */
     private Map<Long, IntervalCandle> aggregate15m(List<TradeRecordSimple> trades) {
         Map<Long, List<TradeRecordSimple>> grouped = new LinkedHashMap<>();
         for (TradeRecordSimple t : trades) {
@@ -824,6 +924,9 @@ public class RawMarketDataProcessor {
         return candles;
     }
 
+    /**
+     * Computes volume-weighted average price (TWAP approximation) over a trailing window in seconds.
+     */
     private double computeTwap(List<TradeRecordSimple> trades, long tEndSec, double windowSec) {
         double tStartSec = tEndSec - windowSec;
         double volSum = 0.0;
@@ -837,8 +940,19 @@ public class RawMarketDataProcessor {
         return (volSum > 0.0) ? (usdSum / volSum) : 0.0;
     }
 
+    /**
+     * Minimal trade record holding execution second, price, volume, and aggressor side.
+     */
     public record TradeRecordSimple(double tSec, double price, double qty, boolean isBuyerMaker) {}
+
+    /**
+     * Summary candle for a 15-minute interval holding OHLC, volume, and cumulative delta.
+     */
     public record IntervalCandle(double open, double high, double low, double close, double volBtc, double volUsd, double deltaBtc) {}
+
+    /**
+     * Reconstructed quotes and simulated execution results extracted from Polymarket Parquet files.
+     */
     public record PolymarketExtractedData(
             double ask0, double bid0,
             double ask60, double bid60,
@@ -849,6 +963,14 @@ public class RawMarketDataProcessor {
             double maxPrice, double minPrice,
             double depth1cUp, double depth1cDown
     ) {}
+
+    /**
+     * Order Book Imbalance metrics extracted from Binance Futures orderbook depth.
+     */
     public record BinanceObiExtractedData(double obi, double midPrice, double depthBids, double depthAsks) {}
+
+    /**
+     * Execution outcome for simulated depth consumption holding average fill price and fee.
+     */
     public record FillFeeResult(double avgPrice, double fee) {}
 }
