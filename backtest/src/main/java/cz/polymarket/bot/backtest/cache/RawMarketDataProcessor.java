@@ -34,7 +34,7 @@ import java.util.TreeMap;
 
 /**
  * Ingests, processes, and reconstructs multi-source raw market data
- * (Binance Spot CSV, Binance Futures CSV, Binance Futures OrderBook Parquet, Polymarket 15m Parquet)
+ * (Binance Spot Parquet, Binance Futures Parquet, Binance Futures OrderBook Parquet, Polymarket 15m Parquet)
  * and technical indicators, caching them in memory-mapped binary files.
  */
 @ApplicationScoped
@@ -135,7 +135,7 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Resolves the Binance Spot aggTrades CSV directory.
+     * Resolves the Binance Spot aggTrades directory.
      *
      * @param symbol asset symbol
      * @return Path to Binance Spot aggTrades directory
@@ -153,7 +153,7 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Resolves the Binance Futures aggTrades CSV directory.
+     * Resolves the Binance Futures aggTrades directory.
      *
      * @param symbol asset symbol
      * @return Path to Binance Futures aggTrades directory
@@ -388,10 +388,10 @@ public class RawMarketDataProcessor {
         }
 
         File[] spotFiles = spotDir.toFile().listFiles((dir, name) ->
-                name.startsWith(symbol.toUpperCase() + "-aggTrades-" + month) && name.endsWith(".csv"));
+                name.startsWith(symbol.toUpperCase() + "-aggTrades-" + month) && name.endsWith(".parquet"));
 
         if (spotFiles == null || spotFiles.length == 0) {
-            LOG.infof("No raw spot CSV files found for %s month %s", symbol, month);
+            LOG.infof("No raw spot Parquet files found for %s month %s", symbol, month);
             return;
         }
 
@@ -405,8 +405,8 @@ public class RawMarketDataProcessor {
         List<TradeRecordSimple> prevSpotTail = new ArrayList<>();
 
         for (File sFile : sortedSpotFiles) {
-            String dateStr = sFile.getName().replace(symbol.toUpperCase() + "-aggTrades-", "").replace(".csv", "");
-            File fFile = futDir.resolve(symbol.toUpperCase() + "-aggTrades-" + dateStr + ".csv").toFile();
+            String dateStr = sFile.getName().replace(symbol.toUpperCase() + "-aggTrades-", "").replace(".parquet", "");
+            File fFile = futDir.resolve(symbol.toUpperCase() + "-aggTrades-" + dateStr + ".parquet").toFile();
             if (!fFile.exists()) {
                 LOG.warnf("Futures file missing for %s date %s, skipping", symbol, dateStr);
                 continue;
@@ -414,9 +414,9 @@ public class RawMarketDataProcessor {
 
             LOG.infof("Processing raw date %s for %s...", dateStr, symbol);
 
-            // Read Spot trades: transact_time in microseconds
+            // Read Spot trades from Parquet
             List<TradeRecordSimple> spotTrades = readSpotTrades(sFile);
-            // Read Futures trades: transact_time in milliseconds
+            // Read Futures trades from Parquet
             List<TradeRecordSimple> futTrades = readFuturesTrades(fFile);
 
             // Combine previous day tail with today's spot trades for TWAP
@@ -837,51 +837,59 @@ public class RawMarketDataProcessor {
     }
 
     /**
-     * Reads Binance Spot aggTrades from CSV file (transact_time in microseconds).
+     * Reads Binance Spot aggTrades from Parquet file using DuckDB.
+     *
+     * @param parquetFile input Parquet file
+     * @return chronologically ordered list of trade records
      */
-    private List<TradeRecordSimple> readSpotTrades(File csvFile) {
+    private List<TradeRecordSimple> readSpotTrades(File parquetFile) {
         List<TradeRecordSimple> trades = new ArrayList<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.isBlank()) continue;
-                String[] cols = line.split(",");
-                if (cols.length >= 7) {
-                    double p = Double.parseDouble(cols[1]);
-                    double q = Double.parseDouble(cols[2]);
-                    long tMicro = Long.parseLong(cols[5]);
-                    boolean isBuyerMaker = Boolean.parseBoolean(cols[6]);
-                    double tSec = tMicro / 1_000_000.0;
-                    trades.add(new TradeRecordSimple(tSec, p, q, isBuyerMaker));
-                }
+        String normPath = parquetFile.getAbsolutePath().replace('\\', '/');
+        String query = "SELECT transact_time, price, quantity, is_buyer_maker FROM read_parquet('" + normPath + "') ORDER BY transact_time ASC";
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(query)) {
+
+            while (rs.next()) {
+                long tRaw = rs.getLong(1);
+                double p = rs.getDouble(2);
+                double q = rs.getDouble(3);
+                boolean isBuyerMaker = rs.getBoolean(4);
+                double tSec = (tRaw > 1_000_000_000_000_000L) ? (tRaw / 1_000_000.0) : (tRaw / 1000.0);
+                trades.add(new TradeRecordSimple(tSec, p, q, isBuyerMaker));
             }
         } catch (Exception e) {
-            LOG.warnf("Error reading spot CSV %s: %s", csvFile, e.getMessage());
+            LOG.warnf("Error reading spot Parquet %s: %s", parquetFile, e.getMessage());
         }
         return trades;
     }
 
     /**
-     * Reads Binance Futures aggTrades from CSV file (transact_time in milliseconds).
+     * Reads Binance Futures aggTrades from Parquet file using DuckDB.
+     *
+     * @param parquetFile input Parquet file
+     * @return chronologically ordered list of trade records
      */
-    private List<TradeRecordSimple> readFuturesTrades(File csvFile) {
+    private List<TradeRecordSimple> readFuturesTrades(File parquetFile) {
         List<TradeRecordSimple> trades = new ArrayList<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
-            String line = br.readLine(); // skip header
-            while ((line = br.readLine()) != null) {
-                if (line.isBlank()) continue;
-                String[] cols = line.split(",");
-                if (cols.length >= 7) {
-                    double p = Double.parseDouble(cols[1]);
-                    double q = Double.parseDouble(cols[2]);
-                    long tMilli = Long.parseLong(cols[5]);
-                    boolean isBuyerMaker = Boolean.parseBoolean(cols[6]);
-                    double tSec = tMilli / 1000.0;
-                    trades.add(new TradeRecordSimple(tSec, p, q, isBuyerMaker));
-                }
+        String normPath = parquetFile.getAbsolutePath().replace('\\', '/');
+        String query = "SELECT transact_time, price, quantity, is_buyer_maker FROM read_parquet('" + normPath + "') ORDER BY transact_time ASC";
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(query)) {
+
+            while (rs.next()) {
+                long tRaw = rs.getLong(1);
+                double p = rs.getDouble(2);
+                double q = rs.getDouble(3);
+                boolean isBuyerMaker = rs.getBoolean(4);
+                double tSec = (tRaw > 1_000_000_000_000_000L) ? (tRaw / 1_000_000.0) : (tRaw / 1000.0);
+                trades.add(new TradeRecordSimple(tSec, p, q, isBuyerMaker));
             }
         } catch (Exception e) {
-            LOG.warnf("Error reading futures CSV %s: %s", csvFile, e.getMessage());
+            LOG.warnf("Error reading futures Parquet %s: %s", parquetFile, e.getMessage());
         }
         return trades;
     }

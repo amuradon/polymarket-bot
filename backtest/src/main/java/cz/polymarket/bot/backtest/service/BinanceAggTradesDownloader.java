@@ -26,6 +26,10 @@ import java.util.Optional;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+/**
+ * Downloads historical Binance Spot and Futures aggregate trade archives (aggTrades),
+ * extracts CSV data, immediately converts them into compressed Parquet format, and deletes the CSV files.
+ */
 @ApplicationScoped
 public class BinanceAggTradesDownloader {
 
@@ -37,27 +41,56 @@ public class BinanceAggTradesDownloader {
     private final String futuresTradesUrl;
     private final HttpClient httpClient;
     private final ServerHaltTracker serverHaltTracker;
+    private final BinanceAggTradesParquetConverter parquetConverter;
 
+    /**
+     * Constructs the aggTrades downloader with configured target endpoints, HTTP client, and Parquet converter.
+     *
+     * @param baseDir root directory for storing market datasets
+     * @param spotTradesUrl base download URL for Binance spot aggTrades archives
+     * @param futuresTradesUrl base download URL for Binance futures aggTrades archives
+     * @param httpClient HTTP client for downloading remote archives
+     * @param serverHaltTracker tracker monitoring HTTP 429 rate limit halts
+     * @param parquetConverter converter transforming CSV to compressed Parquet files
+     */
     @Inject
     public BinanceAggTradesDownloader(
             @ConfigProperty(name = "polymarket.data.base-dir") String baseDir,
             @ConfigProperty(name = "polymarket.data.binance.spot-trades-url") String spotTradesUrl,
             @ConfigProperty(name = "polymarket.data.binance.futures-trades-url") String futuresTradesUrl,
             HttpClient httpClient,
-            ServerHaltTracker serverHaltTracker
+            ServerHaltTracker serverHaltTracker,
+            BinanceAggTradesParquetConverter parquetConverter
     ) {
         this.basePath = Path.of(baseDir);
         this.spotTradesUrl = spotTradesUrl;
         this.futuresTradesUrl = futuresTradesUrl;
         this.httpClient = httpClient;
         this.serverHaltTracker = serverHaltTracker;
+        this.parquetConverter = parquetConverter;
     }
 
+    /**
+     * Downloads and converts Spot aggTrades archives into Parquet for the specified date range.
+     *
+     * @param symbol trading asset pair symbol (e.g. BTCUSDT)
+     * @param startDate start date (inclusive)
+     * @param endDate end date (inclusive)
+     * @return download and conversion summary result
+     */
     public DownloadResult downloadSpotTrades(String symbol, LocalDate startDate, LocalDate endDate) {
         Path targetDir = basePath.resolve("spot").resolve(symbol).resolve("aggTrades");
         return downloadTradesInternal("spot", spotTradesUrl, targetDir, symbol, startDate, endDate);
     }
 
+    /**
+     * Downloads and converts Futures aggTrades archives into Parquet for the specified date range.
+     *
+     * @param symbol trading asset pair symbol (e.g. BTCUSDT)
+     * @param startDate start date (inclusive)
+     * @param endDate end date (inclusive)
+     * @return download and conversion summary result
+     */
     public DownloadResult downloadFuturesTrades(String symbol, LocalDate startDate, LocalDate endDate) {
         Path targetDir = basePath.resolve("futures").resolve(symbol).resolve("aggTrades");
         return downloadTradesInternal("futures", futuresTradesUrl, targetDir, symbol, startDate, endDate);
@@ -87,6 +120,8 @@ public class BinanceAggTradesDownloader {
         LocalDate current = startDate;
         while (!current.isAfter(endDate)) {
             String dateStr = current.format(DATE_FORMATTER);
+            String parquetFilename = symbol + "-aggTrades-" + dateStr + ".parquet";
+            Path targetParquet = targetDir.resolve(parquetFilename);
             String csvFilename = symbol + "-aggTrades-" + dateStr + ".csv";
             Path targetCsv = targetDir.resolve(csvFilename);
 
@@ -98,13 +133,25 @@ public class BinanceAggTradesDownloader {
                 continue;
             }
 
-            if (Files.exists(targetCsv)) {
-                LOG.infof("File %s already exists, skipping download.", targetCsv);
+            if (Files.exists(targetParquet)) {
+                LOG.infof("File %s already exists, skipping download.", targetParquet);
                 skipped++;
+            } else if (Files.exists(targetCsv)) {
+                // Legacy or previously downloaded CSV file exists without Parquet: convert immediately and delete CSV
+                try {
+                    convertAndCleanupCsv(market, targetCsv, targetParquet);
+                    downloaded++;
+                } catch (Exception e) {
+                    failed++;
+                    String err = String.format("Error converting existing CSV to Parquet for %s %s %s: %s",
+                            market, symbol, dateStr, e.getMessage());
+                    LOG.error(err, e);
+                    errors.add(err);
+                }
             } else {
                 String zipUrl = baseUrl + "/" + symbol + "/" + symbol + "-aggTrades-" + dateStr + ".zip";
                 try {
-                    FetchResult res = fetchAndExtractZip(market, symbol, dateStr, zipUrl, targetCsv, csvFilename);
+                    FetchResult res = fetchExtractAndConvertToParquet(market, symbol, dateStr, zipUrl, targetCsv, csvFilename, targetParquet);
                     if (res.success()) {
                         downloaded++;
                     } else {
@@ -128,13 +175,14 @@ public class BinanceAggTradesDownloader {
 
     private record FetchResult(boolean success, String error) {}
 
-    private FetchResult fetchAndExtractZip(
+    private FetchResult fetchExtractAndConvertToParquet(
             String market,
             String symbol,
             String dateStr,
             String zipUrl,
             Path targetCsv,
-            String expectedCsvName
+            String expectedCsvName,
+            Path targetParquet
     ) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(zipUrl))
@@ -191,14 +239,14 @@ public class BinanceAggTradesDownloader {
             return new FetchResult(false, msg);
         }
 
-        Path partFile = targetCsv.resolveSibling(targetCsv.getFileName() + ".part");
+        Path partCsv = targetCsv.resolveSibling(targetCsv.getFileName() + ".part");
         boolean extracted = false;
 
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(body))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 if (entry.getName().equals(expectedCsvName) || entry.getName().endsWith(".csv")) {
-                    Files.copy(zis, partFile, StandardCopyOption.REPLACE_EXISTING);
+                    Files.copy(zis, partCsv, StandardCopyOption.REPLACE_EXISTING);
                     extracted = true;
                     zis.closeEntry();
                     break;
@@ -208,7 +256,7 @@ public class BinanceAggTradesDownloader {
         }
 
         if (!extracted) {
-            Files.deleteIfExists(partFile);
+            Files.deleteIfExists(partCsv);
             String msg = String.format("No matching CSV entry found inside archive for %s %s: %s",
                     symbol, dateStr, zipUrl);
             LOG.error(msg);
@@ -216,12 +264,32 @@ public class BinanceAggTradesDownloader {
         }
 
         try {
-            Files.move(partFile, targetCsv, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            Files.move(partFile, targetCsv, StandardCopyOption.REPLACE_EXISTING);
+            convertAndCleanupCsv(market, partCsv, targetParquet);
+        } catch (Exception e) {
+            Files.deleteIfExists(partCsv);
+            String msg = String.format("Failed to convert extracted CSV to Parquet for %s %s: %s",
+                    symbol, dateStr, e.getMessage());
+            LOG.error(msg, e);
+            return new FetchResult(false, msg);
         }
 
-        LOG.infof("Extracted %s to %s", expectedCsvName, targetCsv);
+        LOG.infof("Extracted %s, converted to %s, and deleted CSV", expectedCsvName, targetParquet);
         return new FetchResult(true, null);
+    }
+
+    private void convertAndCleanupCsv(String market, Path csvFile, Path parquetFile) {
+        try {
+            if ("spot".equalsIgnoreCase(market)) {
+                parquetConverter.convertSpotCsvToParquet(csvFile, parquetFile);
+            } else {
+                parquetConverter.convertFuturesCsvToParquet(csvFile, parquetFile);
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(csvFile);
+            } catch (IOException e) {
+                LOG.warnf("Failed to delete CSV file after conversion: %s (%s)", csvFile, e.getMessage());
+            }
+        }
     }
 }

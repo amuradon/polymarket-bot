@@ -122,4 +122,47 @@ class RawMarketDataProcessorTest {
         assertThat(twapCache.get(tStart).get("twap_open")).isEqualTo(83500.0);
         assertThat(twapCache.get(tStart).get("twap_close")).isEqualTo(83600.0);
     }
+
+    @Test
+    @DisplayName("Should process raw Spot and Futures Parquet files for a month and write cached rows")
+    void shouldProcessRawParquetFilesForMonth() throws IOException {
+        String symbol = "BTCUSDT";
+        String month = "2026-08";
+        String dateStr = "2026-08-01";
+
+        Path spotDir = processor.getBinanceSpotAggTradesDir(symbol);
+        Path futDir = processor.getBinanceFuturesAggTradesDir(symbol);
+        Files.createDirectories(spotDir);
+        Files.createDirectories(futDir);
+
+        cz.polymarket.bot.backtest.service.BinanceAggTradesParquetConverter converter =
+                new cz.polymarket.bot.backtest.service.BinanceAggTradesParquetConverter();
+
+        Path tempSpotCsv = tempDir.resolve("temp-spot.csv");
+        Path spotParquet = spotDir.resolve(symbol + "-aggTrades-" + dateStr + ".parquet");
+        String syntheticSpotCsv = """
+                4000000001,65000.50,0.015,5000000001,5000000002,1785542400100000,true,true
+                4000000002,65001.00,0.020,5000000003,5000000003,1785542400200000,false,true
+                """;
+        Files.writeString(tempSpotCsv, syntheticSpotCsv);
+        converter.convertSpotCsvToParquet(tempSpotCsv, spotParquet);
+        Files.deleteIfExists(tempSpotCsv);
+
+        Path tempFutCsv = tempDir.resolve("temp-fut.csv");
+        Path futParquet = futDir.resolve(symbol + "-aggTrades-" + dateStr + ".parquet");
+        String syntheticFutCsv = """
+                agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker
+                2000000001,65010.0,0.05,3000000001,3000000001,1785542400123,true
+                2000000002,65012.0,0.10,3000000002,3000000005,1785542400234,false
+                """;
+        Files.writeString(tempFutCsv, syntheticFutCsv);
+        converter.convertFuturesCsvToParquet(tempFutCsv, futParquet);
+        Files.deleteIfExists(tempFutCsv);
+
+        processor.processRawDataForMonth(symbol, month);
+
+        assertThat(cacheService.hasMarketRowsCache(symbol, month)).isTrue();
+        List<CachedMarketRow> rows = cacheService.readMarketRowsCache(symbol, month);
+        assertThat(rows).isNotEmpty();
+    }
 }

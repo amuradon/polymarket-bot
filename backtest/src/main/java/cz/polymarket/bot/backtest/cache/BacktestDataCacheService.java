@@ -172,11 +172,11 @@ public class BacktestDataCacheService {
         // Also check if raw data files exist for known months
         Path spotDir = processor.getBinanceSpotAggTradesDir(symbol);
         if (Files.exists(spotDir)) {
-            File[] files = spotDir.toFile().listFiles((dir, name) -> name.endsWith(".csv"));
+            File[] files = spotDir.toFile().listFiles((dir, name) -> name.endsWith(".parquet"));
             if (files != null) {
                 for (File f : files) {
                     String name = f.getName();
-                    // BTCUSDT-aggTrades-YYYY-MM-DD.csv
+                    // BTCUSDT-aggTrades-YYYY-MM-DD.parquet
                     int idx = name.indexOf("aggTrades-");
                     if (idx >= 0 && name.length() >= idx + 17) {
                         String m = name.substring(idx + 10, idx + 17);
