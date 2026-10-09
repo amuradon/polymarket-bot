@@ -80,17 +80,28 @@ Navigate to `http://localhost:8082/btc-usd`.
 ```bash
 ./mvnw quarkus:dev -pl backtest
 ```
-- Status: `http://localhost:8083/backtest`
-- Trigger Binance historical data download: `POST http://localhost:8083/api/1/data/download`
+- Status: `http://localhost:8083/api/status`
+- Trigger Binance historical data download: `POST http://localhost:8083/api/data/download/binance`
   ```bash
-  curl -X POST http://localhost:8083/api/1/data/download \
+  curl -X POST http://localhost:8083/api/data/download/binance \
     -H "Content-Type: application/json" \
     -d '{"symbol":"BTCUSDT","start":"2026-08-01","end":"2026-08-02"}'
   ```
   Returns `202 Accepted` with a `jobId`.
 - Query download job status:
   ```bash
-  curl http://localhost:8083/api/1/data/download/<jobId>
+  curl http://localhost:8083/api/data/download/binance/<jobId>
+  ```
+- Trigger asynchronous backtest simulation: `POST http://localhost:8083/api/backtest/run`
+  ```bash
+  curl -X POST http://localhost:8083/api/backtest/run \
+    -H "Content-Type: application/json" \
+    -d '{"strategyName":"TWAPArbitrageStrategy","symbol":"BTCUSDT","startDate":"2026-08-01","endDate":"2026-08-02"}'
+  ```
+  Returns `202 Accepted` with a `jobId`.
+- Query backtest job status and results file path:
+  ```bash
+  curl http://localhost:8083/api/backtest/run/<jobId>
   ```
 
 ---

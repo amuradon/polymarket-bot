@@ -24,7 +24,7 @@ class DataDownloadResourceTest {
                         "end", "2026-08-02"
                 ))
                 .when()
-                .post("/api/1/data/download")
+                .post("/api/data/download/binance")
                 .then()
                 .statusCode(202)
                 .body("jobId", not(emptyOrNullString()))
@@ -42,7 +42,7 @@ class DataDownloadResourceTest {
                         "end", "2026-08-02"
                 ))
                 .when()
-                .post("/api/1/data/download")
+                .post("/api/data/download/binance")
                 .then()
                 .statusCode(400)
                 .body("error", equalTo("symbol must not be blank"));
@@ -58,7 +58,7 @@ class DataDownloadResourceTest {
                         "end", "2026-08-01"
                 ))
                 .when()
-                .post("/api/1/data/download")
+                .post("/api/data/download/binance")
                 .then()
                 .statusCode(400);
     }
@@ -67,7 +67,7 @@ class DataDownloadResourceTest {
     void shouldReturn404ForUnknownJob() {
         given()
                 .when()
-                .get("/api/1/data/download/unknown-job-id")
+                .get("/api/data/download/binance/unknown-job-id")
                 .then()
                 .statusCode(404);
     }
@@ -82,7 +82,7 @@ class DataDownloadResourceTest {
                         "end", "2026-08-01"
                 ))
                 .when()
-                .post("/api/1/data/download")
+                .post("/api/data/download/binance")
                 .then()
                 .statusCode(202)
                 .extract()
@@ -90,7 +90,7 @@ class DataDownloadResourceTest {
 
         given()
                 .when()
-                .get("/api/1/data/download/" + jobId)
+                .get("/api/data/download/binance/" + jobId)
                 .then()
                 .statusCode(200)
                 .body("jobId", equalTo(jobId))

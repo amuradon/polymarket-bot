@@ -21,7 +21,7 @@ flowchart TD
     subgraph Applications["Standalone Executable Applications"]
         live["live<br/>(Live Trading Quarkus App, /btc-usd)"]
         paper["paper<br/>(Paper Trading Quarkus App, /btc-usd)"]
-        backtest["backtest<br/>(Backtest Engine Quarkus App, /backtest)"]
+        backtest["backtest<br/>(Backtest Engine Quarkus App)"]
     end
 
     common --> trading
@@ -90,7 +90,7 @@ Because `common` and `trading` are library modules consumed by the runnable Quar
 ### `backtest`
 - Standalone runnable Quarkus application for backtesting strategies against historical datasets.
 - Configured with `quarkus.http.port=8083`, `polymarket.trading.mode=backtest`.
-- Exposes `/backtest` REST/UI endpoints for starting simulations and reviewing performance metrics (Sharpe ratio, Max Drawdown, PnL curve).
+- Exposes consolidated REST endpoints (`/api/status`, `/api/backtest/run`, `/api/data/download/binance`) for starting asynchronous simulations, triggering Binance data ingestion, and querying results.
 
 ---
 

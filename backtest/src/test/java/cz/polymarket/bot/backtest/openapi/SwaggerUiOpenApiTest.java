@@ -23,9 +23,13 @@ class SwaggerUiOpenApiTest {
                 .body("openapi", startsWith("3."))
                 .body("info.title", equalTo("Polymarket Bot - Backtest & Data Ingestion API"))
                 .body("info.version", equalTo("1.0.0"))
-                .body("paths", hasKey("/api/1/data/download"))
-                .body("paths", hasKey("/api/1/data/download/{jobId}"))
-                .body("paths", hasKey("/backtest"));
+                .body("paths", hasKey("/api/data/download/binance"))
+                .body("paths", hasKey("/api/data/download/binance/{jobId}"))
+                .body("paths", hasKey("/api/status"))
+                .body("paths", hasKey("/api/backtest/run"))
+                .body("paths", hasKey("/api/backtest/run/{jobId}"))
+                .body("paths", not(hasKey("/api/1/data/download")))
+                .body("paths", not(hasKey("/backtest")));
     }
 
     @Test

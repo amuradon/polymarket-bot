@@ -28,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-@Path("/api/1/data/download")
+@Path("/api/data/download/binance")
 @Tag(name = "Data Ingestion", description = "Operations for triggering and monitoring Binance historical data downloads")
 public class DataDownloadResource {
 
