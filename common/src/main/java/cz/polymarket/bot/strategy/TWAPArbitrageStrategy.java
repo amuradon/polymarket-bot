@@ -1,7 +1,6 @@
 package cz.polymarket.bot.strategy;
 
 import cz.polymarket.bot.calculator.RealizedVolatilityCalculator;
-import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
@@ -11,28 +10,23 @@ import jakarta.inject.Inject;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * TWAPArbitrageStrategy implements Iteration 20 (Dublin/London 10ms Stat-Arb Engine).
  * Fully adheres to the TradingStrategy interface and executes identically across
  * Backtesting, Paper Trading, and Live Trading without discrepancy.
+ * Technical indicators are calculated and provided dynamically by the engine.
  */
 @ApplicationScoped
 public class TWAPArbitrageStrategy implements TradingStrategy {
 
-    private final VwapCalculator vwapCalculator;
-    private final RealizedVolatilityCalculator volCalculator;
     private final NextCandleProbabilityModel probabilityModel;
     private final TWAPArbitrageStrategyConfig config;
 
     private StrategyContext context;
-    private final List<MarketCandle> candleHistory = new CopyOnWriteArrayList<>();
 
     // Active candle tracking
     private final AtomicLong activeCandleStart = new AtomicLong(0);
@@ -42,6 +36,15 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private volatile long currentTimestampSec = 0;
     private volatile boolean phase1Evaluated = false;
     private volatile boolean phase2Evaluated = false;
+
+    // Dynamic indicators delivered by Engine
+    private volatile double currentVwapZScore = 0.0;
+    private volatile double currentVol4h = 0.001;
+    private volatile double currentSpotCvd = 0.0;
+    private volatile double currentFutCvd = 0.0;
+    private volatile double currentFutH1Cvd = 0.0;
+    private volatile double currentBasisBps = 0.0;
+    private volatile double currentTwap = 0.0;
 
     // Position state
     private volatile boolean hasPosition = false;
@@ -53,28 +56,37 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private volatile boolean trailingStopArmed = false;
     private volatile boolean positionClosed = false;
     private volatile String activeClientOrderId = null;
-    private volatile double currentBasisBps = 0.0;
-    private volatile double distTwapOverride = 0.0;
     private volatile boolean isLateArbPosition = false;
+
+    @Override
+    public Set<IndicatorType> getRequiredIndicators() {
+        return Set.of(
+                IndicatorType.TWAP,
+                IndicatorType.BASIS,
+                IndicatorType.VWAP_ZSCORE,
+                IndicatorType.CVD,
+                IndicatorType.VOLATILITY_4H
+        );
+    }
 
     public void setCurrentBasisBps(double basisBps) {
         this.currentBasisBps = basisBps;
     }
 
-    public void setDistTwapOverride(double distTwapOverride) {
-        this.distTwapOverride = distTwapOverride;
-    }
-
     @Override
     public void reset() {
-        candleHistory.clear();
         activeCandleStart.set(0);
         activeCandleEnd.set(0);
         twapOpenPrice = 0.0;
         currentSpotPrice = 0.0;
         currentTimestampSec = 0;
         currentBasisBps = 0.0;
-        distTwapOverride = 0.0;
+        currentVwapZScore = 0.0;
+        currentVol4h = 0.001;
+        currentSpotCvd = 0.0;
+        currentFutCvd = 0.0;
+        currentFutH1Cvd = 0.0;
+        currentTwap = 0.0;
         isLateArbPosition = false;
         phase1Evaluated = false;
         phase2Evaluated = false;
@@ -91,24 +103,14 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
 
     @Inject
     public TWAPArbitrageStrategy(
-            VwapCalculator vwapCalculator,
-            RealizedVolatilityCalculator volCalculator,
             NextCandleProbabilityModel probabilityModel,
             TWAPArbitrageStrategyConfig config) {
-        if (vwapCalculator == null) {
-            throw new IllegalArgumentException("vwapCalculator cannot be null");
-        }
-        if (volCalculator == null) {
-            throw new IllegalArgumentException("volCalculator cannot be null");
-        }
         if (probabilityModel == null) {
             throw new IllegalArgumentException("probabilityModel cannot be null");
         }
         if (config == null) {
             throw new IllegalArgumentException("config cannot be null");
         }
-        this.vwapCalculator = vwapCalculator;
-        this.volCalculator = volCalculator;
         this.probabilityModel = probabilityModel;
         this.config = config;
     }
@@ -169,6 +171,25 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     }
 
     @Override
+    public void onIndicatorUpdate(IndicatorType type, double value, long timestampMs) {
+        if (type == null) {
+            return;
+        }
+        switch (type) {
+            case VWAP_ZSCORE, VWAP -> this.currentVwapZScore = value;
+            case VOLATILITY_4H, REALIZED_VOLATILITY -> this.currentVol4h = value;
+            case CVD -> {
+                this.currentSpotCvd = value;
+                this.currentFutCvd = value;
+                this.currentFutH1Cvd = value;
+            }
+            case BASIS -> this.currentBasisBps = value;
+            case TWAP -> this.currentTwap = value;
+            default -> {}
+        }
+    }
+
+    @Override
     public void onExecutionReport(ExecutionReport report) {
         if (report == null || report.clientOrderId() == null) {
             return;
@@ -192,15 +213,45 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
-    public void onMarketCandleCompleted(MarketCandle candle) {
-        if (candle != null) {
-            candleHistory.add(candle);
+    @Override
+    public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
+        this.currentSpotPrice = price;
+        this.currentTimestampSec = timestampMs / 1000L;
+    }
+
+    @Override
+    public void onBinanceFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
+        if (this.currentSpotPrice > 0.0) {
+            this.currentBasisBps = ((price - this.currentSpotPrice) / this.currentSpotPrice) * 10000.0;
         }
     }
 
+    @Override
+    public void onMarketCandleCompleted(MarketCandle candle) {
+        // Strategy relies on engine to compute historical indicator metrics
+    }
+
+    @Override
+    public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
+        if (price > 0.0) {
+            this.currentSpotPrice = price;
+        }
+        if (timestampMs > 0) {
+            this.currentTimestampSec = timestampMs / 1000L;
+        }
+    }
+
+    @Override
     public void onOrderBookQuote(OrderBookQuote quote) {
         if (quote == null || context == null) {
             return;
+        }
+
+        if (quote.timestampMs() > 0) {
+            long quoteSec = quote.timestampMs() / 1000L;
+            if (activeCandleStart.get() <= 0 || quoteSec >= activeCandleStart.get()) {
+                this.currentTimestampSec = quoteSec;
+            }
         }
 
         long secondInCandle = activeCandleStart.get() > 0 ? (currentTimestampSec - activeCandleStart.get()) : 0;
@@ -221,6 +272,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         }
     }
 
+    @Override
     public void onCandleResolution(TradeDirection actualOutcome) {
         if (!hasPosition || positionClosed || context == null) {
             return;
@@ -238,43 +290,15 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     private void evaluatePhase1Entry(OrderBookQuote quote) {
         phase1Evaluated = true;
 
-        List<MarketCandle> history = Collections.unmodifiableList(new ArrayList<>(candleHistory));
-        if (history.size() < 4) {
-            return;
-        }
-        VwapCalculator.VwapResult vwapRes = vwapCalculator.calculate(history, currentSpotPrice);
-        double vol4h = volCalculator.calculate4hRealizedVolatility(history);
-        boolean isLowVol = volCalculator.isVolatilityTooLow(vol4h);
-
-        double spotDelta = 0.0;
-        double futDelta = 0.0;
-        double futH1Delta = 0.0;
-        double basisBps = (currentBasisBps != 0.0) ? currentBasisBps : 0.0;
-
-        if (!history.isEmpty()) {
-            MarketCandle last = history.get(history.size() - 1);
-            spotDelta = last.spotDeltaBtc();
-            futDelta = last.futuresDeltaBtc();
-            if (basisBps == 0.0) {
-                basisBps = last.basisOpenBps();
-            }
-
-            int h1Start = Math.max(0, history.size() - 4);
-            for (int i = h1Start; i < history.size(); i++) {
-                futH1Delta += history.get(i).futuresDeltaBtc();
-            }
-        }
-
-        double distTwap = (distTwapOverride != 0.0)
-                ? distTwapOverride
-                : ((twapOpenPrice > 0.0) ? (currentSpotPrice - twapOpenPrice) : 0.0);
+        boolean isLowVol = (currentVol4h > 0.0 && currentVol4h < RealizedVolatilityCalculator.MIN_VOLATILITY_THRESHOLD);
+        double distTwap = (twapOpenPrice > 0.0) ? (currentSpotPrice - twapOpenPrice) : 0.0;
 
         StrategySignal signal = probabilityModel.evaluate(
-                vwapRes.zScore(),
-                spotDelta,
-                futDelta,
-                futH1Delta,
-                basisBps,
+                currentVwapZScore,
+                currentSpotCvd,
+                currentFutCvd,
+                currentFutH1Cvd,
+                currentBasisBps,
                 distTwap,
                 quote.bestAskUp(),
                 quote.bestAskDown(),
@@ -315,67 +339,71 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     }
 
     private void evaluatePositionExit(OrderBookQuote quote) {
-        if (isLateArbPosition) {
-            // According to Iteration 20: late arbitrations are held to resolution (payout 1.00 USD)
-            return;
+        double currentContractPrice = (positionSide == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
+
+        if (currentContractPrice > maxObservedPrice) {
+            maxObservedPrice = currentContractPrice;
         }
 
-        double currentPrice = (positionSide == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
-        if (currentPrice > maxObservedPrice) {
-            maxObservedPrice = currentPrice;
-        }
-
-        // Dynamic Take Profit (0.70 USD)
-        if (maxObservedPrice >= config.targetTakeProfitPrice()) {
-            submitExitOrder(config.targetTakeProfitPrice(), "Take Profit (0.70)");
-            return;
-        }
-
-        // Trailing Stop arming check
-        if (maxObservedPrice >= (entryPrice + config.trailingStopActivationDelta())) {
+        // Arm trailing stop if price exceeded profit lock threshold
+        if (maxObservedPrice >= entryPrice + config.trailingStopActivationDelta()) {
             trailingStopArmed = true;
+        }
+
+        // 1. Take Profit Exit
+        if (currentContractPrice >= config.targetTakeProfitPrice()) {
+            submitExitOrder(config.targetTakeProfitPrice(), "Take Profit (" + config.targetTakeProfitPrice() + ")");
+            return;
+        }
+
+        // 2. Trailing Stop Exit
+        if (trailingStopArmed && currentContractPrice <= entryPrice + config.trailingStopProfitLock()) {
+            submitExitOrder(currentContractPrice, "Trailing Stop (+" + config.trailingStopProfitLock() + ")");
         }
     }
 
     private void submitEntryOrder(StrategySignal signal) {
+        String clientOrderId = "twap-entry-" + UUID.randomUUID();
+        this.activeClientOrderId = clientOrderId;
         this.positionSide = signal.direction();
         this.entryPrice = signal.marketPrice();
         this.sizeUsd = signal.suggestedSizeUsd();
-        this.shares = this.sizeUsd / this.entryPrice;
-        this.activeClientOrderId = UUID.randomUUID().toString();
+        this.shares = (this.entryPrice > 0.0) ? (this.sizeUsd / this.entryPrice) : 0.0;
 
         String token = (signal.direction() == TradeDirection.UP) ? config.upToken() : config.downToken();
-        BigDecimal priceBd = BigDecimal.valueOf(signal.marketPrice()).setScale(4, RoundingMode.HALF_UP);
-        BigDecimal sizeBd = BigDecimal.valueOf(this.shares).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal price = BigDecimal.valueOf(signal.marketPrice()).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal size = BigDecimal.valueOf(this.shares).setScale(4, RoundingMode.HALF_UP);
 
         OrderCommand command = new OrderCommand(
-                activeClientOrderId,
+                clientOrderId,
                 config.defaultMarketId(),
                 token,
                 Timeframe.FIFTEEN_MINUTES,
                 "BUY",
-                priceBd,
-                sizeBd
+                price,
+                size
         );
 
         context.getExecutionRouter().submitOrder(command);
     }
 
     private void submitExitOrder(double exitPrice, String reason) {
-        this.positionClosed = true;
-        String exitOrderId = UUID.randomUUID().toString();
+        positionClosed = true;
+        String clientOrderId = "twap-exit-" + UUID.randomUUID();
+        this.activeClientOrderId = clientOrderId;
+
         String token = (positionSide == TradeDirection.UP) ? config.upToken() : config.downToken();
-        BigDecimal priceBd = BigDecimal.valueOf(exitPrice).setScale(4, RoundingMode.HALF_UP);
-        BigDecimal sizeBd = BigDecimal.valueOf(this.shares).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal price = BigDecimal.valueOf(exitPrice).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal size = BigDecimal.valueOf(shares).setScale(4, RoundingMode.HALF_UP);
 
         OrderCommand command = new OrderCommand(
-                exitOrderId,
+                clientOrderId,
                 config.defaultMarketId(),
                 token,
                 Timeframe.FIFTEEN_MINUTES,
                 "SELL",
-                priceBd,
-                sizeBd
+                price,
+                size
         );
 
         context.getExecutionRouter().submitOrder(command);
@@ -385,6 +413,7 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         return shares * config.takerFeeRate() * price * (1.0 - price);
     }
 
+    // Getters for strategy introspection & unit testing
     public boolean hasPosition() {
         return hasPosition;
     }
@@ -405,12 +434,12 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         return shares;
     }
 
-    public boolean isPositionClosed() {
-        return positionClosed;
-    }
-
     public boolean isTrailingStopArmed() {
         return trailingStopArmed;
+    }
+
+    public boolean isPositionClosed() {
+        return positionClosed;
     }
 
     public long getActiveCandleStart() {
@@ -421,12 +450,16 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
         return activeCandleEnd.get();
     }
 
+    public double getTwapOpenPrice() {
+        return twapOpenPrice;
+    }
+
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
     }
 
-    public double getTwapOpenPrice() {
-        return twapOpenPrice;
+    public double getCurrentBasisBps() {
+        return currentBasisBps;
     }
 
     public TWAPArbitrageStrategyConfig getConfig() {

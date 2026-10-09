@@ -68,25 +68,25 @@ class TWAPArbitrageStrategyTest {
             }
         };
 
-        VwapCalculator vwapCalculator = new VwapCalculator();
-        RealizedVolatilityCalculator volCalculator = new RealizedVolatilityCalculator();
         KellyPositionSizer sizer = new KellyPositionSizer(10000.0, 0.25, 50.0, 300.0);
         NextCandleProbabilityModel model = new NextCandleProbabilityModel(sizer);
         TWAPArbitrageStrategyConfig config = TWAPArbitrageStrategyConfig.defaultIteration20();
 
-        strategy = new TWAPArbitrageStrategy(vwapCalculator, volCalculator, model, config);
+        strategy = new TWAPArbitrageStrategy(model, config);
         strategy.init(context);
+    }
+
+    private void setIndicators(double vwapZScore, double vol4h, double cvd, double basisBps) {
+        strategy.onIndicatorUpdate(IndicatorType.VWAP_ZSCORE, vwapZScore, 10000L);
+        strategy.onIndicatorUpdate(IndicatorType.VOLATILITY_4H, vol4h, 10000L);
+        strategy.onIndicatorUpdate(IndicatorType.CVD, cvd, 10000L);
+        strategy.onIndicatorUpdate(IndicatorType.BASIS, basisBps, 10000L);
     }
 
     @Test
     @DisplayName("Should submit BUY order at Phase 1 (t=60s) on valid bearish signal")
     void shouldSubmitBuyOrderAtPhase1() {
-        for (int i = 0; i < 20; i++) {
-            double c = (i % 2 == 0) ? 60100.0 : 59900.0;
-            double delta = (i == 19) ? -6.0 : 0.0;
-            double basis = (i == 19) ? -2.0 : 0.0;
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, c, delta, basis));
-        }
+        setIndicators(1.5, 0.001, -8.0, -2.0);
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;
@@ -114,12 +114,7 @@ class TWAPArbitrageStrategyTest {
     @Test
     @DisplayName("Should execute Take Profit exit at 0.70 USD when target price is reached")
     void shouldExecuteTakeProfitExit() {
-        for (int i = 0; i < 20; i++) {
-            double c = (i % 2 == 0) ? 60100.0 : 59900.0;
-            double delta = (i == 19) ? -6.0 : 0.0;
-            double basis = (i == 19) ? -2.0 : 0.0;
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, c, delta, basis));
-        }
+        setIndicators(1.5, 0.001, -8.0, -2.0);
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;
@@ -174,12 +169,7 @@ class TWAPArbitrageStrategyTest {
     @Test
     @DisplayName("Should execute Trailing Stop (+0.05) when price rose by +0.14 and then reverses at resolution")
     void shouldExecuteTrailingStopExit() {
-        for (int i = 0; i < 20; i++) {
-            double c = (i % 2 == 0) ? 60100.0 : 59900.0;
-            double delta = (i == 19) ? -6.0 : 0.0;
-            double basis = (i == 19) ? -2.0 : 0.0;
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, c, delta, basis));
-        }
+        setIndicators(1.5, 0.001, -8.0, -2.0);
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;
@@ -266,12 +256,7 @@ class TWAPArbitrageStrategyTest {
     @Test
     @DisplayName("Should not submit order when slippage exceeds cap (0.005 USD)")
     void shouldNotSubmitOrderWhenSlippageExceedsCap() {
-        for (int i = 0; i < 20; i++) {
-            double c = (i % 2 == 0) ? 60100.0 : 59900.0;
-            double delta = (i == 19) ? -6.0 : 0.0;
-            double basis = (i == 19) ? -2.0 : 0.0;
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, c, delta, basis));
-        }
+        setIndicators(1.5, 0.001, -8.0, -2.0);
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;
@@ -295,10 +280,7 @@ class TWAPArbitrageStrategyTest {
     @Test
     @DisplayName("Should skip trade when 4h volatility is too low (< 0.0006)")
     void shouldSkipTradeWhenVolatilityIsTooLow() {
-        // Flat candles with zero volatility
-        for (int i = 0; i < 20; i++) {
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, 60000.0, -6.0, -2.0));
-        }
+        setIndicators(1.5, 0.0001, -8.0, -2.0); // low vol
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;
@@ -320,12 +302,7 @@ class TWAPArbitrageStrategyTest {
     @Test
     @DisplayName("Should handle order rejection and reset position state")
     void shouldHandleOrderRejection() {
-        for (int i = 0; i < 20; i++) {
-            double c = (i % 2 == 0) ? 60100.0 : 59900.0;
-            double delta = (i == 19) ? -6.0 : 0.0;
-            double basis = (i == 19) ? -2.0 : 0.0;
-            strategy.onMarketCandleCompleted(createCandle(i * 900L + 1, 60000.0, c, delta, basis));
-        }
+        setIndicators(1.5, 0.001, -8.0, -2.0);
 
         long candleStart = 10000L;
         long t60 = candleStart + 60L;

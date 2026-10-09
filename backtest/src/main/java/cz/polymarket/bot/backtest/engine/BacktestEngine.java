@@ -1,16 +1,21 @@
 package cz.polymarket.bot.backtest.engine;
 
+import cz.polymarket.bot.backtest.cache.BacktestDataCacheService;
+import cz.polymarket.bot.backtest.cache.RawMarketDataProcessor;
 import cz.polymarket.bot.backtest.data.BacktestMarketRow;
-import cz.polymarket.bot.backtest.data.ParquetDatasetLoader;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.stream.BacktestEvent;
+import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
+import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
+import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
+import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
+import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
-import cz.polymarket.bot.domain.TwapPoint;
-import cz.polymarket.bot.domain.TwapUpdate;
+import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.StrategyRegistry;
-import cz.polymarket.bot.strategy.TWAPArbitrageStrategy;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,41 +23,41 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Backtest simulation engine coordinating dataset loading, strategy execution,
- * metrics calculation, and JSON export.
+ * Event-driven backtesting engine emulating live WebSocket and REST execution.
+ * Dispatches multi-source chronological events (Binance Spot, Binance Futures, OrderBook, Polymarket L2),
+ * dynamically updates required technical indicators on-the-fly, and executes orders
+ * via a simulated matching engine with network latency against reconstructed Polymarket L2 order book.
  */
 @ApplicationScoped
 public class BacktestEngine {
 
-    private final ParquetDatasetLoader datasetLoader;
+    private final BacktestDataCacheService dataCacheService;
+    private final RawMarketDataProcessor rawMarketDataProcessor;
     private final StrategyRegistry strategyRegistry;
     private final PerformanceMetricsCalculator metricsCalculator;
     private final BacktestJsonExporter jsonExporter;
-    private final String defaultDatasetPath;
     private final String defaultOutputDir;
     private final double defaultCapital;
 
     @Inject
     public BacktestEngine(
-            ParquetDatasetLoader datasetLoader,
+            BacktestDataCacheService dataCacheService,
+            RawMarketDataProcessor rawMarketDataProcessor,
             StrategyRegistry strategyRegistry,
             PerformanceMetricsCalculator metricsCalculator,
             BacktestJsonExporter jsonExporter,
-            @ConfigProperty(name = "polymarket.backtest.dataset-path", defaultValue = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
-            String defaultDatasetPath,
             @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
             String defaultOutputDir,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultCapital) {
-        if (datasetLoader == null) {
-            throw new IllegalArgumentException("datasetLoader cannot be null");
+        if (dataCacheService == null) {
+            throw new IllegalArgumentException("dataCacheService cannot be null");
         }
         if (strategyRegistry == null) {
             throw new IllegalArgumentException("strategyRegistry cannot be null");
@@ -63,17 +68,30 @@ public class BacktestEngine {
         if (jsonExporter == null) {
             throw new IllegalArgumentException("jsonExporter cannot be null");
         }
-        this.datasetLoader = datasetLoader;
+        this.dataCacheService = dataCacheService;
+        this.rawMarketDataProcessor = rawMarketDataProcessor;
         this.strategyRegistry = strategyRegistry;
         this.metricsCalculator = metricsCalculator;
         this.jsonExporter = jsonExporter;
-        this.defaultDatasetPath = defaultDatasetPath;
         this.defaultOutputDir = defaultOutputDir;
         this.defaultCapital = defaultCapital;
     }
 
+    public BacktestEngine(
+            BacktestDataCacheService dataCacheService,
+            StrategyRegistry strategyRegistry,
+            PerformanceMetricsCalculator metricsCalculator,
+            BacktestJsonExporter jsonExporter,
+            String defaultOutputDir,
+            double defaultCapital) {
+        this(dataCacheService, null, strategyRegistry, metricsCalculator, jsonExporter, defaultOutputDir, defaultCapital);
+    }
+
     public BacktestResult runBacktest(
             String strategyName,
+            String symbol,
+            String startDate,
+            String endDate,
             String datasetPath,
             Double initialCapital,
             String outputDirectory) {
@@ -85,91 +103,130 @@ public class BacktestEngine {
         TradingStrategy strategy = strategyRegistry.getStrategy(strategyName);
         strategy.reset();
 
-        String resolvedDataset = (datasetPath != null && !datasetPath.isBlank()) ? datasetPath : defaultDatasetPath;
+        String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
         double capital = (initialCapital != null && initialCapital > 0) ? initialCapital : defaultCapital;
         String resolvedOutputDir = (outputDirectory != null && !outputDirectory.isBlank()) ? outputDirectory : defaultOutputDir;
 
-        List<BacktestMarketRow> rows = datasetLoader.loadDataset(resolvedDataset);
+        List<BacktestMarketRow> rows = dataCacheService.loadMarketData(sym, startDate, endDate, datasetPath);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("No market rows available for backtest for symbol " + sym);
+        }
+
+        PolymarketOrderBook orderBook = new PolymarketOrderBook();
+        SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, 50L);
+        DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(strategy.getRequiredIndicators());
+        ChronologicalEventStreamer streamer = new ChronologicalEventStreamer();
+
+        matchingEngine.setEventScheduler(streamer::scheduleEvent);
+
+        BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
+        strategy.init(context);
 
         List<TradeRecord> trades = new ArrayList<>();
         double currentBalance = capital;
         double brierSum = 0.0;
         int evaluatedCount = 0;
 
-        BacktestSimulationContext context = new BacktestSimulationContext();
-        strategy.init(context);
-
-        TWAPArbitrageStrategy twapStrategy = (strategy instanceof TWAPArbitrageStrategy s) ? s : null;
-
         for (BacktestMarketRow row : rows) {
             long tStart = row.tStart();
-            long tEnd = row.tEnd();
             TradeDirection actualOutcome = "UP".equalsIgnoreCase(row.actualOutcome()) ? TradeDirection.UP : TradeDirection.DOWN;
 
+            orderBook.clear();
             context.resetForCandle(row, strategy);
-
-            // 1. Initial TWAP update at t=60s
-            strategy.onTwapUpdate(new TwapUpdate(
-                    cz.polymarket.bot.domain.Timeframe.FIFTEEN_MINUTES,
-                    tStart,
-                    tEnd,
-                    BigDecimal.valueOf(row.twapOpen()),
-                    new TwapPoint(tStart + 60, BigDecimal.valueOf(row.sOpen()), BigDecimal.valueOf(row.sOpen())),
-                    true
-            ));
-
-            if (twapStrategy != null) {
-                twapStrategy.setCurrentBasisBps(row.basisOpenBps());
-                double distTwap = row.sClose() - row.twapOpen();
-                twapStrategy.setDistTwapOverride(distTwap);
-            }
-
-            // 2. Order book quote at t=60s
-            OrderBookQuote quote60 = row.toOrderBookQuote(60);
-            strategy.onOrderBookQuote(quote60);
-
-            // 3. Intra-candle exit evaluation using max/min contract prices
-            if (context.hasActiveTrade()) {
-                double pmMax = row.pmMaxPrice();
-                double pmMin = row.pmMinPrice();
-                OrderBookQuote maxQuote = new OrderBookQuote(
-                        pmMax, pmMax,
-                        Math.max(0.01, 1.0 - pmMin), Math.max(0.01, 1.0 - pmMin),
-                        row.pmDepth1cUp(), row.pmDepth1cDown(),
-                        pmMax, Math.max(0.01, 1.0 - pmMin),
-                        (tStart + 300) * 1000L
-                );
-                strategy.onOrderBookQuote(maxQuote);
-            }
-
-            // 4. Candle resolution
-            strategy.onCandleResolution(actualOutcome);
-
-            // 5. Finalize trade if one occurred in this candle
-            if (context.hasActiveTrade()) {
-                TradeRecord trade = context.finalizeTrade(row, actualOutcome, currentBalance);
-                if (trade != null) {
-                    trades.add(trade);
-                    currentBalance = trade.balanceAfterTrade();
+            indicatorEngine.resetActiveCandle(tStart * 1000L, row.sOpen());
+            for (IndicatorType type : strategy.getRequiredIndicators()) {
+                double val = indicatorEngine.getIndicatorValue(type);
+                if (!Double.isNaN(val)) {
+                    strategy.onIndicatorUpdate(type, val, tStart * 1000L);
                 }
             }
 
-            // 6. Complete market candle (history updated for indicators in next interval)
-            strategy.onMarketCandleCompleted(row.toMarketCandle());
+            streamer.clear();
+            streamer.loadCandleEvents(row, rawMarketDataProcessor != null, rawMarketDataProcessor, sym);
 
-            // 7. Track Brier score
-            double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
-            double pModelUp = context.getEstimatedModelProbUp(row);
-            brierSum += (pModelUp - actualUp) * (pModelUp - actualUp);
-            evaluatedCount++;
+            while (streamer.hasNext()) {
+                BacktestEvent event = streamer.next();
+                context.setCurrentTimestampMs(event.timestampMs());
+
+                if (event instanceof BacktestEvent.BinanceSpotTradeEvent e) {
+                    indicatorEngine.onSpotTrade(e.timestampMs(), e.price(), e.quantity(), e.isBuyerMaker());
+                    for (IndicatorType type : strategy.getRequiredIndicators()) {
+                        double val = indicatorEngine.getIndicatorValue(type);
+                        if (!Double.isNaN(val)) {
+                            strategy.onIndicatorUpdate(type, val, e.timestampMs());
+                        }
+                    }
+                    strategy.onBinanceSpotTrade(e.timestampMs(), e.price(), e.quantity(), e.isBuyerMaker());
+                } else if (event instanceof BacktestEvent.BinanceFuturesTradeEvent e) {
+                    indicatorEngine.onFuturesTrade(e.timestampMs(), e.price(), e.quantity(), e.isBuyerMaker());
+                    if (strategy.getRequiredIndicators().contains(IndicatorType.BASIS)) {
+                        strategy.onIndicatorUpdate(IndicatorType.BASIS, indicatorEngine.getIndicatorValue(IndicatorType.BASIS), e.timestampMs());
+                    }
+                    strategy.onBinanceFuturesTrade(e.timestampMs(), e.price(), e.quantity(), e.isBuyerMaker());
+                } else if (event instanceof BacktestEvent.BinanceFuturesOrderBookEvent e) {
+                    indicatorEngine.onFuturesOrderBook(e.timestampMs(), e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
+                    for (IndicatorType type : strategy.getRequiredIndicators()) {
+                        if (type == IndicatorType.ORDER_BOOK_IMBALANCE || type == IndicatorType.BINANCE_OBI || type == IndicatorType.MICRO_PRICE) {
+                            strategy.onIndicatorUpdate(type, indicatorEngine.getIndicatorValue(type), e.timestampMs());
+                        }
+                    }
+                    strategy.onBinanceFuturesOrderBook(e.timestampMs(), e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
+                } else if (event instanceof BacktestEvent.PolymarketL2UpdateEvent e) {
+                    if ("snapshot".equalsIgnoreCase(e.eventType())) {
+                        orderBook.applySnapshot(e.bidsJson(), e.asksJson(), e.timestampMs());
+                    } else if ("delta".equalsIgnoreCase(e.eventType())) {
+                        orderBook.applyDelta(e.side(), e.price(), e.size(), e.timestampMs());
+                    } else if ("trade".equalsIgnoreCase(e.eventType())) {
+                        orderBook.applyTrade(e.price(), e.size(), e.side(), e.timestampMs());
+                    }
+                    OrderBookQuote quote = orderBook.toOrderBookQuote(e.timestampMs());
+                    strategy.onOrderBookQuote(quote);
+                } else if (event instanceof BacktestEvent.PolymarketQuoteEvent e) {
+                    orderBook.applyQuote(e.quote());
+                    strategy.onOrderBookQuote(e.quote());
+                } else if (event instanceof BacktestEvent.TwapUpdateEvent e) {
+                    strategy.onTwapUpdate(e.update());
+                } else if (event instanceof BacktestEvent.ExecutionReportEvent e) {
+                    strategy.onExecutionReport(e.report());
+                } else if (event instanceof BacktestEvent.CandleLifecycleEvent e) {
+                    if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_CLOSE) {
+                        strategy.onCandleResolution(actualOutcome);
+
+                        if (context.hasActiveTrade()) {
+                            TradeRecord trade = context.finalizeTrade(row, actualOutcome, currentBalance);
+                            if (trade != null) {
+                                trades.add(trade);
+                                currentBalance = trade.balanceAfterTrade();
+                            }
+                        }
+
+                        MarketCandle completedCandle = (e.completedCandle() != null) ? e.completedCandle() : row.toMarketCandle();
+                        indicatorEngine.onMarketCandleCompleted(completedCandle);
+                        strategy.onMarketCandleCompleted(completedCandle);
+                        for (IndicatorType type : strategy.getRequiredIndicators()) {
+                            double val = indicatorEngine.getIndicatorValue(type);
+                            if (!Double.isNaN(val)) {
+                                strategy.onIndicatorUpdate(type, val, e.timestampMs());
+                            }
+                        }
+
+                        double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
+                        double pModelUp = context.getEstimatedModelProbUp(row);
+                        brierSum += (pModelUp - actualUp) * (pModelUp - actualUp);
+                        evaluatedCount++;
+                    }
+                }
+            }
         }
 
         double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
         PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier);
 
+        String effectiveDatasetPath = (datasetPath != null && !datasetPath.isBlank()) ? datasetPath : ("Cache: " + sym);
+
         BacktestResult rawResult = new BacktestResult(
                 strategy.getName(),
-                resolvedDataset,
+                effectiveDatasetPath,
                 Instant.now(),
                 rows.size(),
                 metrics,

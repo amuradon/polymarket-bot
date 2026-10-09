@@ -56,8 +56,6 @@ class PaperTradingEngineTest {
 
         TWAPArbitrageStrategyConfig config = TWAPArbitrageStrategyConfig.defaultIteration20();
         strategy = new TWAPArbitrageStrategy(
-                new VwapCalculator(),
-                new RealizedVolatilityCalculator(),
                 new NextCandleProbabilityModel(new cz.polymarket.bot.calculator.KellyPositionSizer(10000.0, 0.25, 50.0, 300.0)),
                 config
         );

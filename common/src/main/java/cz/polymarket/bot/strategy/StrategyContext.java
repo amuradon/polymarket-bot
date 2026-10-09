@@ -21,4 +21,23 @@ public interface StrategyContext {
      * @return the hourly price cache
      */
     HourlyPriceCache getPriceCache();
+
+    /**
+     * Returns the current real-time or cached value of the requested indicator.
+     *
+     * @param type indicator type
+     * @return the current indicator value, or Double.NaN if not available
+     */
+    default double getIndicatorValue(IndicatorType type) {
+        return Double.NaN;
+    }
+
+    /**
+     * Returns all currently computed indicator values.
+     *
+     * @return map of indicator types to current values
+     */
+    default java.util.Map<IndicatorType, Double> getIndicators() {
+        return java.util.Map.of();
+    }
 }

@@ -114,10 +114,6 @@ py -m venv .venv
 
 # Install dependencies (only first run)
 pip install marketlens
-pip install cryptohftdata
-
-# Download Binance Futures order book data
-python scripts/download_binance_orderbook.py --symbol BTCUSDT --start-date 2026-08-01 --end-date 2026-08-02 --data-dir ./data/orderbook
 
 # Export Polymarket historical data from marketlens.trade
 python scripts/export_series.py --after 2026-08-07T00:00:00Z --before 2026-09-07T00:00:00Z

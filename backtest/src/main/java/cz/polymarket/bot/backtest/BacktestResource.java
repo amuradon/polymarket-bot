@@ -52,7 +52,7 @@ public class BacktestResource {
     @Produces(MediaType.APPLICATION_JSON)
     @Operation(
             summary = "Execute backtest simulation",
-            description = "Executes backtest for a mandatory specified strategy against historical parquet data, computes performance metrics, and exports full trade logs to JSON."
+            description = "Executes backtest for a mandatory specified strategy against cached binary market data, computes performance metrics, and exports full trade logs to JSON."
     )
     @APIResponse(
             responseCode = "200",
@@ -73,6 +73,9 @@ public class BacktestResource {
         try {
             BacktestResult result = backtestEngine.runBacktest(
                     request.strategyName(),
+                    request.symbol(),
+                    request.startDate(),
+                    request.endDate(),
                     request.datasetPath(),
                     request.initialCapital(),
                     request.outputDirectory()
@@ -80,6 +83,7 @@ public class BacktestResource {
 
             BacktestRunResponse response = new BacktestRunResponse(
                     result.strategyName(),
+                    request.symbol() != null ? request.symbol() : "BTCUSDT",
                     result.datasetPath(),
                     result.executionTimeUtc(),
                     result.totalMarkets(),
@@ -112,7 +116,16 @@ public class BacktestResource {
             @Schema(description = "Mandatory trading strategy name to execute", example = "TWAPArbitrageStrategy", required = true)
             String strategyName,
 
-            @Schema(description = "Optional path to the Parquet dataset file", example = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
+            @Schema(description = "Optional symbol to evaluate (default BTCUSDT)", example = "BTCUSDT")
+            String symbol,
+
+            @Schema(description = "Optional start date filter (yyyy-MM-dd)", example = "2026-08-07")
+            String startDate,
+
+            @Schema(description = "Optional end date filter (yyyy-MM-dd)", example = "2026-10-06")
+            String endDate,
+
+            @Schema(description = "Optional override path to a precomputed Parquet dataset file", example = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
             String datasetPath,
 
             @Schema(description = "Optional initial capital in USD", example = "10000.0")
@@ -127,7 +140,10 @@ public class BacktestResource {
             @Schema(description = "Executed strategy name", example = "TWAPArbitrageStrategy")
             String strategyName,
 
-            @Schema(description = "Dataset path used", example = "D:/Polymarket/btc_nextCandle/unified_market_data.parquet")
+            @Schema(description = "Evaluated symbol", example = "BTCUSDT")
+            String symbol,
+
+            @Schema(description = "Dataset source path or cache reference", example = "Cache: BTCUSDT")
             String datasetPath,
 
             @Schema(description = "Execution timestamp", example = "2026-10-03T11:45:00Z")

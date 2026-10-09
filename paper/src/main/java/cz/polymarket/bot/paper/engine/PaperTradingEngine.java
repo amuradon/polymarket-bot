@@ -446,7 +446,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                     bestBidDown,
                     5000.0, 5000.0,
                     bestAskUp, bestAskDown,
-                    System.currentTimeMillis()
+                    currentTimestampSec > 0 ? (currentTimestampSec * 1000L) : System.currentTimeMillis()
             );
             onOrderBookQuote(synthQuote);
         }
