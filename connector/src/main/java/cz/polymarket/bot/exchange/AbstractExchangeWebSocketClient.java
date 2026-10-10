@@ -13,13 +13,16 @@ import java.net.URI;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Base non-blocking Vert.x WebSocket client for exchange ticker feeds with automatic reconnection.
+ */
 public abstract class AbstractExchangeWebSocketClient {
 
     private static final Logger LOG = Logger.getLogger(AbstractExchangeWebSocketClient.class);
     private static final long RECONNECT_DELAY_MS = 3000L;
 
     private final Vertx vertx;
-    private final ExchangePriceTracker tracker;
+    private final ExchangePriceListener tracker;
     private final Exchange exchange;
     private final String wsUrl;
     private final String subscribePayload;
@@ -27,6 +30,9 @@ public abstract class AbstractExchangeWebSocketClient {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile WebSocket currentWebSocket;
 
+    /**
+     * Default no-arg constructor required for CDI proxies.
+     */
     protected AbstractExchangeWebSocketClient() {
         this.vertx = null;
         this.tracker = null;
@@ -36,9 +42,18 @@ public abstract class AbstractExchangeWebSocketClient {
         this.httpClient = null;
     }
 
+    /**
+     * Constructs an exchange WebSocket client.
+     *
+     * @param vertx            Vert.x instance for non-blocking network I/O
+     * @param tracker          price listener notified on incoming ticker prices
+     * @param exchange         exchange identifier
+     * @param wsUrl            target WebSocket endpoint URL
+     * @param subscribePayload optional JSON subscription message sent immediately upon connection
+     */
     public AbstractExchangeWebSocketClient(
             Vertx vertx,
-            ExchangePriceTracker tracker,
+            ExchangePriceListener tracker,
             Exchange exchange,
             String wsUrl,
             String subscribePayload) {
@@ -56,12 +71,18 @@ public abstract class AbstractExchangeWebSocketClient {
         }
     }
 
+    /**
+     * Starts the WebSocket connection loop if not already running.
+     */
     public void start() {
         if (running.compareAndSet(false, true)) {
             connect();
         }
     }
 
+    /**
+     * Stops the WebSocket client and closes any active connection.
+     */
     public void stop() {
         running.set(false);
         if (currentWebSocket != null) {
@@ -70,7 +91,9 @@ public abstract class AbstractExchangeWebSocketClient {
             } catch (Exception ignored) {
             }
         }
-        httpClient.close();
+        if (httpClient != null) {
+            httpClient.close();
+        }
     }
 
     private void connect() {
@@ -125,18 +148,34 @@ public abstract class AbstractExchangeWebSocketClient {
     }
 
     private void scheduleReconnect() {
-        if (running.get()) {
+        if (running.get() && vertx != null) {
             vertx.setTimer(RECONNECT_DELAY_MS, timerId -> connect());
         }
     }
 
+    /**
+     * Handles an incoming text frame from the WebSocket and updates the price listener if a price is parsed.
+     *
+     * @param message raw JSON text frame
+     */
     public void handleMessage(String message) {
         parsePrice(message).ifPresent(price -> tracker.updatePrice(exchange, price));
     }
 
+    /**
+     * Forwards a parsed price update to the configured price listener.
+     *
+     * @param price latest traded price
+     */
     protected void updatePrice(BigDecimal price) {
         tracker.updatePrice(exchange, price);
     }
 
+    /**
+     * Extracts the traded price from a raw exchange WebSocket JSON payload.
+     *
+     * @param message raw JSON payload
+     * @return parsed price if present
+     */
     protected abstract Optional<BigDecimal> parsePrice(String message);
 }

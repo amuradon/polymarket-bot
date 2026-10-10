@@ -3,14 +3,16 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <groupId>cz.polymarket.bot</groupId>
+    <groupId>cz.amuradon.polymarket.bot</groupId>
     <artifactId>polymarket-bot</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
         <module>common</module>
+        <module>connector</module>
         <module>trading</module>
+        <module>data</module>
         <module>live</module>
         <module>paper</module>
         <module>backtest</module>
@@ -26,6 +28,7 @@
         <quarkus.platform.version>3.39.2</quarkus.platform.version>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
         <jandex-plugin.version>3.2.7</jandex-plugin.version>
+        <zstd-jni.version>1.5.6-8</zstd-jni.version>
         <assertj.version>3.27.3</assertj.version>
         <awaitility.version>4.2.2</awaitility.version>
         <mockito.version>5.15.2</mockito.version>
@@ -43,14 +46,26 @@
 
             <!-- Internal Submodules -->
             <dependency>
-                <groupId>cz.polymarket.bot</groupId>
+                <groupId>cz.amuradon.polymarket.bot</groupId>
                 <artifactId>common</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>cz.polymarket.bot</groupId>
+                <groupId>cz.amuradon.polymarket.bot</groupId>
+                <artifactId>connector</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>cz.amuradon.polymarket.bot</groupId>
                 <artifactId>trading</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+
+            <!-- Compression -->
+            <dependency>
+                <groupId>com.github.luben</groupId>
+                <artifactId>zstd-jni</artifactId>
+                <version>${zstd-jni.version}</version>
             </dependency>
 
             <!-- Test dependencies -->

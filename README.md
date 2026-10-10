@@ -1,25 +1,27 @@
 # Polymarket Crypto Bot
 
-Real-time cryptocurrency price aggregation, TWAP (Time-Weighted Average Price) calculation, and automated trading platform designed for Polymarket prediction markets.
+Real-time cryptocurrency price aggregation, TWAP (Time-Weighted Average Price) calculation, market data collection, and automated trading platform designed for Polymarket prediction markets.
 
 ---
 
 ## Architecture & Vision
 
 - 👉 **[Architecture Guide (`ARCHITECTURE.md`)](ARCHITECTURE.md)**: Full module hierarchy, dependency rules, isolation guarantees, and design contracts.
-- 👉 **[Product & Engineering Vision (`VISION.md`)](VISION.md)**: Platform roadmap, multi-token markets (BTC, ETH, SOL), 3-system lifecycle (Backtest $\rightarrow$ Paper $\rightarrow$ Live), and low-latency GCP Dublin deployment principles.
+- 👉 **[Product & Engineering Vision (`VISION.md`)](VISION.md)**: Platform roadmap, multi-token markets (BTC, ETH, SOL), 3-system lifecycle (Backtest $\rightarrow$ Paper $\rightarrow$ Live), and low-latency deployment principles.
 - 👉 **[Deployment Guide (`DEPLOYMENT.md`)](DEPLOYMENT.md)**: GCP Cloud Run deployment instructions and mandatory continuous execution flags (`--no-cpu-throttling`, `--min-instances 1`).
 
 ---
 
 ## Project Structure
 
-The project is structured as a Maven Multi-Module project with 5 submodules:
+The project is structured as a Maven Multi-Module project with 7 submodules:
 
 | Submodule | Type | Description | Default Port |
 | :--- | :--- | :--- | :--- |
 | **`common`** | Library (`jar`) | Shared domain records, math calculators, in-memory price cache, and strategy execution contracts. | N/A |
-| **`trading`** | Library (`jar`) | Exchange clients (Binance, Coinbase, Kraken), `TwapEngine`, Qute templates, web console (`/btc-usd`), and WebSocket endpoints. | N/A |
+| **`connector`** | Library (`jar`) | Shared Binance and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
+| **`trading`** | Library (`jar`) | Exchange price tracker, `TwapEngine`, Qute templates, web console (`/btc-usd`), and WebSocket endpoints. | N/A |
+| **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
 | **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
 | **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |
 | **`backtest`** | Application (`jar`) | Standalone runnable Quarkus application for backtesting strategies on historical datasets. | `8083` |
@@ -36,6 +38,7 @@ The project is structured as a Maven Multi-Module project with 5 submodules:
   - `quarkus-websockets-next`: Next-generation reactive WebSocket implementation.
   - `quarkus-vertx`: Eclipse Vert.x reactive toolkit for asynchronous networking and WebSocket exchange clients.
   - `quarkus-scheduler`: Background task scheduling.
+- **Zstandard (`zstd-jni`)**: High-speed streaming compression (`.jsonl.zst`) for real-time market data collection.
 
 ### Frontend
 - **Quarkus Qute**: Server-side template rendering.
@@ -47,11 +50,6 @@ The project is structured as a Maven Multi-Module project with 5 submodules:
 - **AssertJ & Awaitility**: Fluent assertions and asynchronous polling assertions for WebSocket/concurrent flows.
 - **Mockito**: Mocking external services and HTTP endpoints.
 - **pytest**: Automated unit testing for Python tooling.
-
-### Data Engineering (Python)
-- **Python 3.12**
-- **PyArrow & Pandas**: High-performance columnar Parquet processing.
-- **cryptohftdata**: Bulk high-frequency data ingestion.
 
 ---
 
@@ -82,27 +80,13 @@ Navigate to `http://localhost:8082/btc-usd`.
 ```
 - Status: `http://localhost:8083/api/status`
 - Trigger Binance historical data download: `POST http://localhost:8083/api/data/download/binance`
-  ```bash
-  curl -X POST http://localhost:8083/api/data/download/binance \
-    -H "Content-Type: application/json" \
-    -d '{"symbol":"BTCUSDT","start":"2026-08-01","end":"2026-08-02"}'
-  ```
-  Returns `202 Accepted` with a `jobId`.
-- Query download job status:
-  ```bash
-  curl http://localhost:8083/api/data/download/binance/<jobId>
-  ```
 - Trigger asynchronous backtest simulation: `POST http://localhost:8083/api/backtest/run`
-  ```bash
-  curl -X POST http://localhost:8083/api/backtest/run \
-    -H "Content-Type: application/json" \
-    -d '{"strategyName":"TWAPArbitrageStrategy","symbol":"BTCUSDT","startDate":"2026-08-01","endDate":"2026-08-02"}'
-  ```
-  Returns `202 Accepted` with a `jobId`.
-- Query backtest job status and results file path:
-  ```bash
-  curl http://localhost:8083/api/backtest/run/<jobId>
-  ```
+
+#### 4. Data Collector Application (`data` - Port 8084)
+```bash
+./mvnw quarkus:dev -pl data
+```
+- Collector status & active stream diagnostics: `GET http://localhost:8084/api/collector/status`
 
 ---
 
@@ -111,24 +95,4 @@ Navigate to `http://localhost:8082/btc-usd`.
 Execute the full multi-module test suite across all submodules:
 ```bash
 ./mvnw clean test
-```
-
----
-
-## Running Data Scripts (Python)
-```bash
-# In first run create virtual environment
-py -m venv .venv
-
-# Activate virtual environment
-.venv\Scripts\activate
-
-# Install dependencies (only first run)
-pip install marketlens
-
-# Export Polymarket historical data from marketlens.trade
-python scripts/export_series.py --after 2026-08-07T00:00:00Z --before 2026-09-07T00:00:00Z
-
-# Run Python script tests
-python -m unittest discover tests
 ```
