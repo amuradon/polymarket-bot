@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 @ApplicationScoped
-public class ExchangePriceTracker {
+public class ExchangePriceTracker implements ExchangePriceListener {
 
     private static final int RETENTION_SECONDS = 120;
     private static final int WINDOW_SIZE_SECONDS = 60;

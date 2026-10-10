@@ -2,6 +2,51 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "quarkus:dev-data",
+            "type": "shell",
+            "command": "./mvnw install -DskipTests -pl connector -am && ./mvnw quarkus:dev -pl data",
+            "windows": {
+                "command": ".\\mvnw.cmd install -DskipTests -pl connector -am; if ($?) { .\\mvnw.cmd quarkus:dev -pl data }"
+            },
+            "isBackground": true,
+            "problemMatcher": [
+                {
+                    "pattern": [
+                        {
+                            "regexp": "\\b\\B",
+                            "file": 1,
+                            "location": 2,
+                            "message": 3
+                        }
+                    ],
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "^.*(Quarkus .* starting|Scanning for projects).*",
+                        "endsPattern": "^.*(Quarkus .* started in|Listening on:).*"
+                    }
+                }
+            ],
+            "group": "build"
+        },
+        {
+            "label": "data:compile",
+            "type": "shell",
+            "command": "./mvnw compile -pl connector,data",
+            "windows": {
+                "command": ".\\mvnw.cmd compile -pl connector,data"
+            },
+            "group": "build"
+        },
+        {
+            "label": "data:test",
+            "type": "shell",
+            "command": "./mvnw test -pl connector,data",
+            "windows": {
+                "command": ".\\mvnw.cmd test -pl connector,data"
+            },
+            "group": "test"
+        },
+        {
             "label": "quarkus:dev-backtest",
             "type": "shell",
             "command": "./mvnw quarkus:dev -pl backtest",

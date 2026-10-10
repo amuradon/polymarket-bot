@@ -3,6 +3,21 @@
     "configurations": [
         {
             "type": "java",
+            "name": "Data Collector: Quarkus Dev (Attach 5005)",
+            "request": "attach",
+            "hostName": "localhost",
+            "port": 5005,
+            "preLaunchTask": "quarkus:dev-data"
+        },
+        {
+            "type": "java",
+            "name": "Data Collector: Direct Main (Run/Debug)",
+            "request": "launch",
+            "mainClass": "cz.polymarket.bot.data.DataCollectorApplication",
+            "projectName": "data"
+        },
+        {
+            "type": "java",
             "name": "Backtest: Quarkus Dev (Attach 5005)",
             "request": "attach",
             "hostName": "localhost",
