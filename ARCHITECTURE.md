@@ -119,4 +119,4 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ---
 
 ## 4. Low-Latency Engineering Principles
-For detailed performance guidelines on GCP Dublin / AWS eu-west deployment, memory layout, GC elimination, and networking, see [`VISION.md`](VISION.md).
+For detailed performance guidelines on AWS Ireland (`eu-west-1`) deployment, memory layout, GC elimination, and networking, see [`VISION.md`](VISION.md).

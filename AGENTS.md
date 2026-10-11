@@ -33,11 +33,11 @@ Before proposing plans, designing features, or writing any code in this reposito
    - **Zero Discrepancy**: Ensure strategies and engine logic in `common` execute identically across backtesting, paper, and live trading.
 
 2. 👉 [`VISION.md`](VISION.md):
-   - Agents must study the platform vision (multi-token support for BTC, ETH, SOL; 15m/5m/1h timeframes; GCP Dublin deployment near London data centers).
+   - Agents must study the platform vision (multi-token support for BTC, ETH, SOL; 15m/5m/1h timeframes; AWS `eu-west-1` Dublin deployment near London data centers).
    - All code must be designed to be easily extensible, modular, and optimized for ultra-low latency (Java 25, GC-free hot path, non-blocking Vert.x event loops).
 
 3. 👉 [`DEPLOYMENT.md`](DEPLOYMENT.md):
-   - When deploying paper or live applications to GCP Cloud Run, agents and developers **MUST ALWAYS** configure `--no-cpu-throttling` and `--min-instances 1` to ensure continuous 24/7 background execution without container freezing.
+   - When deploying data, paper, or live applications to AWS EC2 with EBS in `eu-west-1`, agents and developers **MUST ALWAYS** ensure continuous 24/7 execution (`--restart unless-stopped`), non-throttled CPU allocation, and persistent EBS volume mounting.
 
 ---
 
@@ -53,3 +53,18 @@ When working on any Java and Quarkus code in this repository, agents **MUST ALWA
 - **Skills Usage**: Load extension skills with `quarkus_skills` prior to writing code or tests.
 - **Testing & Dev MCP Tools**: Use Quarkus Dev MCP tools (`quarkus_callTool`, `devui-testing_runTests`, etc.) rather than running ad-hoc Maven commands.
 - **No `mvn clean` in Dev Mode**: Never run `mvn clean` or `gradle clean` while dev mode is running.
+
+---
+
+## 4. AWS Cloud & Infrastructure Rules
+
+When working with AWS services, infrastructure, or deployment in this repository, agents **MUST ALWAYS** follow the rules defined in:
+
+1. 👉 [`.agents/rules/aws-agent-rules.md`](.agents/rules/aws-agent-rules.md)
+2. 👉 [`.agents/rules/aws-starter-rules.md`](.agents/rules/aws-starter-rules.md)
+
+### Key Mandates from AWS Rules:
+- **Target Region**: Deploy regional resources in AWS `eu-west-1` (Ireland / Dublin).
+- **AWS MCP & Skills First**: Prefer the AWS MCP Server over direct CLI commands and check/load relevant AWS skills before starting any AWS task.
+- **Infrastructure as Code**: Prefer AWS CDK or CloudFormation over imperative CLI resource creation.
+- **Secret Safety**: Never expose raw secrets in context; follow the `aws-secrets-manager` resolution guidelines.

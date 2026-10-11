@@ -56,9 +56,9 @@ Production code in `live` and `paper` **MUST NOT** be bloated with:
 ### Pillar C: Ultra-Low Latency & High Performance
 The trading system competes on latency against global market makers:
 1. **Physical & Network Proximity**:
-   - Deployment target: **Google Cloud Platform (GCP) in Dublin (`europe-west1`)**.
+   - Deployment target: **Amazon Web Services (AWS) in Ireland (`eu-west-1`, Dublin)** on EC2 with EBS.
    - Polymarket CLOB servers are hosted in AWS London (`eu-west-2`).
-   - Round-trip time (RTT) between GCP Dublin and AWS London across the Irish Sea is typically **5–8 ms** over GCP's dedicated fiber backbone.
+   - Round-trip time (RTT) between AWS Ireland (`eu-west-1`) and AWS London (`eu-west-2`) across the Irish Sea is typically **5–8 ms** over AWS's dedicated fiber backbone.
 2. **Runtime & Language Efficiency (Java 25)**:
    - **GC-Free Critical Path**: Avoid heap allocations in the hot path (from WebSocket packet arrival to order submission). Avoid boxing (`Double`, `Long`, `BigDecimal`) in real-time execution loops.
    - **Modern Concurrency**: Asynchronous, non-blocking Vert.x event loops without thread contention or blocking locks.

@@ -1,102 +1,96 @@
-# Deployment Guide - Polymarket Bot on GCP Cloud Run
+# Deployment Guide - Polymarket Bot on AWS EC2 with EBS (`eu-west-1`)
 
-This guide outlines the deployment procedures, container configuration, and **mandatory Cloud Run execution flags** for running Polymarket Bot applications (`paper`, `live`) in Google Cloud Platform (GCP).
+This guide outlines the deployment procedures, instance configuration, persistent storage setup, and **mandatory continuous execution requirements** for running Polymarket Bot applications (`data`, `paper`, `live`) on **Amazon Web Services (AWS) EC2 with Amazon EBS** in the **Ireland (`eu-west-1`)** region.
 
 ---
 
-## 1. Mandatory Cloud Run Flags (CRITICAL)
+## 1. Mandatory EC2 & EBS Configuration (CRITICAL)
 
-Unlike standard web APIs that only respond to inbound HTTP requests, the Polymarket Bot application is an **active daemon** that:
-- Maintains persistent, bidirectional WebSockets to crypto exchanges (Binance, Coinbase, Kraken).
+Unlike standard stateless web APIs that only respond to inbound HTTP requests, the Polymarket Bot application is an **active real-time daemon** that:
+- Maintains persistent, bidirectional WebSockets to crypto exchanges (Binance, Coinbase, Kraken) and Polymarket CLOB.
 - Computes rolling 60s TWAP indicators and state updates every second on Vert.x event loops.
-- Executes real-time statistical arbitrage strategies with sub-second order latency.
+- Continuously records compressed `.jsonl.zst` market streams and executes real-time strategies with sub-second latency.
 
-Therefore, when deploying or updating the service on GCP Cloud Run, **the following flags MUST ALWAYS be set**:
+Therefore, when provisioning and deploying on AWS EC2 in `eu-west-1`, **the following requirements MUST ALWAYS be met**:
 
-| Flag | Value | Rationale & Impact |
+| Parameter | Value / Configuration | Rationale & Impact |
 | :--- | :--- | :--- |
-| **`--no-cpu-throttling`** | Enabled | **MANDATORY**: Cloud Run by default allocates CPU *only* during incoming HTTP request handling. Without this flag, Cloud Run throttles the container CPU to 0% whenever no browser/client is hitting the web dashboard. This freezes background WebSockets and Vert.x timers. Upon waking up, large clock jumps cause `BlockedThreadChecker` exceptions and zero trades. `--no-cpu-throttling` guarantees dedicated CPU 24/7. |
-| **`--min-instances`** | `1` | **MANDATORY**: Cloud Run by default scales down to 0 instances when idle (`minScale: 0`). A trading bot must never scale to 0; it must continuously monitor markets and manage open positions. |
-| **`--memory`** | `1Gi` (or `2Gi`) | Sufficient heap for Java 25 runtime, in-memory price caches, and historical klines. |
-| **`--cpu`** | `1` (or `2`) | Dedicated vCPU for GC-free event loop processing. |
-| **`--port`** | `8080` | Matches `quarkus.http.port=${PORT:8080}`. |
+| **AWS Region** | `eu-west-1` (Ireland / Dublin) | **MANDATORY**: Physical and network proximity across the Irish Sea (~5-8 ms RTT over the AWS backbone) to Polymarket CLOB servers in AWS London (`eu-west-2`). |
+| **Continuous Execution** | `24/7 Running Instance` + `--restart unless-stopped` | **MANDATORY**: The trading and data recorder daemons must never scale to zero or suspend when no browser is connected to the dashboard. |
+| **CPU Allocation** | Dedicated vCPU (e.g. `c7g.medium` / `m7g.medium`) or `T4g/T3` with **Unlimited CPU Credits** | **MANDATORY**: If CPU is throttled due to exhausted burstable credits, background WebSockets and Vert.x timers freeze, causing `BlockedThreadChecker` exceptions, clock jumps, and dropped market data. |
+| **Persistent Storage** | **Amazon EBS (`gp3`)** mounted at `/work/data` | **MANDATORY**: Ensures recorded `.jsonl.zst` streams and paper trading state survive container restarts and upgrades. |
+| **Memory** | `2 GiB+` RAM (`-Xmx1g` or `-Xmx1536m`) | Sufficient heap and off-heap memory for Java 25 runtime, Zstandard native buffers, in-memory price caches, and historical klines. |
 
 > [!CAUTION]
-> **NEVER deploy without `--no-cpu-throttling` and `--min-instances 1`**.
-> Omitting these flags will cause the trading bot to sleep, drop exchange feeds, fail to execute strategy signals, and produce false blocked thread warnings.
+> **NEVER deploy on throttled compute or ephemeral container storage without an EBS volume mount.**
+> CPU throttling or instance hibernation will freeze Vert.x event loops, drop exchange WebSocket feeds, and corrupt continuous time-series recording.
 
 ---
 
-## 2. Deployment Protocol
+## 2. Deployment Protocol (`eu-west-1`)
 
-### Step 1: Build Docker Container
-From the repository root:
+### Step 1: Prepare Persistent EBS Volume on EC2
+Ensure an Amazon EBS `gp3` volume is attached and mounted on the EC2 host (e.g. at `/mnt/ebs/polymarket-data`) with appropriate write permissions for the Quarkus container user (`uid=185`):
+
 ```bash
-docker build -t europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest -f paper/src/main/docker/Dockerfile.jvm .
+sudo mkdir -p /mnt/ebs/polymarket-data/paper /mnt/ebs/polymarket-data/streams
+sudo chown -R 185:185 /mnt/ebs/polymarket-data
 ```
 
-### Step 2: Push to GCP Artifact Registry
+### Step 2: Build & Push Docker Container to Amazon ECR (`eu-west-1`)
+From the repository root, build the JVM container image and push it to Amazon ECR in `eu-west-1`:
+
 ```bash
-docker push europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest
+export AWS_REGION=eu-west-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/polymarket-bot-paper"
+
+aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+docker build -t ${ECR_URI}:latest -f paper/src/main/docker/Dockerfile.jvm .
+docker push ${ECR_URI}:latest
 ```
 
-### Step 3: Deploy / Update Cloud Run Service
-Deploy the service ensuring all mandatory flags and persistent GCS storage mounts are provided:
+### Step 3: Deploy / Update Container on EC2 (`eu-west-1`)
+On the EC2 instance in `eu-west-1`, pull the latest image and run the container with the persistent EBS volume bind-mounted:
 
 ```bash
-gcloud run deploy polymarket-bot-paper \
-  --image europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest \
-  --add-volume "name=paper-storage,type=cloud-storage,bucket=polymarket-paper-storage-508306" \
-  --add-volume-mount "volume=paper-storage,mount-path=/work/data/paper" \
-  --set-env-vars POLYMARKET_PAPER_DATA_DIR=/work/data/paper \
-  --execution-environment gen2 \
-  --platform managed \
-  --region europe-west1 \
-  --project polymarket-bots-508306 \
-  --port 8080 \
-  --memory 1Gi \
-  --cpu 1 \
-  --no-cpu-throttling \
-  --min-instances 1 \
-  --max-instances 2 \
-  --allow-unauthenticated
-```
+export AWS_REGION=eu-west-1
+export ECR_URI="<account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-paper"
 
-To update an existing service:
-```bash
-gcloud run services update polymarket-bot-paper \
-  --image europe-west1-docker.pkg.dev/polymarket-bots-508306/cloud-run-source-deploy/polymarket-bot-paper:latest \
-  --add-volume "name=paper-storage,type=cloud-storage,bucket=polymarket-paper-storage-508306" \
-  --add-volume-mount "volume=paper-storage,mount-path=/work/data/paper" \
-  --set-env-vars POLYMARKET_PAPER_DATA_DIR=/work/data/paper \
-  --execution-environment gen2 \
-  --no-cpu-throttling \
-  --min-instances 1 \
-  --project polymarket-bots-508306 \
-  --region europe-west1
+aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin "<account-id>.dkr.ecr.eu-west-1.amazonaws.com"
+docker pull ${ECR_URI}:latest
+
+docker stop polymarket-bot-paper || true
+docker rm polymarket-bot-paper || true
+
+docker run -d \
+  --name polymarket-bot-paper \
+  --restart unless-stopped \
+  -p 8080:8082 \
+  -v /mnt/ebs/polymarket-data/paper:/work/data/paper \
+  -e POLYMARKET_PAPER_DATA_DIR=/work/data/paper \
+  ${ECR_URI}:latest
 ```
 
 ---
 
 ## 3. Operational Verification
 
-1. **Verify Continuous CPU Allocation & Scaling:**
+1. **Verify Container Status & Restart Policy:**
    ```bash
-   gcloud run services describe polymarket-bot-paper \
-     --project polymarket-bots-508306 \
-     --region europe-west1 \
-     --format="yaml(spec.template.metadata.annotations)"
+   docker inspect -f '{{.State.Status}} | RestartPolicy={{.HostConfig.RestartPolicy.Name}}' polymarket-bot-paper
    ```
-   Confirm the output contains:
-   ```yaml
-   autoscaling.knative.dev/minScale: '1'
-   run.googleapis.com/cpu-throttling: 'false'
+   Confirm the output shows `running | RestartPolicy=unless-stopped`.
+
+2. **Verify EBS Volume Mount & Free Space:**
+   ```bash
+   df -h /mnt/ebs/polymarket-data
    ```
 
-2. **Verify Startup & WebSocket Connectivity:**
+3. **Verify Startup & WebSocket Connectivity:**
    ```bash
-   gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="polymarket-bot-paper"' \
-     --limit 30 --project polymarket-bots-508306
+   docker logs --tail 50 polymarket-bot-paper
    ```
    Check for:
    - `[BINANCE] WebSocket connected`
@@ -105,5 +99,5 @@ gcloud run services update polymarket-bot-paper \
    - `Seeded ... historical 15m candles into active strategy`
    - Zero `BlockedThreadChecker` warnings.
 
-3. **Verify Dashboard:**
-   Open the assigned Cloud Run URL (e.g. `https://polymarket-bot-paper-557828324948.europe-west1.run.app`) to view live status, rolling TWAPs, and trade logs.
+4. **Verify Dashboard:**
+   Open the EC2 instance endpoint (`http://<ec2-host>:8080`) to view live status, rolling TWAPs, and trade logs.
