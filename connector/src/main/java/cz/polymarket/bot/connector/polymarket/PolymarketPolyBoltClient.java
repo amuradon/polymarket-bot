@@ -165,16 +165,30 @@ public class PolymarketPolyBoltClient {
         return current != null ? current.getState() : ConnectionState.DISCONNECTED;
     }
 
+    /**
+     * Checks whether all required Polymarket CLOB API credentials ({@code apiKey}, {@code secret}, {@code passphrase})
+     * are configured and non-blank.
+     *
+     * @return true if all three credentials are present
+     */
+    public boolean hasCredentials() {
+        return !apiKey.isEmpty() && !secret.isEmpty() && !passphrase.isEmpty();
+    }
+
     private ReconnectingWebSocketStream createAuthenticatedStream(
             String streamName,
             String subscribeMsg,
             Supplier<ReconnectingWebSocketStream> streamRef,
             RawWebSocketListener listener) {
-        boolean hasCredentials = !apiKey.isEmpty();
-        if (!hasCredentials) {
-            LOG.warnf("[%s] Polymarket CLOB API credentials (POLYMARKET_API_KEY / SECRET / PASSPHRASE) are not set; sending subscribe directly.", streamName);
+        if (!hasCredentials()) {
+            String errorMsg = String.format(
+                    "[%s] Missing required Polymarket CLOB API credentials (POLYMARKET_API_KEY, POLYMARKET_SECRET, POLYMARKET_PASSPHRASE). All streams must be recorded; aborting startup.",
+                    streamName
+            );
+            LOG.error(errorMsg);
+            throw new IllegalStateException(errorMsg);
         }
-        String initialMessage = hasCredentials ? buildAuthMessage() : subscribeMsg;
+        String initialMessage = buildAuthMessage();
 
         return new ReconnectingWebSocketStream(
                 vertx,
@@ -197,7 +211,7 @@ public class PolymarketPolyBoltClient {
                     }
                     if (isErrorFrame(rawJson)) {
                         LOG.warnf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
-                        if (hasCredentials && isAuthRequiredError(rawJson)) {
+                        if (isAuthRequiredError(rawJson)) {
                             ReconnectingWebSocketStream current = streamRef.get();
                             if (current != null) {
                                 current.sendText(buildAuthMessage());

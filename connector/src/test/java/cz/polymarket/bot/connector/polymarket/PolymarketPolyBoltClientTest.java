@@ -101,4 +101,30 @@ class PolymarketPolyBoltClientTest {
 
         client.stop();
     }
+
+    @Test
+    void shouldFailFastWhenCredentialsAreMissing() {
+        PolymarketPolyBoltClient clientWithoutCreds = new PolymarketPolyBoltClient(
+                vertx,
+                "ws://localhost:9999/ws",
+                java.util.Optional.empty(),
+                java.util.Optional.empty(),
+                java.util.Optional.empty(),
+                200L,
+                5000L
+        );
+
+        assertThat(clientWithoutCreds.hasCredentials()).isFalse();
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> clientWithoutCreds.startTwapStream("BTCUSDT", (raw, ts) -> {})
+                )
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Missing required Polymarket CLOB API credentials");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> clientWithoutCreds.startCryptoPriceStream("BTCUSDT", (raw, ts) -> {})
+                )
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Missing required Polymarket CLOB API credentials");
+    }
 }

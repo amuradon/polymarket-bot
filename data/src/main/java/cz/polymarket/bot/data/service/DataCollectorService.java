@@ -7,6 +7,7 @@ import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import cz.polymarket.bot.data.web.CollectorStatusDto;
+import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.scheduler.Scheduled;
@@ -80,10 +81,16 @@ public class DataCollectorService {
 
     void onStart(@Observes StartupEvent event) {
         LOG.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s...", symbol, timeframe);
-        binanceConnector.start(symbol, binanceStorage::record);
-        polyBoltClient.startCryptoPriceStream(symbol, polyBoltDailyStorage::recordCryptoPrice);
-        polyBoltClient.startTwapStream(symbol, polyBoltDailyStorage::recordTwap);
-        polymarketCoordinator.start(Instant.now().getEpochSecond());
+        try {
+            polyBoltClient.startCryptoPriceStream(symbol, polyBoltDailyStorage::recordCryptoPrice);
+            polyBoltClient.startTwapStream(symbol, polyBoltDailyStorage::recordTwap);
+            binanceConnector.start(symbol, binanceStorage::record);
+            polymarketCoordinator.start(Instant.now().getEpochSecond());
+        } catch (Exception e) {
+            LOG.errorf("Fatal error starting Data Collector: %s. Terminating application.", e.getMessage());
+            Quarkus.asyncExit(1);
+            throw e;
+        }
     }
 
     void onStop(@Observes ShutdownEvent event) {
