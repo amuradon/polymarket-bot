@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Data Collector infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
+  least-privilege IAM role with SSM Session Manager and Secrets Manager access, encrypted 50 GB gp3
+  EBS volume for Zstandard JSONL stream storage, and a 24/7 t3.small EC2 instance with Unlimited CPU credits.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - c7i-flex.large
+      - m7i-flex.large
+    Description: EC2 instance type (x86_64) for running the Dockerized Quarkus Data Collector.
+
+  EbsVolumeSizeGb:
+    Type: Number
+    Default: 50
+    MinValue: 20
+    MaxValue: 1000
+    Description: Size in GiB of the persistent gp3 EBS volume mounted at /mnt/ebs/polymarket-data.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 x86_64 AMI ID from SSM Parameter Store.
+
+  PolymarketSecretArn:
+    Type: String
+    Description: ARN of the AWS Secrets Manager secret storing POLYMARKET_API_KEY, POLYMARKET_SECRET, and POLYMARKET_PASSPHRASE.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0ebc7d75fbfa0bf7f
+    Description: VPC ID in eu-west-1 for the Data Collector security group and instance.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0b1537e6f83a86b05
+    Description: Public subnet ID in eu-west-1a for the Data Collector EC2 instance.
+
+Resources:
+  DataCollectorEcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Docker images for the Polymarket Bot Data Collector Quarkus application.
+        must: Keep image scanning enabled and retain repository across stack updates.
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-repo"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  DataCollectorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Zero-inbound security group for the Data Collector daemon; all management uses AWS Systems Manager (SSM) and all market streams use outbound WSS/HTTPS.
+        must: Do not open inbound SSH port 22 to the internet; allow outbound HTTPS (443) and Binance Spot WebSocket (9443).
+    Properties:
+      GroupDescription: Zero-inbound security group for Polymarket Data Collector EC2 instance
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound traffic for Binance (443/9443), Polymarket (443), ECR, SSM, and Secrets Manager
+
+  DataCollectorIamRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, pull images from ECR, and read Polymarket API credentials from Secrets Manager.
+        must: Scope Secrets Manager read permission strictly to the PolymarketSecretArn.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: DataCollectorEcrAndSecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EcrAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPullCollectorImage
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt DataCollectorEcrRepository.Arn
+              - Sid: ReadPolymarketCredentialsSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref PolymarketSecretArn
+
+  DataCollectorInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Binds the DataCollectorIamRole to the EC2 instance.
+        must: Reference DataCollectorIamRole.
+    Properties:
+      Roles:
+        - !Ref DataCollectorIamRole
+
+  DataCollectorEbsVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Dedicated persistent gp3 EBS volume for storing compressed .jsonl.zst market streams separately from the root OS volume.
+        must: Must be encrypted, gp3, retained on stack deletion, and created in the same Availability Zone as the EC2 instance.
+        mutability: immutable
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      VolumeType: gp3
+      Size: !Ref EbsVolumeSizeGb
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ebs-data"
+
+  DataCollectorInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 24/7 EC2 host in eu-west-1 running the Dockerized Quarkus Data Collector with Unlimited CPU credits and IMDSv2 hop limit 2 for container metadata access.
+        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 2) and Unlimited CPU credits to prevent Vert.x event loop throttling.
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref DataCollectorInstanceProfile
+      SecurityGroupIds:
+        - !GetAtt DataCollectorSecurityGroup.GroupId
+      CreditSpecification:
+        CPUCredits: unlimited
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf update -y
+          dnf install -y docker jq awscli
+          systemctl enable --now docker
+          usermod -aG docker ec2-user || true
+
+          # Wait for the attached secondary EBS volume (/dev/sdf -> nvme1n1 on Nitro)
+          DATA_DEV=""
+          for i in $(seq 1 30); do
+            for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+              if [ -b "$candidate" ]; then
+                ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
+                if [ "$candidate" != "$ROOT_DEV" ]; then
+                  DATA_DEV="$candidate"
+                  break 2
+                fi
+              fi
+            done
+            sleep 2
+          done
+
+          mkdir -p /mnt/ebs/polymarket-data/collector
+          if [ -n "$DATA_DEV" ]; then
+            if ! blkid "$DATA_DEV"; then
+              mkfs.xfs "$DATA_DEV"
+            fi
+            UUID=$(blkid -s UUID -o value "$DATA_DEV")
+            if ! grep -q "$UUID" /etc/fstab; then
+              echo "UUID=$UUID /mnt/ebs/polymarket-data xfs defaults,nofail 0 2" >> /etc/fstab
+            fi
+            mount -a
+          fi
+
+          mkdir -p /mnt/ebs/polymarket-data/collector
+          chown -R 185:185 /mnt/ebs/polymarket-data
+          chmod -R 775 /mnt/ebs/polymarket-data
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+  DataCollectorVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Attaches the persistent 50 GB gp3 EBS volume to the Data Collector EC2 instance at /dev/sdf.
+        must: Match the Availability Zone of DataCollectorInstance and DataCollectorEbsVolume.
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref DataCollectorInstance
+      VolumeId: !Ref DataCollectorEbsVolume
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID of the Data Collector host
+    Value: !Ref DataCollectorInstance
+  PublicIp:
+    Description: Public IPv4 address of the Data Collector EC2 instance
+    Value: !GetAtt DataCollectorInstance.PublicIp
+  EcrRepositoryUri:
+    Description: Amazon ECR Repository URI for pushing the Data Collector Docker image
+    Value: !GetAtt DataCollectorEcrRepository.RepositoryUri
+  EbsVolumeId:
+    Description: Persistent gp3 EBS Volume ID mounted at /mnt/ebs/polymarket-data
+    Value: !Ref DataCollectorEbsVolume

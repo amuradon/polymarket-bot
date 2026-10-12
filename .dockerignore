@@ -1,5 +1,15 @@
 *
+!target
 !target/*-runner
 !target/*-runner.jar
-!target/lib/*
-!target/quarkus-app/*
+!target/lib/**
+!target/quarkus-app/**
+!data
+!data/target
+!data/target/quarkus-app/**
+!paper
+!paper/target
+!paper/target/quarkus-app/**
+!live
+!live/target
+!live/target/quarkus-app/**

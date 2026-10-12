@@ -1,0 +1,15 @@
+FROM eclipse-temurin:25-jre
+
+ENV LANGUAGE='en_US:en'
+ENV LC_ALL='en_US.UTF-8'
+
+WORKDIR /work
+
+COPY data/target/quarkus-app/lib/ /work/lib/
+COPY data/target/quarkus-app/*.jar /work/
+COPY data/target/quarkus-app/app/ /work/app/
+COPY data/target/quarkus-app/quarkus/ /work/quarkus/
+
+EXPOSE 8084
+
+ENTRYPOINT ["sh", "-c", "exec java ${JAVA_OPTS:--Xmx1g} -Dquarkus.http.host=0.0.0.0 -Dquarkus.http.port=${PORT:-8084} -Djava.util.logging.manager=org.jboss.logmanager.LogManager -jar /work/quarkus-run.jar"]

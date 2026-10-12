@@ -101,3 +101,59 @@ docker run -d \
 
 4. **Verify Dashboard:**
    Open the EC2 instance endpoint (`http://<ec2-host>:8080`) to view live status, rolling TWAPs, and trade logs.
+
+---
+
+## 4. Data Collector Deployment (`data` Module in `eu-west-1`)
+
+The `data` module runs as a standalone 24/7 market recorder daemon on EC2 in `eu-west-1` with a dedicated 50 GB encrypted `gp3` EBS volume (`DeletionPolicy: Retain`). It records:
+- **Binance Futures (`BTCUSDT`)**: `aggTrade`, `bookTicker`, `depth20@100ms`, `markPrice@1s`, `forceOrder`
+- **Polymarket PolyBolt (`wss://ws-live-v2.polymarket.com/ws`)**: `price.crypto` (`btcusd` live Chainlink tick) and `price.crypto.twap` (`btcusd` 60s TWAP)
+- **Polymarket CLOB (`wss://ws-subscriptions-clob.polymarket.com/ws/market`)**: all active BTC (`5m`, `15m`, `1h`, `4h`), ETH (`15m`), and SOL (`15m`) markets (`book`, `price_change`, `last_trade_price`, `best_bid_ask`)
+
+### Step 1: Store Mandatory PolyBolt Credentials in AWS Secrets Manager (`eu-west-1`)
+Because the Data Collector enforces fail-fast validation on startup if `POLYMARKET_API_KEY`, `POLYMARKET_SECRET`, or `POLYMARKET_PASSPHRASE` are missing, store them in AWS Secrets Manager (`polymarket-bot/data-collector/credentials`) in `eu-west-1`.
+
+### Step 2: Provision Infrastructure via CloudFormation (`infra/data-collector-ec2.yaml`)
+Deploy the CloudFormation stack `polymarket-bot-data` in `eu-west-1`:
+- Provisions an ECR repository (`polymarket-bot-data-repo`) with `ScanOnPush: true` and lifecycle retention.
+- Provisions a `t3.small` instance with **Unlimited CPU Credits** (`CPUCredits: unlimited`), **IMDSv2** (`HttpTokens: required`, `HttpPutResponseHopLimit: 2`), and zero inbound Security Group ports (managed exclusively via **AWS Systems Manager (SSM)**).
+- Provisions and mounts a 50 GB encrypted `gp3` EBS volume at `/mnt/ebs/polymarket-data`.
+
+```bash
+aws cloudformation deploy \
+  --region eu-west-1 \
+  --stack-name polymarket-bot-data \
+  --template-file infra/data-collector-ec2.yaml \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+### Step 3: Build & Push Data Collector Image to ECR (`eu-west-1`)
+```bash
+./mvnw package -DskipTests -pl connector,data
+docker build -t <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest -f data/src/main/docker/Dockerfile.jvm .
+docker push <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest
+```
+
+### Step 4: Deploy Container on EC2 via AWS Systems Manager (SSM)
+On the EC2 host (via `aws ssm send-command`), resolve the secret into `/etc/polymarket-collector.env` (`chmod 600`) and run the container with `--restart unless-stopped` and the EBS volume mounted:
+
+```bash
+docker run -d \
+  --name polymarket-bot-data \
+  --restart unless-stopped \
+  -p 8084:8084 \
+  --env-file /etc/polymarket-collector.env \
+  -e POLYMARKET_COLLECTOR_DATA_DIR=/data/collector \
+  -e JAVA_OPTS="-Xmx1g -XX:+UseZGC --enable-native-access=ALL-UNNAMED" \
+  -v /mnt/ebs/polymarket-data:/data \
+  <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest
+```
+
+### Step 5: Verify Status & Download Daily `.jsonl.zst` Archives
+Check collector health and stream counters via SSM:
+```bash
+curl -s http://localhost:8084/api/collector/status | jq .
+```
+Daily rotated `.jsonl.zst` files are stored on the persistent EBS volume under `/mnt/ebs/polymarket-data/collector/{binance,polymarket}/...` and can be downloaded via AWS Systems Manager or S3 sync for local backtesting.
+
