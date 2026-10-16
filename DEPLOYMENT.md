@@ -155,5 +155,20 @@ Check collector health and stream counters via SSM:
 ```bash
 curl -s http://localhost:8084/api/collector/status | jq .
 ```
-Daily rotated `.jsonl.zst` files are stored on the persistent EBS volume under `/mnt/ebs/polymarket-data/collector/{binance,polymarket}/...` and can be downloaded via AWS Systems Manager or S3 sync for local backtesting.
+Daily rotated `.jsonl.zst` files are stored on the persistent EBS volume under `/mnt/ebs/polymarket-data/collector/{binance,polymarket}/...`.
+
+#### Automated Download, Verification & Remote Cleanup Script
+Use the PowerShell script [`scripts/download-collector-data.ps1`](scripts/download-collector-data.ps1) to download all Binance and Polymarket data for a given UTC day directly into `D:\Crypto\data\Polymarket\collector` with the identical subdirectory structure. The script verifies 100% of the downloaded files locally before deleting them from the EC2 instance:
+
+```powershell
+# Preview files for a date without downloading or deleting:
+.\scripts\download-collector-data.ps1 -Date 2026-10-15 -DryRun
+
+# Download, verify, and delete remote files on EC2:
+.\scripts\download-collector-data.ps1 -Date 2026-10-15
+
+# Download and verify while keeping remote copies on EC2:
+.\scripts\download-collector-data.ps1 -Date 2026-10-15 -KeepRemoteFiles
+```
+
 
