@@ -100,6 +100,13 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                                 ws.writeTextMessage("{\"event_type\":\"last_trade_price\",\"price\":\"0.50\",\"size\":\"25\",\"side\":\"BUY\"}");
                             }
                         });
+                    } else if (path.equals("/deribit/ws/api/v2")) {
+                        ws.textMessageHandler(msg -> {
+                            if (msg.contains("public/subscribe") && msg.contains("trades.")) {
+                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[\"trades.BTC-PERPETUAL.raw\"]}");
+                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.raw\",\"data\":[{\"trade_seq\":101,\"price\":78452.0,\"amount\":10.0,\"direction\":\"buy\",\"instrument_name\":\"BTC-PERPETUAL\"}]}}");
+                            }
+                        });
                     }
                 });
 
@@ -111,6 +118,7 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     Map.entry("polymarket.collector.flush-interval", "1s"),
                     Map.entry("polymarket.connector.binance.spot-ws-base-url", "ws://localhost:" + port + "/binance/spot"),
                     Map.entry("polymarket.connector.binance.futures-ws-base-url", "ws://localhost:" + port + "/binance/futures"),
+                    Map.entry("polymarket.connector.deribit.ws-url", "ws://localhost:" + port + "/deribit/ws/api/v2"),
                     Map.entry("polymarket.connector.gamma.base-url", "http://localhost:" + port + "/gamma"),
                     Map.entry("polymarket.connector.polybolt.ws-url", "ws://localhost:" + port + "/polybolt/ws"),
                     Map.entry("polymarket.connector.clob.ws-url", "ws://localhost:" + port + "/clob/ws/market"),

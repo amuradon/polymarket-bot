@@ -19,9 +19,9 @@ The project is structured as a Maven Multi-Module project with 7 submodules:
 | Submodule | Type | Description | Default Port |
 | :--- | :--- | :--- | :--- |
 | **`common`** | Library (`jar`) | Shared domain records, math calculators, in-memory price cache, and strategy execution contracts. | N/A |
-| **`connector`** | Library (`jar`) | Shared Binance and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
+| **`connector`** | Library (`jar`) | Shared Binance, Deribit, and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
 | **`trading`** | Library (`jar`) | Exchange price tracker, `TwapEngine`, Qute templates, web console (`/btc-usd`), and WebSocket endpoints. | N/A |
-| **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
+| **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance, Deribit, and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
 | **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
 | **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |
 | **`backtest`** | Application (`jar`) | Standalone runnable Quarkus application for backtesting strategies on historical datasets. | `8083` |

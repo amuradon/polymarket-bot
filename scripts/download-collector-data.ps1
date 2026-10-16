@@ -5,10 +5,10 @@
     Also supports cleaning up remote files that were already downloaded previously.
 
 .DESCRIPTION
-    Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files and per-market
-    Polymarket files for the specified UTC date (YYYY-MM-DD), streams them via tar directly into the local destination
-    directory without creating intermediate archives on EC2, verifies every file's byte size locally, and upon 100%
-    verification deletes the downloaded files from the remote EBS volume.
+    Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files (Binance Spot & Futures,
+    Deribit Futures trades, Polymarket PolyBolt) and per-market Polymarket CLOB files for the specified UTC date (YYYY-MM-DD),
+    streams them via tar directly into the local destination directory without creating intermediate archives on EC2, verifies
+    every file's byte size locally, and upon 100% verification deletes the downloaded files from the remote EBS volume.
 
 .PARAMETER Date
     Target UTC date in YYYY-MM-DD format (e.g. 2026-10-12, 2026-10-15). Optional when using -CleanAlreadyDownloaded.

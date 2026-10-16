@@ -75,6 +75,19 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     }
 
     /**
+     * Writes a raw Deribit Futures trade payload with its local receipt timestamp as a single JSONL line:
+     * {@code {"ts":<recvTimestampMs>,"payload":<rawPayloadJson>}}
+     *
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param rawPayloadJson  unmodified raw JSON payload from the WebSocket
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writeDeribitEvent(long recvTimestampMs, String rawPayloadJson) throws IOException {
+        writeBinanceEvent(recvTimestampMs, rawPayloadJson);
+    }
+
+
+    /**
      * Writes a raw Polymarket event payload with its local receipt timestamp and event type as a single JSONL line:
      * {@code {"ts":<recvTimestampMs>,"type":"<eventType>","payload":<rawPayloadJson>}}
      *

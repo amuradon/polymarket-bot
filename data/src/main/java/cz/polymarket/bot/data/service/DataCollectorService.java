@@ -1,9 +1,11 @@
 package cz.polymarket.bot.data.service;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
+import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
+import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import cz.polymarket.bot.data.web.CollectorStatusDto;
@@ -23,7 +25,7 @@ import java.util.Map;
 
 /**
  * Main orchestrator service for the Data Collector application.
- * Always starts recording Binance and Polymarket WebSocket streams on application startup,
+ * Always starts recording Binance, Deribit, and Polymarket WebSocket streams on application startup,
  * schedules periodic Polymarket market discovery/resolution checks and Zstandard frame flushes,
  * and exposes runtime status.
  */
@@ -34,6 +36,8 @@ public class DataCollectorService {
 
     private final BinanceStreamConnector binanceConnector;
     private final DailyBinanceStorageManager binanceStorage;
+    private final DeribitStreamConnector deribitConnector;
+    private final DailyDeribitStorageManager deribitStorage;
     private final DailyPolyBoltStorageManager polyBoltDailyStorage;
     private final PolymarketLifecycleCoordinator polymarketCoordinator;
     private final PolymarketMarketStorageManager polymarketStorage;
@@ -47,6 +51,8 @@ public class DataCollectorService {
      *
      * @param binanceConnector      Binance 5-stream WebSocket connector
      * @param binanceStorage        daily Zstd storage manager for Binance streams
+     * @param deribitConnector      Deribit Futures trade WebSocket connector
+     * @param deribitStorage        daily Zstd storage manager for Deribit Futures trades
      * @param polyBoltDailyStorage  daily Zstd storage manager for PolyBolt {@code price.crypto} stream
      * @param polymarketCoordinator lifecycle coordinator for Polymarket markets
      * @param polymarketStorage     per-market Zstd storage manager for Polymarket
@@ -59,6 +65,8 @@ public class DataCollectorService {
     public DataCollectorService(
             BinanceStreamConnector binanceConnector,
             DailyBinanceStorageManager binanceStorage,
+            DeribitStreamConnector deribitConnector,
+            DailyDeribitStorageManager deribitStorage,
             DailyPolyBoltStorageManager polyBoltDailyStorage,
             PolymarketLifecycleCoordinator polymarketCoordinator,
             PolymarketMarketStorageManager polymarketStorage,
@@ -70,6 +78,8 @@ public class DataCollectorService {
             String timeframe) {
         this.binanceConnector = binanceConnector;
         this.binanceStorage = binanceStorage;
+        this.deribitConnector = deribitConnector;
+        this.deribitStorage = deribitStorage;
         this.polyBoltDailyStorage = polyBoltDailyStorage;
         this.polymarketCoordinator = polymarketCoordinator;
         this.polymarketStorage = polymarketStorage;
@@ -85,6 +95,7 @@ public class DataCollectorService {
             polyBoltClient.startCryptoPriceStream(symbol, polyBoltDailyStorage::recordCryptoPrice);
             polyBoltClient.startTwapStream(symbol, polyBoltDailyStorage::recordTwap);
             binanceConnector.start(symbol, binanceStorage::record);
+            deribitConnector.start(symbol, deribitStorage::record);
             polymarketCoordinator.start(Instant.now().getEpochSecond());
         } catch (Exception e) {
             LOG.errorf("Fatal error starting Data Collector: %s. Terminating application.", e.getMessage());
@@ -96,9 +107,11 @@ public class DataCollectorService {
     void onStop(@Observes ShutdownEvent event) {
         LOG.info("Shutting down Data Collector and closing Zstd streams...");
         binanceConnector.stop();
+        deribitConnector.stop();
         polymarketCoordinator.stop();
         polyBoltClient.stop();
         binanceStorage.closeAll();
+        deribitStorage.closeAll();
         polyBoltDailyStorage.closeAll();
     }
 
@@ -116,6 +129,7 @@ public class DataCollectorService {
     @Scheduled(every = "${polymarket.collector.flush-interval:5s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledFlush() {
         binanceStorage.flushAll();
+        deribitStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
     }
@@ -136,11 +150,13 @@ public class DataCollectorService {
                 symbol,
                 timeframe,
                 binanceStates,
+                deribitConnector.getState().name(),
                 polyBoltClient.getTwapState().name(),
                 polyBoltClient.getCryptoPriceState().name(),
                 clobStates,
                 polymarketCoordinator.getTrackedMarketSlugs(),
                 binanceStorage.getTotalRecordsWritten(),
+                deribitStorage.getTotalRecordsWritten(),
                 polyBoltDailyStorage.getTotalRecordsWritten(),
                 polymarketStorage.getTotalRecordsWritten()
         );

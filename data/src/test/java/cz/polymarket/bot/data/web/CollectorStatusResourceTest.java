@@ -3,6 +3,7 @@ package cz.polymarket.bot.data.web;
 import com.github.luben.zstd.ZstdInputStream;
 import cz.polymarket.bot.data.MockMarketStreamsTestResource;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
+import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import io.quarkus.test.common.QuarkusTestResource;
@@ -42,6 +43,9 @@ class CollectorStatusResourceTest {
     DailyBinanceStorageManager binanceStorage;
 
     @Inject
+    DailyDeribitStorageManager deribitStorage;
+
+    @Inject
     DailyPolyBoltStorageManager polyBoltDailyStorage;
 
     @Inject
@@ -65,14 +69,17 @@ class CollectorStatusResourceTest {
                         .body("binanceStreams.FUTURES_DIFF_DEPTH_100MS", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_PARTIAL_DEPTH_100MS", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_FORCE_ORDER", equalTo("CONNECTED"))
+                        .body("deribitStreamState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltTwapState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltCryptoPriceState", equalTo("CONNECTED"))
                         .body("trackedPolymarketSlugs", hasSize(6))
                         .body("binanceRecordsWritten", greaterThanOrEqualTo(5))
+                        .body("deribitRecordsWritten", greaterThanOrEqualTo(1))
                         .body("polyBoltRecordsWritten", greaterThanOrEqualTo(2))
                         .body("polymarketRecordsWritten", greaterThanOrEqualTo(18)));
 
         binanceStorage.flushAll();
+        deribitStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
 
@@ -82,8 +89,18 @@ class CollectorStatusResourceTest {
             zstFiles = walk.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
         }
 
-        // 5 daily Binance stream files + 2 daily PolyBolt files (price_crypto + price_crypto_twap_60s) + 6 Polymarket market files = 13 .jsonl.zst files
-        assertThat(zstFiles).hasSize(13);
+        // 5 daily Binance stream files + 1 daily Deribit trades file + 2 daily PolyBolt files + 6 Polymarket market files = 14 .jsonl.zst files
+        assertThat(zstFiles).hasSize(14);
+
+        // Verify daily Deribit trades file
+        Path deribitTradesDir = root.resolve("deribit/futures/BTC-PERPETUAL/trades");
+        List<Path> deribitFiles;
+        try (Stream<Path> list = Files.list(deribitTradesDir)) {
+            deribitFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(deribitFiles).hasSize(1);
+        List<String> deribitLines = readZstLines(deribitFiles.get(0));
+        assertThat(deribitLines).anyMatch(l -> l.contains("\"channel\":\"trades.BTC-PERPETUAL.raw\"") && l.contains("78452.0"));
 
         // Verify daily PolyBolt price.crypto file
         Path polyBoltCryptoDir = root.resolve("polymarket/price_crypto/btcusd");

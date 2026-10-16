@@ -108,6 +108,7 @@ docker run -d \
 
 The `data` module runs as a standalone 24/7 market recorder daemon on EC2 in `eu-west-1` with a dedicated 50 GB encrypted `gp3` EBS volume (`DeletionPolicy: Retain`). It records:
 - **Binance Futures (`BTCUSDT`)**: `aggTrade`, `bookTicker`, `depth20@100ms`, `markPrice@1s`, `forceOrder`
+- **Deribit Futures (`BTC-PERPETUAL`, `ETH-PERPETUAL`, `SOL-PERPETUAL`)**: `trades.<instrument>.raw`
 - **Polymarket PolyBolt (`wss://ws-live-v2.polymarket.com/ws`)**: `price.crypto` (`btcusd` live Chainlink tick) and `price.crypto.twap` (`btcusd` 60s TWAP)
 - **Polymarket CLOB (`wss://ws-subscriptions-clob.polymarket.com/ws/market`)**: all active BTC (`5m`, `15m`, `1h`, `4h`), ETH (`15m`), and SOL (`15m`) markets (`book`, `price_change`, `last_trade_price`, `best_bid_ask`)
 
@@ -155,10 +156,10 @@ Check collector health and stream counters via SSM:
 ```bash
 curl -s http://localhost:8084/api/collector/status | jq .
 ```
-Daily rotated `.jsonl.zst` files are stored on the persistent EBS volume under `/mnt/ebs/polymarket-data/collector/{binance,polymarket}/...`.
+Daily rotated `.jsonl.zst` files are stored on the persistent EBS volume under `/mnt/ebs/polymarket-data/collector/{binance,deribit,polymarket}/...`.
 
 #### Automated Download, Verification & Remote Cleanup Script
-Use the PowerShell script [`scripts/download-collector-data.ps1`](scripts/download-collector-data.ps1) to download all Binance and Polymarket data for a given UTC day directly into `D:\Crypto\data\Polymarket\collector` with the identical subdirectory structure. The script verifies 100% of the downloaded files locally before deleting them from the EC2 instance:
+Use the PowerShell script [`scripts/download-collector-data.ps1`](scripts/download-collector-data.ps1) to download all Binance, Deribit, and Polymarket data for a given UTC day directly into `D:\Crypto\data\Polymarket\collector` with the identical subdirectory structure. The script verifies 100% of the downloaded files locally before deleting them from the EC2 instance:
 
 ```powershell
 # Preview files for a date without downloading or deleting:
