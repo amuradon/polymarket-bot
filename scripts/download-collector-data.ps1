@@ -2,6 +2,7 @@
 .SYNOPSIS
     Downloads daily Zstandard (.jsonl.zst) market data from the AWS EC2 Data Collector instance to local disk,
     maintaining the identical directory structure, verifies file integrity, and deletes verified files from EC2.
+    Also supports cleaning up remote files that were already downloaded previously.
 
 .DESCRIPTION
     Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files and per-market
@@ -10,7 +11,7 @@
     verification deletes the downloaded files from the remote EBS volume.
 
 .PARAMETER Date
-    Target UTC date in YYYY-MM-DD format (e.g. 2026-10-12, 2026-10-15).
+    Target UTC date in YYYY-MM-DD format (e.g. 2026-10-12, 2026-10-15). Optional when using -CleanAlreadyDownloaded.
 
 .PARAMETER DestinationDir
     Local root directory for collector data. Defaults to 'D:\Crypto\data\Polymarket\collector'.
@@ -27,15 +28,23 @@
 .PARAMETER KeepRemoteFiles
     If specified, retains files on EC2 after successful download and verification instead of deleting them.
 
+.PARAMETER CleanAlreadyDownloaded
+    If specified, scans local files in DestinationDir, compares against remote EC2 files, and deletes any verified
+    matching files on EC2 (useful for cleaning up files transferred via WinSCP or earlier downloads).
+
 .EXAMPLE
-    .\scripts\download-collector-data.ps1 -Date 2026-10-12
+    .\scripts\download-collector-data.ps1 -Date 2026-10-15
     .\scripts\download-collector-data.ps1 -Date 2026-10-15 -DryRun
+    .\scripts\download-collector-data.ps1 -CleanAlreadyDownloaded
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "Download")]
 param(
-    [Parameter(Mandatory = $true, Position = 0, HelpMessage = "Target UTC date in YYYY-MM-DD format")]
+    [Parameter(ParameterSetName = "Download", Mandatory = $true, Position = 0, HelpMessage = "Target UTC date in YYYY-MM-DD format")]
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')]
     [string]$Date,
+
+    [Parameter(ParameterSetName = "CleanOnly", Mandatory = $true)]
+    [switch]$CleanAlreadyDownloaded,
 
     [Parameter(Position = 1)]
     [string]$DestinationDir = "D:\Crypto\data\Polymarket\collector",
@@ -49,7 +58,7 @@ param(
     [Parameter()]
     [switch]$DryRun,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = "Download")]
     [switch]$KeepRemoteFiles
 )
 
@@ -62,6 +71,129 @@ if ($env:PATH -notlike "*$pluginBin*") {
     $env:PATH += ";$pluginBin"
 }
 
+# --- MODE: CLEAN ALREADY DOWNLOADED ---
+if ($CleanAlreadyDownloaded) {
+    Write-Host "=================================================================" -ForegroundColor Cyan
+    Write-Host " Polymarket Data Collector - Remote Reconcile & Cleanup" -ForegroundColor Cyan
+    Write-Host " EC2 Instance Host : $Ec2Host" -ForegroundColor White
+    Write-Host " Remote Base Dir   : $RemoteBaseDir" -ForegroundColor White
+    Write-Host " Local Destination : $DestinationDir" -ForegroundColor White
+    if ($DryRun) {
+        Write-Host " Mode              : DRY-RUN (No remote files will be deleted)" -ForegroundColor Yellow
+    } else {
+        Write-Host " Mode              : VERIFY AND DELETE ALREADY DOWNLOADED FILES" -ForegroundColor Green
+    }
+    Write-Host "=================================================================" -ForegroundColor Cyan
+
+    if (-not (Test-Path -LiteralPath $DestinationDir)) {
+        throw "Local directory $DestinationDir does not exist."
+    }
+
+    Write-Host "[1/3] Scanning local files in $DestinationDir..." -ForegroundColor Cyan
+    $localFiles = Get-ChildItem -Path $DestinationDir -Recurse -File -Filter "*.jsonl.zst"
+    Write-Host "      Found $($localFiles.Count) local .jsonl.zst files." -ForegroundColor Green
+
+    $manifestLines = $localFiles | ForEach-Object {
+        $rel = $_.FullName.Substring($DestinationDir.Length).TrimStart('\', '/').Replace('\', '/')
+        "$rel`t$($_.Length)"
+    }
+    $tempManifest = Join-Path $env:TEMP "reconcile_manifest_$([guid]::NewGuid().ToString()).tsv"
+    [System.IO.File]::WriteAllLines($tempManifest, $manifestLines)
+
+    $reconcilePy = @"
+import os, sys
+
+remote_base = "$RemoteBaseDir"
+manifest_file = "/tmp/reconcile_manifest.tsv"
+
+if not os.path.exists(manifest_file):
+    print("ERROR: Manifest missing")
+    sys.exit(1)
+
+local_manifest = {}
+with open(manifest_file, "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        parts = line.split("\t")
+        if len(parts) == 2:
+            local_manifest[parts[0]] = int(parts[1])
+
+matched = []
+mismatch = []
+remote_total = 0
+
+for root, dirs, files in os.walk(remote_base):
+    for f in files:
+        if not f.endswith(".jsonl.zst"): continue
+        remote_total += 1
+        full_path = os.path.join(root, f)
+        rel = os.path.relpath(full_path, remote_base).replace('\\\\', '/')
+        rem_size = os.path.getsize(full_path)
+        if rel in local_manifest:
+            loc_size = local_manifest[rel]
+            if loc_size == rem_size:
+                matched.append((rel, full_path, rem_size))
+            else:
+                mismatch.append((rel, loc_size, rem_size))
+
+total_mb = sum(s for _, _, s in matched) / (1024 * 1024)
+print(f"RECONCILE\t{len(matched)}\t{total_mb:.2f}\t{len(mismatch)}\t{remote_total}")
+
+with open("/tmp/reconcile_delete.txt", "w") as out:
+    for _, full_path, _ in matched:
+        out.write(full_path + "\n")
+"@
+
+    $tempPy = Join-Path $env:TEMP "reconcile_check_$([guid]::NewGuid().ToString()).py"
+    [System.IO.File]::WriteAllText($tempPy, $reconcilePy)
+
+    try {
+        Write-Host "[2/3] Comparing with EC2 EBS volume..." -ForegroundColor Cyan
+        scp -q -o BatchMode=yes "$tempManifest" "$Ec2Host`:/tmp/reconcile_manifest.tsv"
+        scp -q -o BatchMode=yes "$tempPy" "$Ec2Host`:/tmp/reconcile_check.py"
+        $recOutput = ssh -o BatchMode=yes $Ec2Host "python3 /tmp/reconcile_check.py"
+    } finally {
+        if (Test-Path $tempManifest) { Remove-Item -Force $tempManifest }
+        if (Test-Path $tempPy) { Remove-Item -Force $tempPy }
+    }
+
+    if ($recOutput -notmatch 'RECONCILE\t(\d+)\t([\d\.]+)\t(\d+)\t(\d+)') {
+        throw "Reconciliation script failed. Output: $recOutput"
+    }
+
+    $matchedCount = [int]$Matches[1]
+    $matchedMb = [double]$Matches[2]
+    $mismatchCount = [int]$Matches[3]
+    $remoteTotal = [int]$Matches[4]
+
+    Write-Host "      Matched & Verified Files : $matchedCount ($matchedMb MB)" -ForegroundColor Green
+    Write-Host "      Size Mismatches (skipped): $mismatchCount" -ForegroundColor $(if ($mismatchCount -gt 0) { "Red" } else { "Gray" })
+    Write-Host "      Total Remote Files       : $remoteTotal" -ForegroundColor Gray
+
+    if ($matchedCount -eq 0) {
+        Write-Host "[INFO] No matching files to delete on EC2." -ForegroundColor Yellow
+        ssh -o BatchMode=yes $Ec2Host "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        return
+    }
+
+    if ($DryRun) {
+        Write-Host "[DRY-RUN] Files that would be deleted from EC2:" -ForegroundColor Yellow
+        ssh -o BatchMode=yes $Ec2Host "head -n 20 /tmp/reconcile_delete.txt"
+        Write-Host "[DRY-RUN] Completed. No files deleted." -ForegroundColor Yellow
+        ssh -o BatchMode=yes $Ec2Host "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        return
+    }
+
+    Write-Host "[3/3] Deleting $matchedCount verified files on EC2..." -ForegroundColor Cyan
+    ssh -o BatchMode=yes $Ec2Host "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+    $dfOutput = ssh -o BatchMode=yes $Ec2Host "df -h $RemoteBaseDir"
+    Write-Host "      Files deleted successfully. Remote EBS volume status:`n$dfOutput" -ForegroundColor Green
+    Write-Host "`nSUCCESS: Reclaimed $matchedMb MB across $matchedCount files on EC2." -ForegroundColor Green
+    return
+}
+
+# --- MODE: DOWNLOAD DAILY ARCHIVE ---
 # Validate UTC today to prevent accidental deletion of currently open active streams
 $utcToday = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd")
 if ($Date -eq $utcToday -and -not $KeepRemoteFiles) {
