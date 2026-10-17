@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Polymarket Bot Data Collector infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
   least-privilege IAM role with SSM Session Manager and Secrets Manager access, encrypted 50 GB gp3
-  EBS volume for Zstandard JSONL stream storage, and a 24/7 t3.small EC2 instance with Unlimited CPU credits.
+  EBS volume for Zstandard JSONL stream storage, and a 24/7 t4g.small EC2 instance (Graviton2 ARM64) with Unlimited CPU credits.
 
 Metadata:
   AWSToolsMetrics:
@@ -11,13 +11,14 @@ Metadata:
 Parameters:
   InstanceType:
     Type: String
-    Default: t3.small
+    Default: t4g.small
     AllowedValues:
+      - t4g.small
+      - t4g.medium
+      - c7g.large
+      - m7g.large
       - t3.small
-      - t3.medium
-      - c7i-flex.large
-      - m7i-flex.large
-    Description: EC2 instance type (x86_64) for running the Dockerized Quarkus Data Collector.
+    Description: EC2 instance type (arm64 / Graviton2) for running the Dockerized Quarkus Data Collector.
 
   EbsVolumeSizeGb:
     Type: Number
@@ -28,8 +29,8 @@ Parameters:
 
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: Latest Amazon Linux 2023 x86_64 AMI ID from SSM Parameter Store.
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Latest Amazon Linux 2023 arm64 AMI ID from SSM Parameter Store.
 
   PolymarketSecretArn:
     Type: String
@@ -131,6 +132,12 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref PolymarketSecretArn
+              - Sid: EbsAttachAndDescribe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:AttachVolume
+                Resource: '*'
 
   DataCollectorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -189,6 +196,27 @@ Resources:
           systemctl enable --now docker
           usermod -aG docker ec2-user || true
 
+          # Retrieve IMDSv2 token, Instance ID, and Region
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          REGION=$(echo "$AZ" | sed 's/[a-z]$//')
+
+          # Attach the persistent 50 GB gp3 EBS volume when available
+          for i in $(seq 1 60); do
+            VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "${DataCollectorEbsVolume}" --query "Volumes[0].State" --output text || true)
+            if [ "$VOL_STATE" = "available" ]; then
+              aws ec2 attach-volume --region "$REGION" --volume-id "${DataCollectorEbsVolume}" --instance-id "$INSTANCE_ID" --device /dev/sdf || true
+              break
+            elif [ "$VOL_STATE" = "in-use" ]; then
+              ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "${DataCollectorEbsVolume}" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
+              if [ "$ATTACHED_ID" = "$INSTANCE_ID" ]; then
+                break
+              fi
+            fi
+            sleep 2
+          done
+
           # Wait for the attached secondary EBS volume (/dev/sdf -> nvme1n1 on Nitro)
           DATA_DEV=""
           for i in $(seq 1 30); do
@@ -219,20 +247,16 @@ Resources:
           mkdir -p /mnt/ebs/polymarket-data/collector
           chown -R 185:185 /mnt/ebs/polymarket-data
           chmod -R 775 /mnt/ebs/polymarket-data
+
+          # Configure SSH public key for ec2-user
+          mkdir -p /home/ec2-user/.ssh
+          echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZCdXFERd9b2J0Y/AaI6cNEzlHOQIXHP6ffee948/aR amuradon@gmail.com' >> /home/ec2-user/.ssh/authorized_keys
+          chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+          chmod 700 /home/ec2-user/.ssh
+          chmod 600 /home/ec2-user/.ssh/authorized_keys
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
-
-  DataCollectorVolumeAttachment:
-    Type: AWS::EC2::VolumeAttachment
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Attaches the persistent 50 GB gp3 EBS volume to the Data Collector EC2 instance at /dev/sdf.
-        must: Match the Availability Zone of DataCollectorInstance and DataCollectorEbsVolume.
-    Properties:
-      Device: /dev/sdf
-      InstanceId: !Ref DataCollectorInstance
-      VolumeId: !Ref DataCollectorEbsVolume
 
 Outputs:
   InstanceId:

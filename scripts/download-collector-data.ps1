@@ -17,7 +17,7 @@
     Local root directory for collector data. Defaults to 'D:\Crypto\data\Polymarket\collector'.
 
 .PARAMETER Ec2Host
-    EC2 SSH host alias configured in ~/.ssh/config. Defaults to 'i-08fe8a64d89f05ea9'.
+    EC2 SSH host alias configured in ~/.ssh/config. Defaults to 'i-058e25a0b3334934d'.
 
 .PARAMETER RemoteBaseDir
     Root directory of collector data on the EC2 host. Defaults to '/mnt/ebs/polymarket-data/collector'.
@@ -50,7 +50,7 @@ param(
     [string]$DestinationDir = "D:\Crypto\data\Polymarket\collector",
 
     [Parameter()]
-    [string]$Ec2Host = "i-08fe8a64d89f05ea9",
+    [string]$Ec2Host = "i-058e25a0b3334934d",
 
     [Parameter()]
     [string]$RemoteBaseDir = "/mnt/ebs/polymarket-data/collector",

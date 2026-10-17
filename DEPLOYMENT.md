@@ -118,7 +118,7 @@ Because the Data Collector requires PolyBolt API credentials (`POLYMARKET_API_KE
 ### Step 2: Provision Infrastructure via CloudFormation (`infra/data-collector-ec2.yaml`)
 Deploy the CloudFormation stack `polymarket-bot-data` in `eu-west-1`:
 - Provisions an ECR repository (`polymarket-bot-data-repo`) with `ScanOnPush: true` and lifecycle retention.
-- Provisions a `t3.small` instance with **Unlimited CPU Credits** (`CPUCredits: unlimited`), **IMDSv2** (`HttpTokens: required`, `HttpPutResponseHopLimit: 2`), and zero inbound Security Group ports (managed exclusively via **AWS Systems Manager (SSM)**).
+- Provisions a `t4g.small` instance (AWS Graviton2 ARM64) with **Unlimited CPU Credits** (`CPUCredits: unlimited`), **IMDSv2** (`HttpTokens: required`, `HttpPutResponseHopLimit: 2`), and zero inbound Security Group ports (managed exclusively via **AWS Systems Manager (SSM)**).
 - Provisions and mounts a 50 GB encrypted `gp3` EBS volume at `/mnt/ebs/polymarket-data`.
 
 ```bash
@@ -132,8 +132,7 @@ aws cloudformation deploy \
 ### Step 3: Build & Push Data Collector Image to ECR (`eu-west-1`)
 ```bash
 ./mvnw package -DskipTests -pl connector,data
-docker build -t <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest -f data/src/main/docker/Dockerfile.jvm .
-docker push <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest
+docker buildx build --platform linux/arm64 -t <account-id>.dkr.ecr.eu-west-1.amazonaws.com/polymarket-bot-data-repo:latest -f data/src/main/docker/Dockerfile.jvm --push .
 ```
 
 ### Step 4: Deploy Container on EC2 via AWS Systems Manager (SSM)
