@@ -53,63 +53,20 @@ class DeribitStreamConnectorTest {
     }
 
     @Test
-    void shouldSubscribeAndReceiveTradePayloadsUnauthenticatedWithInterval() throws Exception {
-        List<String> clientMessages = new CopyOnWriteArrayList<>();
-        AtomicBoolean testRequestReceived = new AtomicBoolean(false);
-
-        server = vertx.createHttpServer()
-                .webSocketHandler(ws -> {
-                    ws.textMessageHandler(msg -> {
-                        clientMessages.add(msg);
-                        if (msg.contains("public/subscribe") && msg.contains("trades.BTC-PERPETUAL.100ms")) {
-                            // Send subscription confirmation with id=2
-                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[\"trades.BTC-PERPETUAL.100ms\"]}");
-                            // Send heartbeat test_request
-                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"heartbeat\",\"params\":{\"type\":\"test_request\"}}");
-                            // Send trade event
-                            ws.writeTextMessage("""
-                                    {"jsonrpc":"2.0","method":"subscription","params":{"channel":"trades.BTC-PERPETUAL.100ms","data":[{"trade_seq":101,"price":78450.5,"amount":100.0,"direction":"buy"}]}}
-                                    """.strip());
-                        } else if (msg.contains("public/test")) {
-                            testRequestReceived.set(true);
-                        }
-                    });
-                });
-
-        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+    void shouldFailFastOnStartupWhenCredentialsMissing() {
         DeribitStreamConnector connector = new DeribitStreamConnector(
                 vertx,
-                "ws://localhost:" + port + "/ws/api/v2",
-                "100ms",
+                "ws://localhost:1234/ws/api/v2",
+                (String) null,
+                (String) null,
                 200L,
                 5000L
         );
+        assertThat(connector.isAuthenticated()).isFalse();
 
-        List<String> receivedPayloads = new CopyOnWriteArrayList<>();
-        List<Long> receivedTimestamps = new CopyOnWriteArrayList<>();
-
-        connector.start("BTCUSDT", (rawJson, recvTs) -> {
-            receivedPayloads.add(rawJson);
-            receivedTimestamps.add(recvTs);
-        });
-
-        Awaitility.await()
-                .atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> {
-                    assertThat(connector.getState()).isEqualTo(ConnectionState.CONNECTED);
-                    assertThat(connector.isConnected()).isTrue();
-                    assertThat(connector.getActiveInstrument()).isEqualTo("BTC-PERPETUAL");
-                    assertThat(clientMessages).anyMatch(m -> m.contains("public/subscribe") && m.contains("BTC-PERPETUAL"));
-                    assertThat(testRequestReceived.get()).isTrue();
-                    assertThat(receivedPayloads).hasSize(1);
-                    assertThat(receivedPayloads.get(0)).contains("\"channel\":\"trades.BTC-PERPETUAL.100ms\"");
-                    assertThat(receivedPayloads.get(0)).contains("78450.5");
-                    assertThat(receivedTimestamps.get(0)).isPositive();
-                });
-
-        connector.stop();
-        assertThat(connector.isConnected()).isFalse();
-        assertThat(connector.getState()).isEqualTo(ConnectionState.DISCONNECTED);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> connector.start("BTCUSDT", (rawJson, recvTs) -> {}))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Missing required Deribit API credentials");
     }
 
     @Test
@@ -143,7 +100,6 @@ class DeribitStreamConnectorTest {
         DeribitStreamConnector connector = new DeribitStreamConnector(
                 vertx,
                 "ws://localhost:" + port + "/ws/api/v2",
-                "raw",
                 "test-key",
                 "test-secret",
                 200L,
@@ -181,8 +137,9 @@ class DeribitStreamConnectorTest {
     }
 
     @Test
-    void shouldHandleAuthenticationFailureGracefully() throws Exception {
+    void shouldTerminateWhenAuthenticationFails() throws Exception {
         List<String> clientMessages = new CopyOnWriteArrayList<>();
+        AtomicBoolean fatalErrorCalled = new AtomicBoolean(false);
 
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
@@ -199,12 +156,12 @@ class DeribitStreamConnectorTest {
         DeribitStreamConnector connector = new DeribitStreamConnector(
                 vertx,
                 "ws://localhost:" + port + "/ws/api/v2",
-                "raw",
                 "bad-key",
                 "bad-secret",
                 200L,
                 5000L
         );
+        connector.setFatalErrorHandler(err -> fatalErrorCalled.set(true));
 
         connector.start("BTCUSDT", (rawJson, recvTs) -> {});
 
@@ -212,8 +169,53 @@ class DeribitStreamConnectorTest {
                 .atMost(Duration.ofSeconds(3))
                 .untilAsserted(() -> {
                     assertThat(clientMessages).anyMatch(m -> m.contains("public/auth"));
-                    // Subscription should NOT have been sent after auth error
                     assertThat(clientMessages).noneMatch(m -> m.contains("public/subscribe"));
+                    assertThat(fatalErrorCalled.get()).isTrue();
+                    assertThat(connector.isConnected()).isFalse();
+                });
+
+        connector.stop();
+    }
+
+    @Test
+    void shouldTerminateWhenRawSubscriptionFails() throws Exception {
+        List<String> clientMessages = new CopyOnWriteArrayList<>();
+        AtomicBoolean fatalErrorCalled = new AtomicBoolean(false);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    ws.textMessageHandler(msg -> {
+                        clientMessages.add(msg);
+                        if (msg.contains("public/auth")) {
+                            // Reply with auth success
+                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"access_token\":\"mock-jwt-token\",\"expires_in\":3600,\"token_type\":\"bearer\"}}");
+                        } else if (msg.contains("public/subscribe")) {
+                            // Reply with subscription error
+                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":13778,\"message\":\"raw_subscriptions_not_available_for_unauthorized\"}}");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        DeribitStreamConnector connector = new DeribitStreamConnector(
+                vertx,
+                "ws://localhost:" + port + "/ws/api/v2",
+                "test-key",
+                "test-secret",
+                200L,
+                5000L
+        );
+        connector.setFatalErrorHandler(err -> fatalErrorCalled.set(true));
+
+        connector.start("BTCUSDT", (rawJson, recvTs) -> {});
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(3))
+                .untilAsserted(() -> {
+                    assertThat(clientMessages).anyMatch(m -> m.contains("public/auth"));
+                    assertThat(clientMessages).anyMatch(m -> m.contains("public/subscribe"));
+                    assertThat(fatalErrorCalled.get()).isTrue();
+                    assertThat(connector.isConnected()).isFalse();
                 });
 
         connector.stop();

@@ -3,6 +3,7 @@ package cz.polymarket.bot.connector.deribit;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -11,14 +12,13 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Supplier;
+import java.util.function.Consumer;
 
 /**
  * Resilient WebSocket client for Deribit v2 API ({@code wss://www.deribit.com/ws/api/v2}).
- * Supports authenticated raw trade channels (e.g. {@code trades.BTC-PERPETUAL.raw}) via
- * JSON-RPC {@code public/auth} client credentials authentication, as well as public interval channels.
- * Automatically handles keep-alive heartbeats, reconnection, and forwards raw trade notification payloads
- * to the listener with local receipt timestamps.
+ * Exclusively connects to authenticated raw trade channels ({@code trades.{instrument}.raw}) via
+ * JSON-RPC {@code public/auth} client credentials.
+ * If credentials are missing or authentication fails, the connector aborts and terminates the application with an error.
  */
 @ApplicationScoped
 public class DeribitStreamConnector {
@@ -30,7 +30,6 @@ public class DeribitStreamConnector {
 
     private final Vertx vertx;
     private final String wsUrl;
-    private final String interval;
     private final String clientId;
     private final String clientSecret;
     private final long reconnectDelayMs;
@@ -38,15 +37,15 @@ public class DeribitStreamConnector {
 
     private volatile ReconnectingWebSocketStream stream;
     private volatile String activeInstrument;
+    private volatile Consumer<String> fatalErrorHandler;
 
     /**
-     * Constructs the Deribit WebSocket connector with full configuration and optional credentials.
+     * Constructs the Deribit WebSocket connector with configuration and credentials.
      *
      * @param vertx            Vert.x instance
      * @param wsUrl            Deribit WebSocket v2 endpoint URL
-     * @param interval         trade aggregation interval (e.g. raw or 100ms)
-     * @param clientId         optional Deribit API Client ID
-     * @param clientSecret     optional Deribit API Client Secret
+     * @param clientId         Deribit API Client ID (required for raw trades)
+     * @param clientSecret     Deribit API Client Secret (required for raw trades)
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
      */
@@ -55,8 +54,6 @@ public class DeribitStreamConnector {
             Vertx vertx,
             @ConfigProperty(name = "polymarket.connector.deribit.ws-url", defaultValue = "wss://www.deribit.com/ws/api/v2")
             String wsUrl,
-            @ConfigProperty(name = "polymarket.connector.deribit.interval", defaultValue = "raw")
-            String interval,
             @ConfigProperty(name = "polymarket.connector.deribit.client-id", defaultValue = "")
             Optional<String> clientId,
             @ConfigProperty(name = "polymarket.connector.deribit.client-secret", defaultValue = "")
@@ -67,7 +64,6 @@ public class DeribitStreamConnector {
             long pingIntervalMs) {
         this.vertx = vertx;
         this.wsUrl = wsUrl;
-        this.interval = (interval == null || interval.isBlank()) ? "raw" : interval.trim();
         this.clientId = clientId.filter(s -> !s.isBlank()).orElse(null);
         this.clientSecret = clientSecret.filter(s -> !s.isBlank()).orElse(null);
         this.reconnectDelayMs = reconnectDelayMs;
@@ -79,55 +75,19 @@ public class DeribitStreamConnector {
      *
      * @param vertx            Vert.x instance
      * @param wsUrl            Deribit WebSocket v2 endpoint URL
-     * @param interval         trade aggregation interval (e.g. raw or 100ms)
-     * @param clientId         Deribit API Client ID (nullable)
-     * @param clientSecret     Deribit API Client Secret (nullable)
+     * @param clientId         Deribit API Client ID
+     * @param clientSecret     Deribit API Client Secret
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
      */
     public DeribitStreamConnector(
             Vertx vertx,
             String wsUrl,
-            String interval,
             String clientId,
             String clientSecret,
             long reconnectDelayMs,
             long pingIntervalMs) {
-        this(vertx, wsUrl, interval, Optional.ofNullable(clientId), Optional.ofNullable(clientSecret), reconnectDelayMs, pingIntervalMs);
-    }
-
-    /**
-     * Constructs the Deribit WebSocket connector with custom interval and without credentials.
-     *
-     * @param vertx            Vert.x instance
-     * @param wsUrl            Deribit WebSocket v2 endpoint URL
-     * @param interval         trade aggregation interval (e.g. raw or 100ms)
-     * @param reconnectDelayMs delay in milliseconds before attempting reconnection
-     * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
-     */
-    public DeribitStreamConnector(
-            Vertx vertx,
-            String wsUrl,
-            String interval,
-            long reconnectDelayMs,
-            long pingIntervalMs) {
-        this(vertx, wsUrl, interval, Optional.empty(), Optional.empty(), reconnectDelayMs, pingIntervalMs);
-    }
-
-    /**
-     * Constructs the Deribit WebSocket connector without credentials and default raw interval.
-     *
-     * @param vertx            Vert.x instance
-     * @param wsUrl            Deribit WebSocket v2 endpoint URL
-     * @param reconnectDelayMs delay in milliseconds before attempting reconnection
-     * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
-     */
-    public DeribitStreamConnector(
-            Vertx vertx,
-            String wsUrl,
-            long reconnectDelayMs,
-            long pingIntervalMs) {
-        this(vertx, wsUrl, "raw", Optional.empty(), Optional.empty(), reconnectDelayMs, pingIntervalMs);
+        this(vertx, wsUrl, Optional.ofNullable(clientId), Optional.ofNullable(clientSecret), reconnectDelayMs, pingIntervalMs);
     }
 
     /**
@@ -140,10 +100,22 @@ public class DeribitStreamConnector {
     }
 
     /**
+     * Sets a custom handler for fatal errors (e.g. auth failure).
+     * If not set, {@link io.quarkus.runtime.Quarkus#asyncExit(int)} is called with exit code 1.
+     *
+     * @param fatalErrorHandler consumer receiving the raw error JSON payload
+     */
+    public void setFatalErrorHandler(Consumer<String> fatalErrorHandler) {
+        this.fatalErrorHandler = fatalErrorHandler;
+    }
+
+    /**
      * Starts the Deribit WebSocket stream for the given symbol/instrument and routes raw trade payloads to the listener.
+     * Enforces that credentials are present; otherwise aborts startup with an {@link IllegalStateException}.
      *
      * @param symbol   trading symbol or instrument name (e.g. BTCUSDT, BTC, or BTC-PERPETUAL)
      * @param listener raw WebSocket listener receiving unmodified JSON payloads and local receipt timestamps
+     * @throws IllegalStateException if required Deribit API credentials are not configured
      */
     public synchronized void start(String symbol, RawWebSocketListener listener) {
         stop();
@@ -151,24 +123,23 @@ public class DeribitStreamConnector {
         this.activeInstrument = instrument;
         String streamName = "DERIBIT-FUTURES-TRADES-" + instrument;
 
-        Supplier<List<String>> initMessagesSupplier = () -> {
-            if (isAuthenticated()) {
-                LOG.infof("[%s] Authenticating Deribit session with clientId=%s...", streamName, maskKey(clientId));
-                return List.of(buildAuthMessage());
-            } else {
-                if ("raw".equalsIgnoreCase(interval)) {
-                    LOG.warnf("[%s] Deribit stream interval is set to 'raw' without API credentials. Deribit requires authentication for raw trade channels.", streamName);
-                }
-                LOG.infof("[%s] Subscribing without authentication to channel trades.%s.%s", streamName, instrument, interval);
-                return List.of(buildSubscribeMessage(instrument));
-            }
-        };
+        if (!isAuthenticated()) {
+            String errorMsg = String.format(
+                    "[%s] Missing required Deribit API credentials (DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET). Deribit raw trade streams require authentication; aborting startup.",
+                    streamName
+            );
+            LOG.error(errorMsg);
+            throw new IllegalStateException(errorMsg);
+        }
+
+        LOG.infof("[%s] Initializing authenticated Deribit raw stream (trades.%s.raw) with clientId=%s...",
+                streamName, instrument, maskKey(clientId));
 
         this.stream = new ReconnectingWebSocketStream(
                 vertx,
                 streamName,
                 wsUrl,
-                initMessagesSupplier,
+                () -> List.of(buildAuthMessage()),
                 (rawJson, recvTs) -> {
                     if (rawJson == null || rawJson.isBlank()) {
                         return;
@@ -184,9 +155,10 @@ public class DeribitStreamConnector {
                     // Handle authentication response
                     if (isAuthResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            LOG.errorf("[%s] Deribit authentication failed: %s", streamName, rawJson);
+                            LOG.errorf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
+                            triggerFatalError(rawJson);
                         } else {
-                            LOG.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.%s...", streamName, instrument, interval);
+                            LOG.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
                             ReconnectingWebSocketStream current = this.stream;
                             if (current != null) {
                                 current.sendText(buildSubscribeMessage(instrument));
@@ -197,13 +169,14 @@ public class DeribitStreamConnector {
                     // Handle subscription response
                     if (isSubscriptionResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            LOG.errorf("[%s] Deribit subscription failed: %s", streamName, rawJson);
+                            LOG.errorf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
+                            triggerFatalError(rawJson);
                         } else {
-                            LOG.infof("[%s] Subscribed successfully to channel: trades.%s.%s", streamName, instrument, interval);
+                            LOG.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
                         }
                         return;
                     }
-                    // Handle general error response
+                    // Handle any unexpected error response
                     if (isErrorResponse(rawJson)) {
                         LOG.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
                         return;
@@ -284,6 +257,20 @@ public class DeribitStreamConnector {
         return clean + "-PERPETUAL";
     }
 
+    private void triggerFatalError(String rawErrorJson) {
+        stop();
+        Consumer<String> handler = this.fatalErrorHandler;
+        if (handler != null) {
+            handler.accept(rawErrorJson);
+        } else {
+            try {
+                Quarkus.asyncExit(1);
+            } catch (Throwable t) {
+                LOG.errorf("Error triggering Quarkus exit: %s", t.getMessage());
+            }
+        }
+    }
+
     private String buildAuthMessage() {
         return "{\"jsonrpc\":\"2.0\",\"id\":" + AUTH_REQUEST_ID + ",\"method\":\"public/auth\",\"params\":{\"grant_type\":\"client_credentials\",\"client_id\":\""
                 + escapeJson(clientId) + "\",\"client_secret\":\"" + escapeJson(clientSecret) + "\"}}";
@@ -291,7 +278,7 @@ public class DeribitStreamConnector {
 
     private String buildSubscribeMessage(String instrument) {
         return "{\"jsonrpc\":\"2.0\",\"id\":" + SUBSCRIBE_REQUEST_ID + ",\"method\":\"public/subscribe\",\"params\":{\"channels\":[\"trades."
-                + instrument + "." + interval + "\"]}}";
+                + instrument + ".raw\"]}}";
     }
 
     private static boolean isTestRequest(String rawJson) {
@@ -330,3 +317,4 @@ public class DeribitStreamConnector {
         return key.substring(0, 2) + "****" + key.substring(key.length() - 2);
     }
 }
+
