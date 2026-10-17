@@ -85,14 +85,14 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ### `connector`
 - **Resilient WebSocket Core**: `ReconnectingWebSocketStream`, `ConnectionState`, `RawWebSocketListener`, `AbstractExchangeWebSocketClient`, `ExchangePriceListener`.
 - **Binance Connectors**: `BinanceStreamConnector`, `BinanceStreamType` (Spot `aggTrades`, Futures `aggTrades`, Futures Diff. Book Depth 100ms, Futures Partial Book Depth 100ms, Futures Liquidation Orders `forceOrder`).
-- **Deribit Connectors**: `DeribitStreamConnector` (Deribit v2 `wss://www.deribit.com/ws/api/v2` for public Futures trade streams, e.g. `trades.BTC-PERPETUAL.raw`, with automated JSON-RPC subscription and keep-alive handling).
+- **Deribit Connectors**: `DeribitStreamConnector` (Deribit v2 `wss://www.deribit.com/ws/api/v2` for public Futures trade streams, e.g. `trades.BTC-PERPETUAL.100ms`, with automated JSON-RPC subscription and keep-alive handling).
 - **Polymarket Connectors**: `PolymarketGammaClient` (market discovery by slug and resolution polling), `PolymarketPolyBoltClient` (PolyBolt v2 `wss://ws-live-v2.polymarket.com/ws` for `price.crypto.twap` 60s TWAP and `price.crypto`), `PolymarketClobClient` (per-market CLOB order book and trade WebSocket streams).
 - **Shared Client Configuration**: `AppConfig` (`HttpClient`, `ObjectMapper`), `Exchange`, `BinanceTicker`.
 
 ### `data`
 - Standalone runnable Quarkus application (`quarkus.http.port=8084`) for low-latency raw stream recording in AWS `eu-west`.
 - **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format (`ZstdJsonlWriter`) with zero WebSocket JSON parsing overhead.
-- **Binance, Deribit & PolyBolt Daily Files**: `DailyBinanceStorageManager` writes each of the 5 Binance streams into separate UTC daily files, `DailyDeribitStorageManager` writes the Deribit Futures trade stream (`trades.<instrument>.raw`) into separate UTC daily files, and `DailyPolyBoltStorageManager` writes the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
+- **Binance, Deribit & PolyBolt Daily Files**: `DailyBinanceStorageManager` writes each of the 5 Binance streams into separate UTC daily files, `DailyDeribitStorageManager` writes the Deribit Futures trade stream (`trades.<instrument>.100ms`) into separate UTC daily files, and `DailyPolyBoltStorageManager` writes the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
 - **Polymarket Per-Market Lifecycle Files**: `PolymarketLifecycleCoordinator` and `PolymarketMarketStorageManager` record the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
 - **Status Endpoint**: `/api/collector/status` (`CollectorStatusResource`).
 

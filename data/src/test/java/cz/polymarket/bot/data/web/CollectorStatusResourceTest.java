@@ -100,7 +100,7 @@ class CollectorStatusResourceTest {
         }
         assertThat(deribitFiles).hasSize(1);
         List<String> deribitLines = readZstLines(deribitFiles.get(0));
-        assertThat(deribitLines).anyMatch(l -> l.contains("\"channel\":\"trades.BTC-PERPETUAL.raw\"") && l.contains("78452.0"));
+        assertThat(deribitLines).anyMatch(l -> l.contains("\"channel\":\"trades.BTC-PERPETUAL.100ms\"") && l.contains("78452.0"));
 
         // Verify daily PolyBolt price.crypto file
         Path polyBoltCryptoDir = root.resolve("polymarket/price_crypto/btcusd");

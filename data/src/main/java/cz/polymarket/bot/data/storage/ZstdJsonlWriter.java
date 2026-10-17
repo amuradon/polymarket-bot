@@ -28,6 +28,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     private static final byte[] SUFFIX_LINE = "}\n".getBytes(StandardCharsets.UTF_8);
 
     private final Path filePath;
+    private final OutputStream underlyingOut;
     private final ZstdOutputStream zstdOut;
     private final AtomicLong recordsWritten = new AtomicLong(0L);
     private volatile boolean closed = false;
@@ -50,6 +51,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
                 StandardOpenOption.APPEND
         );
         BufferedOutputStream bufferedOut = new BufferedOutputStream(fileOut, BUFFER_SIZE_BYTES);
+        this.underlyingOut = bufferedOut;
         this.zstdOut = new ZstdOutputStream(bufferedOut);
         this.zstdOut.setCloseFrameOnFlush(true);
     }
@@ -119,6 +121,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     public synchronized void flush() throws IOException {
         if (!closed) {
             zstdOut.flush();
+            underlyingOut.flush();
         }
     }
 

@@ -108,7 +108,7 @@ docker run -d \
 
 The `data` module runs as a standalone 24/7 market recorder daemon on EC2 in `eu-west-1` with a dedicated 50 GB encrypted `gp3` EBS volume (`DeletionPolicy: Retain`). It records:
 - **Binance Futures (`BTCUSDT`)**: `aggTrade`, `bookTicker`, `depth20@100ms`, `markPrice@1s`, `forceOrder`
-- **Deribit Futures (`BTC-PERPETUAL`, `ETH-PERPETUAL`, `SOL-PERPETUAL`)**: `trades.<instrument>.raw`
+- **Deribit Futures (`BTC-PERPETUAL`, `ETH-PERPETUAL`, `SOL-PERPETUAL`)**: `trades.<instrument>.100ms`
 - **Polymarket PolyBolt (`wss://ws-live-v2.polymarket.com/ws`)**: `price.crypto` (`btcusd` live Chainlink tick) and `price.crypto.twap` (`btcusd` 60s TWAP)
 - **Polymarket CLOB (`wss://ws-subscriptions-clob.polymarket.com/ws/market`)**: all active BTC (`5m`, `15m`, `1h`, `4h`), ETH (`15m`), and SOL (`15m`) markets (`book`, `price_change`, `last_trade_price`, `best_bid_ask`)
 

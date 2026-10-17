@@ -13,7 +13,7 @@ import java.util.List;
 
 /**
  * Resilient WebSocket client for Deribit v2 API ({@code wss://www.deribit.com/ws/api/v2}).
- * Connects to public trade channels (e.g. {@code trades.BTC-PERPETUAL.raw}), sends the JSON-RPC
+ * Connects to public trade channels (e.g. {@code trades.BTC-PERPETUAL.100ms}), sends the JSON-RPC
  * subscription request, handles keep-alive heartbeats, and forwards raw trade notification payloads
  * to the listener with local receipt timestamps.
  */
@@ -24,6 +24,7 @@ public class DeribitStreamConnector {
 
     private final Vertx vertx;
     private final String wsUrl;
+    private final String interval;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
 
@@ -31,10 +32,11 @@ public class DeribitStreamConnector {
     private volatile String activeInstrument;
 
     /**
-     * Constructs the Deribit WebSocket connector.
+     * Constructs the Deribit WebSocket connector with full configuration.
      *
      * @param vertx            Vert.x instance
      * @param wsUrl            Deribit WebSocket v2 endpoint URL
+     * @param interval         trade aggregation interval (e.g. 100ms or raw)
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
      */
@@ -43,14 +45,33 @@ public class DeribitStreamConnector {
             Vertx vertx,
             @ConfigProperty(name = "polymarket.connector.deribit.ws-url", defaultValue = "wss://www.deribit.com/ws/api/v2")
             String wsUrl,
+            @ConfigProperty(name = "polymarket.connector.deribit.interval", defaultValue = "100ms")
+            String interval,
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "15000")
             long pingIntervalMs) {
         this.vertx = vertx;
         this.wsUrl = wsUrl;
+        this.interval = (interval == null || interval.isBlank()) ? "100ms" : interval.trim();
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+    }
+
+    /**
+     * Constructs the Deribit WebSocket connector with default 100ms interval.
+     *
+     * @param vertx            Vert.x instance
+     * @param wsUrl            Deribit WebSocket v2 endpoint URL
+     * @param reconnectDelayMs delay in milliseconds before attempting reconnection
+     * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
+     */
+    public DeribitStreamConnector(
+            Vertx vertx,
+            String wsUrl,
+            long reconnectDelayMs,
+            long pingIntervalMs) {
+        this(vertx, wsUrl, "100ms", reconnectDelayMs, pingIntervalMs);
     }
 
     /**
@@ -83,9 +104,14 @@ public class DeribitStreamConnector {
                         }
                         return;
                     }
+                    // Handle Deribit error response
+                    if (isErrorResponse(rawJson)) {
+                        LOG.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
+                        return;
+                    }
                     // Filter out subscription confirmation response (e.g. {"jsonrpc":"2.0","id":1,"result":[...]})
                     if (isSubscriptionConfirmation(rawJson)) {
-                        LOG.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
+                        LOG.infof("[%s] Subscribed successfully to channel: trades.%s.%s", streamName, instrument, interval);
                         return;
                     }
                     // Forward real trade notification events ({"jsonrpc":"2.0","method":"subscription",...})
@@ -164,9 +190,9 @@ public class DeribitStreamConnector {
         return clean + "-PERPETUAL";
     }
 
-    private static String buildSubscribeMessage(String instrument) {
+    private String buildSubscribeMessage(String instrument) {
         return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"public/subscribe\",\"params\":{\"channels\":[\"trades."
-                + instrument + ".raw\"]}}";
+                + instrument + "." + interval + "\"]}}";
     }
 
     private static boolean isTestRequest(String rawJson) {
@@ -179,5 +205,9 @@ public class DeribitStreamConnector {
 
     private static boolean isTradeNotification(String rawJson) {
         return rawJson.contains("\"method\":\"subscription\"") || rawJson.contains("\"method\": \"subscription\"");
+    }
+
+    private static boolean isErrorResponse(String rawJson) {
+        return rawJson.contains("\"error\"");
     }
 }

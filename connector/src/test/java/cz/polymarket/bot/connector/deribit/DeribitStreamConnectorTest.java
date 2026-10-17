@@ -61,14 +61,14 @@ class DeribitStreamConnectorTest {
                 .webSocketHandler(ws -> {
                     ws.textMessageHandler(msg -> {
                         clientMessages.add(msg);
-                        if (msg.contains("public/subscribe") && msg.contains("trades.BTC-PERPETUAL.raw")) {
+                        if (msg.contains("public/subscribe") && msg.contains("trades.BTC-PERPETUAL.100ms")) {
                             // Send subscription confirmation
-                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[\"trades.BTC-PERPETUAL.raw\"]}");
+                            ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[\"trades.BTC-PERPETUAL.100ms\"]}");
                             // Send heartbeat test_request
                             ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"heartbeat\",\"params\":{\"type\":\"test_request\"}}");
                             // Send trade event
                             ws.writeTextMessage("""
-                                    {"jsonrpc":"2.0","method":"subscription","params":{"channel":"trades.BTC-PERPETUAL.raw","data":[{"trade_seq":101,"price":78450.5,"amount":100.0,"direction":"buy"}]}}
+                                    {"jsonrpc":"2.0","method":"subscription","params":{"channel":"trades.BTC-PERPETUAL.100ms","data":[{"trade_seq":101,"price":78450.5,"amount":100.0,"direction":"buy"}]}}
                                     """.strip());
                         } else if (msg.contains("public/test")) {
                             testRequestReceived.set(true);
@@ -101,7 +101,7 @@ class DeribitStreamConnectorTest {
                     assertThat(clientMessages).anyMatch(m -> m.contains("public/subscribe") && m.contains("BTC-PERPETUAL"));
                     assertThat(testRequestReceived.get()).isTrue();
                     assertThat(receivedPayloads).hasSize(1);
-                    assertThat(receivedPayloads.get(0)).contains("\"channel\":\"trades.BTC-PERPETUAL.raw\"");
+                    assertThat(receivedPayloads.get(0)).contains("\"channel\":\"trades.BTC-PERPETUAL.100ms\"");
                     assertThat(receivedPayloads.get(0)).contains("78450.5");
                     assertThat(receivedTimestamps.get(0)).isPositive();
                 });
