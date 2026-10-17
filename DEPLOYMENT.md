@@ -108,12 +108,12 @@ docker run -d \
 
 The `data` module runs as a standalone 24/7 market recorder daemon on EC2 in `eu-west-1` with a dedicated 50 GB encrypted `gp3` EBS volume (`DeletionPolicy: Retain`). It records:
 - **Binance Futures (`BTCUSDT`)**: `aggTrade`, `bookTicker`, `depth20@100ms`, `markPrice@1s`, `forceOrder`
-- **Deribit Futures (`BTC-PERPETUAL`, `ETH-PERPETUAL`, `SOL-PERPETUAL`)**: `trades.<instrument>.100ms`
+- **Deribit Futures (`BTC-PERPETUAL`, `ETH-PERPETUAL`, `SOL-PERPETUAL`)**: `trades.<instrument>.raw` (authenticated via `DERIBIT_CLIENT_ID` & `DERIBIT_CLIENT_SECRET`)
 - **Polymarket PolyBolt (`wss://ws-live-v2.polymarket.com/ws`)**: `price.crypto` (`btcusd` live Chainlink tick) and `price.crypto.twap` (`btcusd` 60s TWAP)
 - **Polymarket CLOB (`wss://ws-subscriptions-clob.polymarket.com/ws/market`)**: all active BTC (`5m`, `15m`, `1h`, `4h`), ETH (`15m`), and SOL (`15m`) markets (`book`, `price_change`, `last_trade_price`, `best_bid_ask`)
 
-### Step 1: Store Mandatory PolyBolt Credentials in AWS Secrets Manager (`eu-west-1`)
-Because the Data Collector enforces fail-fast validation on startup if `POLYMARKET_API_KEY`, `POLYMARKET_SECRET`, or `POLYMARKET_PASSPHRASE` are missing, store them in AWS Secrets Manager (`polymarket-bot/data-collector/credentials`) in `eu-west-1`.
+### Step 1: Store Mandatory Credentials in AWS Secrets Manager (`eu-west-1`)
+Because the Data Collector requires PolyBolt API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_SECRET`, `POLYMARKET_PASSPHRASE`) and Deribit API credentials (`DERIBIT_CLIENT_ID`, `DERIBIT_CLIENT_SECRET` for authenticated `.raw` trades), store them in AWS Secrets Manager (`polymarket-bot/data-collector/credentials`) in `eu-west-1`.
 
 ### Step 2: Provision Infrastructure via CloudFormation (`infra/data-collector-ec2.yaml`)
 Deploy the CloudFormation stack `polymarket-bot-data` in `eu-west-1`:

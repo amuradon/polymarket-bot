@@ -102,9 +102,11 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                         });
                     } else if (path.equals("/deribit/ws/api/v2")) {
                         ws.textMessageHandler(msg -> {
-                            if (msg.contains("public/subscribe") && msg.contains("trades.")) {
-                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[\"trades.BTC-PERPETUAL.100ms\"]}");
-                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.100ms\",\"data\":[{\"trade_seq\":101,\"price\":78452.0,\"amount\":10.0,\"direction\":\"buy\",\"instrument_name\":\"BTC-PERPETUAL\"}]}}");
+                            if (msg.contains("public/auth")) {
+                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"access_token\":\"mock-jwt-token\",\"expires_in\":3600}}");
+                            } else if (msg.contains("public/subscribe") && msg.contains("trades.")) {
+                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[\"trades.BTC-PERPETUAL.raw\"]}");
+                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.raw\",\"data\":[{\"trade_seq\":101,\"price\":78452.0,\"amount\":10.0,\"direction\":\"buy\",\"instrument_name\":\"BTC-PERPETUAL\"}]}}");
                             }
                         });
                     }
