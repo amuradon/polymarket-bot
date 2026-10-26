@@ -90,7 +90,16 @@ param(
     [string]$Compression = "ZSTD",
 
     [Parameter()]
-    [string]$DuckDbPath = "duckdb"
+    [string]$DuckDbPath = "duckdb",
+
+    [Parameter()]
+    [string]$MemoryLimit = "5GB",
+
+    [Parameter()]
+    [int]$Threads = [Math]::Min([Environment]::ProcessorCount, 4),
+
+    [Parameter()]
+    [string]$TempDir
 )
 
 Set-StrictMode -Version Latest
@@ -214,10 +223,9 @@ SELECT
     CAST(payload->>'U' AS UBIGINT) AS first_update_id,
     CAST(payload->>'u' AS UBIGINT) AS final_update_id,
     CAST(payload->>'pu' AS UBIGINT) AS prev_final_update_id,
-    list_transform(CAST(payload->'b' AS VARCHAR[][]), lambda x: {'price': CAST(x[1] AS DOUBLE), 'quantity': CAST(x[2] AS DOUBLE)}) AS bids,
-    list_transform(CAST(payload->'a' AS VARCHAR[][]), lambda x: {'price': CAST(x[1] AS DOUBLE), 'quantity': CAST(x[2] AS DOUBLE)}) AS asks
+    list_transform(CAST(payload->'b' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS bids,
+    list_transform(CAST(payload->'a' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS asks
 FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
 "@
         }
         "deribit-trades" {
@@ -354,6 +362,8 @@ if ($Stream) {
 }
 Write-Host " Search Filter    : $Filter" -ForegroundColor White
 Write-Host " Compression      : $Compression" -ForegroundColor White
+Write-Host " Memory Limit     : $MemoryLimit" -ForegroundColor White
+Write-Host " Threads          : $Threads" -ForegroundColor White
 if ($DryRun) {
     Write-Host " Mode             : DRY-RUN (No files will be converted or deleted)" -ForegroundColor Yellow
 } elseif ($KeepOriginal) {
@@ -398,6 +408,17 @@ $totalParquetBytes = 0L
 $errors = [System.Collections.Generic.List[string]]::new()
 
 $tempSqlFile = [System.IO.Path]::GetTempFileName() + ".sql"
+
+if (-not $TempDir) {
+    $duckdbTempDir = Join-Path $resolvedTargetDir ".duckdb_tmp"
+} else {
+    $duckdbTempDir = (Resolve-Path -LiteralPath $TempDir).Path
+}
+
+if (-not (Test-Path -LiteralPath $duckdbTempDir)) {
+    New-Item -ItemType Directory -Path $duckdbTempDir -Force | Out-Null
+}
+$duckdbTempDirEscaped = $duckdbTempDir.Replace('\', '/')
 
 try {
     for ($i = 0; $i -lt $fileCount; $i++) {
@@ -446,7 +467,16 @@ try {
             $tempDestEscaped = $tempParquetPath.Replace('\', '/')
 
             $selectQuery = Get-ConvertQuery -StreamType $streamType -InputPathEscaped $inputEscaped
-            $copyScript = "COPY (`n$selectQuery`n) TO '$tempDestEscaped' (FORMAT PARQUET, COMPRESSION $Compression);`n"
+            $copyScript = @"
+SET max_memory = '$MemoryLimit';
+SET temp_directory = '$duckdbTempDirEscaped';
+SET threads = $Threads;
+SET preserve_insertion_order = true;
+
+COPY (
+$selectQuery
+) TO '$tempDestEscaped' (FORMAT PARQUET, COMPRESSION $Compression);
+"@
 
             # Write DuckDB script to temp sql file without BOM
             [System.IO.File]::WriteAllText($tempSqlFile, $copyScript, [System.Text.UTF8Encoding]::new($false))
@@ -510,6 +540,12 @@ try {
 } finally {
     if (Test-Path -LiteralPath $tempSqlFile) {
         Remove-Item -LiteralPath $tempSqlFile -Force -ErrorAction SilentlyContinue
+    }
+    if ((Test-Path -LiteralPath $duckdbTempDir) -and (-not $TempDir)) {
+        $rem = Get-ChildItem -LiteralPath $duckdbTempDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not $rem) {
+            Remove-Item -LiteralPath $duckdbTempDir -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
