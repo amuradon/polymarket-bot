@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Measures one-way WebSocket network latency from Binance Spot, Coinbase Spot, and Kraken Spot
+    Measures one-way WebSocket network latency from Binance Spot, Coinbase Spot, Kraken Spot, and Bitstamp Spot
     to an AWS EC2 instance (eu-west-1 Dublin) and logs comprehensive statistical metrics.
 
 .DESCRIPTION
     Connects to the specified AWS EC2 instance (configured via SSH/SSM tunnel), verifies system
     clock synchronization (chrony/AWS Time Sync Service), and executes a concurrent Python
-    WebSocket benchmark across Binance, Coinbase, and Kraken public trade streams.
+    WebSocket benchmark across Binance, Coinbase, Kraken, and Bitstamp public trade streams.
     
     Measures the exact one-way transmission latency (t_recv - t_exchange_event) for each trade event,
     calculates key statistics (Sample Count, Min, Max, Mean, Median/P50, P90, P95, P99, StdDev),
@@ -26,7 +26,7 @@
     Maximum timeout in seconds to wait for samples before concluding the benchmark. Defaults to 60.
 
 .PARAMETER Exchanges
-    List of exchanges to include in the benchmark ('binance', 'coinbase', 'kraken'). Defaults to all three.
+    List of exchanges to include in the benchmark ('binance', 'coinbase', 'kraken', 'bitstamp'). Defaults to all four.
 
 .PARAMETER LogDir
     Directory path where latency logs will be saved. Defaults to '.\logs\latency'.
@@ -36,15 +36,15 @@
 
 .EXAMPLE
     .\scripts\measure-exchange-ws-latency.ps1
-    Measures one-way latency for BTC across Binance, Coinbase, and Kraken (100 samples each).
+    Measures one-way latency for BTC across Binance, Coinbase, Kraken, and Bitstamp (100 samples each).
 
 .EXAMPLE
     .\scripts\measure-exchange-ws-latency.ps1 -SampleCount 200 -DurationSeconds 30
     Collects up to 200 samples per exchange with a 30-second timeout.
 
 .EXAMPLE
-    .\scripts\measure-exchange-ws-latency.ps1 -Symbol ETH -Exchanges binance,coinbase
-    Measures ETH trade streams on Binance and Coinbase only.
+    .\scripts\measure-exchange-ws-latency.ps1 -Symbol ETH -Exchanges binance,coinbase,bitstamp
+    Measures ETH trade streams on Binance, Coinbase, and Bitstamp.
 #>
 [CmdletBinding()]
 param(
@@ -63,8 +63,8 @@ param(
     [int]$DurationSeconds = 60,
 
     [Parameter()]
-    [ValidateSet("binance", "coinbase", "kraken")]
-    [string[]]$Exchanges = @("binance", "coinbase", "kraken"),
+    [ValidateSet("binance", "coinbase", "kraken", "bitstamp")]
+    [string[]]$Exchanges = @("binance", "coinbase", "kraken", "bitstamp"),
 
     [Parameter()]
     [string]$LogDir = ".\logs\latency",
@@ -99,6 +99,7 @@ function Get-NormalizedSymbols {
         Binance  = ($clean.ToLowerInvariant() + "usdt")
         Coinbase = ($clean + "-USD")
         Kraken   = ($clean + "/USD")
+        Bitstamp = ($clean.ToLowerInvariant() + "usd")
     }
 }
 
@@ -244,6 +245,36 @@ async def bench_kraken(symbol, target, timeout):
         pass
     return {'exchange': 'Kraken Spot', 'symbol': symbol, 'stats': calc_stats(samples)}
 
+async def bench_bitstamp(symbol, target, timeout):
+    samples = []
+    uri = 'wss://ws.bitstamp.net'
+    channel = f'live_trades_{symbol.lower()}'
+    try:
+        async with websockets.connect(uri) as ws:
+            sub = {
+                'event': 'bts:subscribe',
+                'data': {'channel': channel}
+            }
+            await ws.send(json.dumps(sub))
+            deadline = time.time() + timeout
+            while len(samples) < target and time.time() < deadline:
+                rem = max(0.1, deadline - time.time())
+                msg = await asyncio.wait_for(ws.recv(), timeout=rem)
+                t_recv = time.time() * 1000.0
+                data = json.loads(msg)
+                if data.get('event') == 'trade' and 'data' in data:
+                    t_data = data['data']
+                    micro_ts = t_data.get('microtimestamp')
+                    if micro_ts is not None:
+                        t_exch = float(micro_ts) / 1000.0
+                        samples.append(t_recv - t_exch)
+                    elif 'timestamp' in t_data:
+                        t_exch = float(t_data['timestamp']) * 1000.0
+                        samples.append(t_recv - t_exch)
+    except Exception as e:
+        pass
+    return {'exchange': 'Bitstamp Spot', 'symbol': symbol.upper(), 'stats': calc_stats(samples)}
+
 async def main():
     tasks = []
     active_exchanges = [$exchangesParam]
@@ -253,6 +284,8 @@ async def main():
         tasks.append(bench_coinbase('$($symbols.Coinbase)', $SampleCount, $DurationSeconds))
     if 'kraken' in active_exchanges:
         tasks.append(bench_kraken('$($symbols.Kraken)', $SampleCount, $DurationSeconds))
+    if 'bitstamp' in active_exchanges:
+        tasks.append(bench_bitstamp('$($symbols.Bitstamp)', $SampleCount, $DurationSeconds))
     
     results = await asyncio.gather(*tasks)
     print("---BENCHMARK_RESULT_START---")
