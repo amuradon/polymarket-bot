@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
     Measures one-way WebSocket network latency from Binance Spot, Coinbase Spot, Kraken Spot,
-    Bitstamp Spot, Gemini Spot, and LMAX Digital to an AWS EC2 instance (eu-west-1 Dublin).
+    Bitstamp Spot, Gemini Spot, LMAX Digital, and Crypto.com to an AWS EC2 instance (eu-west-1 Dublin).
 
 .DESCRIPTION
     Connects to the specified AWS EC2 instance (configured via SSH/SSM tunnel), verifies system
     clock synchronization (chrony/AWS Time Sync Service), and executes a concurrent Python
-    WebSocket benchmark across Binance, Coinbase, Kraken, Bitstamp, Gemini, and LMAX Digital
-    public trade streams.
+    WebSocket benchmark across Binance, Coinbase, Kraken, Bitstamp, Gemini, LMAX Digital, and
+    Crypto.com public trade streams.
     
     Measures the exact one-way transmission latency (t_recv - t_exchange_event) for each trade event,
     calculates key statistics (Sample Count, Min, Max, Mean, Median/P50, P90, P95, P99, StdDev),
@@ -27,8 +27,8 @@
     Maximum timeout in seconds to wait for samples before concluding the benchmark. Defaults to 60.
 
 .PARAMETER Exchanges
-    List of exchanges to include in the benchmark ('binance', 'coinbase', 'kraken', 'bitstamp', 'gemini', 'lmax').
-    Defaults to all six exchanges.
+    List of exchanges to include in the benchmark ('binance', 'coinbase', 'kraken', 'bitstamp', 'gemini', 'lmax', 'cryptocom').
+    Defaults to all seven exchanges.
 
 .PARAMETER LogDir
     Directory path where latency logs will be saved. Defaults to '.\logs\latency'.
@@ -38,15 +38,15 @@
 
 .EXAMPLE
     .\scripts\measure-exchange-ws-latency.ps1
-    Measures one-way latency for BTC across all 6 exchanges (100 samples each).
+    Measures one-way latency for BTC across all 7 exchanges (100 samples each).
 
 .EXAMPLE
     .\scripts\measure-exchange-ws-latency.ps1 -SampleCount 200 -DurationSeconds 30
     Collects up to 200 samples per exchange with a 30-second timeout.
 
 .EXAMPLE
-    .\scripts\measure-exchange-ws-latency.ps1 -Symbol ETH -Exchanges gemini,lmax
-    Measures ETH trade streams on Gemini and LMAX Digital only.
+    .\scripts\measure-exchange-ws-latency.ps1 -Symbol ETH -Exchanges cryptocom,lmax
+    Measures ETH trade streams on Crypto.com and LMAX Digital only.
 #>
 [CmdletBinding()]
 param(
@@ -65,7 +65,7 @@ param(
     [int]$DurationSeconds = 60,
 
     [Parameter()]
-    [string[]]$Exchanges = @("binance", "coinbase", "kraken", "bitstamp", "gemini", "lmax"),
+    [string[]]$Exchanges = @("binance", "coinbase", "kraken", "bitstamp", "gemini", "lmax", "cryptocom"),
 
     [Parameter()]
     [string]$LogDir = ".\logs\latency",
@@ -78,11 +78,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Parse and validate exchanges (supporting both array and comma-separated string)
-$validExchanges = @("binance", "coinbase", "kraken", "bitstamp", "gemini", "lmax")
+$validExchanges = @("binance", "coinbase", "kraken", "bitstamp", "gemini", "lmax", "cryptocom")
 $normalizedExchanges = [System.Collections.Generic.List[string]]::new()
 foreach ($entry in $Exchanges) {
     foreach ($part in ($entry -split ',')) {
         $trimmed = $part.Trim().ToLowerInvariant()
+        if ($trimmed -in "crypto.com", "cdc") { $trimmed = "cryptocom" }
         if ($trimmed) {
             if ($trimmed -notin $validExchanges) {
                 throw "Invalid exchange '$trimmed'. Supported exchanges are: $($validExchanges -join ', ')"
@@ -117,13 +118,14 @@ function Get-NormalizedSymbols {
     elseif ($clean.EndsWith('USD')) { $clean = $clean.Substring(0, $clean.Length - 3) }
 
     return [PSCustomObject]@{
-        Base     = $clean
-        Binance  = ($clean.ToLowerInvariant() + "usdt")
-        Coinbase = ($clean + "-USD")
-        Kraken   = ($clean + "/USD")
-        Bitstamp = ($clean.ToLowerInvariant() + "usd")
-        Gemini   = ($clean.ToLowerInvariant() + "usd")
-        Lmax     = ($clean.ToLowerInvariant() + "-usd")
+        Base      = $clean
+        Binance   = ($clean.ToLowerInvariant() + "usdt")
+        Coinbase  = ($clean + "-USD")
+        Kraken    = ($clean + "/USD")
+        Bitstamp  = ($clean.ToLowerInvariant() + "usd")
+        Gemini    = ($clean.ToLowerInvariant() + "usd")
+        Lmax      = ($clean.ToLowerInvariant() + "-usd")
+        CryptoCom = ($clean + "_USDT")
     }
 }
 
@@ -340,6 +342,38 @@ async def bench_lmax(symbol, target, timeout):
         pass
     return {'exchange': 'LMAX Digital', 'symbol': symbol.lower(), 'stats': calc_stats(samples)}
 
+async def bench_cryptocom(symbol, target, timeout):
+    samples = []
+    uri = 'wss://stream.crypto.com/exchange/v1/market'
+    channel = f'trade.{symbol.upper()}'
+    try:
+        async with websockets.connect(uri) as ws:
+            sub = {'id': 1, 'method': 'subscribe', 'params': {'channels': [channel]}}
+            await ws.send(json.dumps(sub))
+            deadline = time.time() + timeout
+            while len(samples) < target and time.time() < deadline:
+                rem = max(0.1, deadline - time.time())
+                msg = await asyncio.wait_for(ws.recv(), timeout=rem)
+                t_recv = time.time() * 1000.0
+                data = json.loads(msg)
+                if data.get('method') == 'public/heartbeat':
+                    await ws.send(json.dumps({'id': data.get('id'), 'method': 'public/respond-heartbeat'}))
+                    continue
+                if data.get('id') == 1:
+                    continue
+                res = data.get('result', {})
+                if res.get('channel') == 'trade':
+                    for item in res.get('data', []):
+                        if 'd' in item:
+                            e_val = float(item['d'])
+                            t_exch = e_val / 1000000.0 if e_val > 1e16 else (e_val if e_val > 1e11 else e_val * 1000.0)
+                            samples.append(t_recv - t_exch)
+                        elif 't' in item:
+                            samples.append(t_recv - float(item['t']))
+    except Exception as e:
+        pass
+    return {'exchange': 'Crypto.com', 'symbol': symbol.upper(), 'stats': calc_stats(samples)}
+
 async def main():
     tasks = []
     active_exchanges = [$exchangesParam]
@@ -355,6 +389,8 @@ async def main():
         tasks.append(bench_gemini('$($symbols.Gemini)', $SampleCount, $DurationSeconds))
     if 'lmax' in active_exchanges:
         tasks.append(bench_lmax('$($symbols.Lmax)', $SampleCount, $DurationSeconds))
+    if 'cryptocom' in active_exchanges:
+        tasks.append(bench_cryptocom('$($symbols.CryptoCom)', $SampleCount, $DurationSeconds))
     
     results = await asyncio.gather(*tasks)
     print("---BENCHMARK_RESULT_START---")
@@ -421,8 +457,8 @@ function Format-Num([object]$val) {
 }
 
 $tableLines = [System.Collections.Generic.List[string]]::new()
-$header = "+---------------+---------+---------+---------+---------+---------+---------+---------+---------+---------+---------+"
-$title  = "| Exchange      | Symbol  | Samples | Min(ms) | Med(ms) | Avg(ms) | P90(ms) | P95(ms) | P99(ms) | Max(ms) |  StdDev |"
+$header = "+---------------+-----------+---------+---------+---------+---------+---------+---------+---------+---------+---------+"
+$title  = "| Exchange      | Symbol    | Samples | Min(ms) | Med(ms) | Avg(ms) | P90(ms) | P95(ms) | P99(ms) | Max(ms) |  StdDev |"
 $tableLines.Add($header)
 $tableLines.Add($title)
 $tableLines.Add($header)
@@ -450,7 +486,7 @@ foreach ($item in $benchmarkData) {
         }
         $reportRows.Add($row)
 
-        $line = "| {0,-13} | {1,-7} | {2,7} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} |" -f `
+        $line = "| {0,-13} | {1,-9} | {2,7} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} |" -f `
             $exch, $sym, $st.count, `
             (Format-Num $st.min_ms), (Format-Num $st.median_ms), (Format-Num $st.mean_ms), `
             (Format-Num $st.p90_ms), (Format-Num $st.p95_ms), (Format-Num $st.p99_ms), `
@@ -471,7 +507,7 @@ foreach ($item in $benchmarkData) {
             "StdDev_ms"  = $null
         }
         $reportRows.Add($row)
-        $line = "| {0,-13} | {1,-7} | {2,7} |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |" -f $exch, $sym, 0
+        $line = "| {0,-13} | {1,-9} | {2,7} |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |     N/A |" -f $exch, $sym, 0
         $tableLines.Add($line)
     }
 }
