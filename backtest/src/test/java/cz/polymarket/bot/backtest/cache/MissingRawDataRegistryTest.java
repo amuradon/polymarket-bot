@@ -6,7 +6,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,13 +22,10 @@ class MissingRawDataRegistryTest {
 
         registry.recordMissingPolymarket(1790812800L);
         registry.recordMissingPolymarket(1790813700L);
-        registry.recordMissingPolymarketAll(List.of(1790814600L, 1790815500L));
         registry.recordMissingFuturesOrderBook("2026-10-01-08");
 
         assertThat(registry.isPolymarketMissing(1790812800L)).isTrue();
         assertThat(registry.isPolymarketMissing(1790813700L)).isTrue();
-        assertThat(registry.isPolymarketMissing(1790814600L)).isTrue();
-        assertThat(registry.isPolymarketMissing(1790815500L)).isTrue();
         assertThat(registry.isPolymarketMissing(1790899999L)).isFalse();
 
         assertThat(registry.isFuturesOrderBookMissing("2026-10-01-08")).isTrue();
@@ -42,7 +38,7 @@ class MissingRawDataRegistryTest {
         MissingRawDataRegistry reloaded = MissingRawDataRegistry.load(jsonPath, "BTCUSDT");
         assertThat(reloaded.getSymbol()).isEqualTo("BTCUSDT");
         assertThat(reloaded.isPolymarketMissing(1790812800L)).isTrue();
-        assertThat(reloaded.isPolymarketMissing(1790815500L)).isTrue();
+        assertThat(reloaded.isPolymarketMissing(1790813700L)).isTrue();
         assertThat(reloaded.isFuturesOrderBookMissing("2026-10-01-08")).isTrue();
         assertThat(reloaded.isFuturesOrderBookMissing("2026-10-01-09")).isFalse();
     }

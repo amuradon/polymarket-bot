@@ -25,17 +25,7 @@ public class BacktestJob {
      * @param request the validated backtest run request
      */
     public BacktestJob(BacktestRunRequest request) {
-        this(UUID.randomUUID().toString(), request);
-    }
-
-    /**
-     * Creates a new backtest job with an explicit identifier.
-     *
-     * @param jobId unique job identifier
-     * @param request the validated backtest run request
-     */
-    public BacktestJob(String jobId, BacktestRunRequest request) {
-        this.jobId = Objects.requireNonNull(jobId, "jobId must not be null");
+        this.jobId = UUID.randomUUID().toString();
         this.request = Objects.requireNonNull(request, "request must not be null");
         this.createdAt = Instant.now();
         this.status = BacktestJobStatus.QUEUED;

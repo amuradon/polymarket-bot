@@ -12,7 +12,7 @@ import static org.hamcrest.Matchers.*;
 class SwaggerUiOpenApiTest {
 
     @Test
-    @DisplayName("GET /q/openapi should return OpenAPI 3.x schema containing backtest and data ingestion endpoints")
+    @DisplayName("GET /q/openapi should return OpenAPI 3.x schema containing backtest endpoints without data download endpoints")
     void shouldServeOpenApiDocument() {
         given()
                 .queryParam("format", "json")
@@ -21,13 +21,13 @@ class SwaggerUiOpenApiTest {
                 .statusCode(200)
                 .contentType(ContentType.JSON)
                 .body("openapi", startsWith("3."))
-                .body("info.title", equalTo("Polymarket Bot - Backtest & Data Ingestion API"))
+                .body("info.title", equalTo("Polymarket Bot - Backtest API"))
                 .body("info.version", equalTo("1.0.0"))
-                .body("paths", hasKey("/api/data/download/binance"))
-                .body("paths", hasKey("/api/data/download/binance/{jobId}"))
                 .body("paths", hasKey("/api/status"))
                 .body("paths", hasKey("/api/backtest/run"))
                 .body("paths", hasKey("/api/backtest/run/{jobId}"))
+                .body("paths", not(hasKey("/api/data/download/binance")))
+                .body("paths", not(hasKey("/api/data/download/binance/{jobId}")))
                 .body("paths", not(hasKey("/api/1/data/download")))
                 .body("paths", not(hasKey("/backtest")));
     }

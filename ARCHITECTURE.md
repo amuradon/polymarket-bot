@@ -49,7 +49,7 @@ flowchart TD
 | **`trading`** | `jar` (library) | `common`, `connector` | `common`, `connector`, Quarkus platform extensions (REST, Qute, WebSockets, Vert.x) | `data`, `backtest`, `live`, `paper` |
 | **`live`** | `jar` (app) | `trading`, `connector` | `trading`, `connector` (transitive: `common`) | `data`, `backtest`, `paper` |
 | **`paper`** | `jar` (app) | `trading`, `connector` | `trading`, `connector` (transitive: `common`) | `data`, `backtest`, `live` |
-| **`backtest`**| `jar` (app) | `common` | `common`, historical data parsers, DuckDB, `zstd-jni`, testing engines | `connector`, `trading`, `data`, `live`, `paper` |
+| **`backtest`**| `jar` (app) | `common` | `common`, historical data parsers, DuckDB, testing engines | `connector`, `trading`, `data`, `live`, `paper` |
 
 ---
 
@@ -115,7 +115,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ### `backtest`
 - Standalone runnable Quarkus application for backtesting strategies against historical datasets.
 - Configured with `quarkus.http.port=8083`, `polymarket.trading.mode=backtest`.
-- Exposes consolidated REST endpoints (`/api/status`, `/api/backtest/run`, `/api/data/download/binance`) for starting asynchronous simulations, triggering Binance data ingestion, and querying results.
+- Exposes consolidated REST endpoints (`/api/status`, `/api/backtest/run`) for starting asynchronous simulations and querying results.
 
 ---
 

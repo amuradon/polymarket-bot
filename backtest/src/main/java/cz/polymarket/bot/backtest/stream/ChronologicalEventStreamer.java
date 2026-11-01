@@ -9,8 +9,6 @@ import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.TradeDirection;
 import org.jboss.logging.Logger;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,8 +17,6 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.PriorityQueue;
 
 /**
@@ -52,15 +48,6 @@ public class ChronologicalEventStreamer {
     }
 
     /**
-     * Inspects the next chronological event without removing it from the queue.
-     *
-     * @return next event, or null if queue is empty
-     */
-    public BacktestEvent peek() {
-        return queue.peek();
-    }
-
-    /**
      * Schedules a future or immediate event into the chronological queue.
      *
      * @param event BacktestEvent to schedule
@@ -76,15 +63,6 @@ public class ChronologicalEventStreamer {
      */
     public void clear() {
         queue.clear();
-    }
-
-    /**
-     * Returns the number of events currently queued.
-     *
-     * @return queue size
-     */
-    public int size() {
-        return queue.size();
     }
 
     /**

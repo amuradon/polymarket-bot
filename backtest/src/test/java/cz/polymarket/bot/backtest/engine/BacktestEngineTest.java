@@ -6,7 +6,6 @@ import cz.polymarket.bot.backtest.cache.BinaryMarketCacheService;
 import cz.polymarket.bot.backtest.cache.CachedMarketRow;
 import cz.polymarket.bot.backtest.cache.MissingRawDataRegistry;
 import cz.polymarket.bot.backtest.cache.RawMarketDataProcessor;
-import cz.polymarket.bot.backtest.data.ParquetDatasetLoader;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
 import cz.polymarket.bot.calculator.KellyPositionSizer;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
@@ -44,7 +43,7 @@ class BacktestEngineTest {
                 tempDir.resolve("Polymarket").toString()
         );
         BacktestDataCacheService dataCacheService = new BacktestDataCacheService(
-                cacheService, processor, missingRegistry
+                cacheService, processor
         );
 
         // Pre-populate representative synthesized test dataset in binary cache

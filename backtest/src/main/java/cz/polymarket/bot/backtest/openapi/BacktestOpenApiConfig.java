@@ -11,13 +11,12 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
  */
 @OpenAPIDefinition(
         info = @Info(
-                title = "Polymarket Bot - Backtest & Data Ingestion API",
+                title = "Polymarket Bot - Backtest API",
                 version = "1.0.0",
-                description = "REST API for the backtesting simulation engine and automated Binance market data ingestion (spot aggTrades, futures aggTrades, futures orderbook).",
+                description = "REST API for the backtesting simulation engine.",
                 contact = @Contact(name = "Polymarket Bot Engineering Team")
         ),
         tags = {
-                @Tag(name = "Data Ingestion", description = "Operations for triggering and monitoring Binance historical data downloads"),
                 @Tag(name = "Backtest Engine", description = "Backtest simulation engine status and lifecycle controls")
         }
 )

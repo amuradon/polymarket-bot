@@ -14,21 +14,21 @@ import org.eclipse.microprofile.openapi.annotations.media.Schema;
  */
 @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
 public record BacktestRunRequest(
-        @Schema(description = "Mandatory trading strategy name to execute", example = "TWAPArbitrageStrategy", required = true)
+        @Schema(description = "Mandatory trading strategy name to execute", examples = "TWAPArbitrageStrategy", required = true)
         String strategyName,
 
-        @Schema(description = "Optional symbol to evaluate (default BTCUSDT)", example = "BTCUSDT")
+        @Schema(description = "Optional symbol to evaluate (default BTCUSDT)", examples = "BTCUSDT")
         String symbol,
 
-        @Schema(description = "Optional start date filter (yyyy-MM-dd)", example = "2026-08-01")
+        @Schema(description = "Optional start date filter (yyyy-MM-dd)", examples = "2026-08-01")
         String startDate,
 
-        @Schema(description = "Optional end date filter (yyyy-MM-dd)", example = "2026-08-05")
+        @Schema(description = "Optional end date filter (yyyy-MM-dd)", examples = "2026-08-05")
         String endDate,
 
-        @Schema(description = "Optional initial capital in USD", example = "10000.0")
+        @Schema(description = "Optional initial capital in USD", examples = "10000.0")
         Double initialCapital,
 
-        @Schema(description = "Optional directory to store exported JSON results", example = "D:/Crypto/data/Polymarket/backtesting")
+        @Schema(description = "Optional directory to store exported JSON results", examples = "D:/Crypto/data/Polymarket/backtesting")
         String outputDirectory
 ) {}

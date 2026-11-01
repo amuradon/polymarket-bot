@@ -20,7 +20,6 @@ public class PolymarketOrderBook {
 
     private final NavigableMap<Double, Double> bids = new TreeMap<>(Collections.reverseOrder());
     private final NavigableMap<Double, Double> asks = new TreeMap<>();
-    private double lastTradedPrice = 0.50;
     private long lastUpdateTimeMs = 0L;
 
     /**
@@ -29,7 +28,6 @@ public class PolymarketOrderBook {
     public void clear() {
         bids.clear();
         asks.clear();
-        lastTradedPrice = 0.50;
         lastUpdateTimeMs = 0L;
     }
 
@@ -75,7 +73,7 @@ public class PolymarketOrderBook {
     }
 
     /**
-     * Applies a reported trade execution to update the last traded price.
+     * Applies a reported trade execution to update the last update timestamp.
      *
      * @param price execution price
      * @param size trade size
@@ -84,9 +82,6 @@ public class PolymarketOrderBook {
      */
     public void applyTrade(double price, double size, String side, long timestampMs) {
         this.lastUpdateTimeMs = timestampMs;
-        if (price > 0.0 && price < 1.0) {
-            this.lastTradedPrice = price;
-        }
     }
 
     /**

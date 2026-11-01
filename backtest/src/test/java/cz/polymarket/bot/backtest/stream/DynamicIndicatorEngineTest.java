@@ -23,7 +23,7 @@ class DynamicIndicatorEngineTest {
                 IndicatorType.MICRO_PRICE
         ));
 
-        engine.resetActiveCandle(1000000L, 60000.0);
+        engine.resetActiveCandle(60000.0);
 
         // Trade 1: Spot trade @ 60100 qty 1.0 (aggressive buy)
         engine.onSpotTrade(1000100L, 60100.0, 1.0, false);

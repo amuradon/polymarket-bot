@@ -10,7 +10,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -62,15 +61,6 @@ public class BacktestJobManager {
      */
     public Optional<BacktestJob> getJob(String jobId) {
         return Optional.ofNullable(jobs.get(jobId));
-    }
-
-    /**
-     * Returns an unmodifiable list of all registered backtest jobs.
-     *
-     * @return list of backtest jobs
-     */
-    public List<BacktestJob> getAllJobs() {
-        return List.copyOf(jobs.values());
     }
 
     private void executeJob(BacktestJob job) {

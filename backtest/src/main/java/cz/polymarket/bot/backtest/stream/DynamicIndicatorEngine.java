@@ -27,7 +27,6 @@ public class DynamicIndicatorEngine {
     private final Map<IndicatorType, Double> currentValues = new EnumMap<>(IndicatorType.class);
 
     // Active candle intra-candle state
-    private long activeCandleStartMs = 0L;
     private double twapOpenPrice = 0.0;
     private double rollingTwapSum = 0.0;
     private long rollingTwapCount = 0L;
@@ -39,10 +38,6 @@ public class DynamicIndicatorEngine {
 
     private double currentSpotPrice = 0.0;
     private double currentFuturesPrice = 0.0;
-    private double currentBasisBps = 0.0;
-
-    private double currentObi = 0.0;
-    private double currentMicroPrice = 0.0;
 
     /**
      * Constructs the dynamic indicator engine configured with the indicators required by the active strategy.
@@ -60,17 +55,15 @@ public class DynamicIndicatorEngine {
     public void reset() {
         candleHistory.clear();
         currentValues.clear();
-        resetActiveCandle(0L, 0.0);
+        resetActiveCandle(0.0);
     }
 
     /**
      * Resets intra-candle rolling accumulators for a new active candle interval.
      *
-     * @param startMs candle start timestamp in milliseconds UTC
      * @param openPrice candle opening spot price
      */
-    public void resetActiveCandle(long startMs, double openPrice) {
-        this.activeCandleStartMs = startMs;
+    public void resetActiveCandle(double openPrice) {
         this.twapOpenPrice = openPrice;
         this.rollingTwapSum = openPrice > 0 ? openPrice : 0.0;
         this.rollingTwapCount = openPrice > 0 ? 1L : 0L;
@@ -130,8 +123,8 @@ public class DynamicIndicatorEngine {
         }
 
         if (requiredIndicators.contains(IndicatorType.BASIS) && currentFuturesPrice > 0.0 && currentSpotPrice > 0.0) {
-            this.currentBasisBps = ((currentFuturesPrice - currentSpotPrice) / currentSpotPrice) * 10000.0;
-            currentValues.put(IndicatorType.BASIS, this.currentBasisBps);
+            double currentBasisBps = ((currentFuturesPrice - currentSpotPrice) / currentSpotPrice) * 10000.0;
+            currentValues.put(IndicatorType.BASIS, currentBasisBps);
         }
     }
 
@@ -147,8 +140,8 @@ public class DynamicIndicatorEngine {
         this.currentFuturesPrice = price;
 
         if (requiredIndicators.contains(IndicatorType.BASIS) && currentSpotPrice > 0.0) {
-            this.currentBasisBps = ((price - currentSpotPrice) / currentSpotPrice) * 10000.0;
-            currentValues.put(IndicatorType.BASIS, this.currentBasisBps);
+            double currentBasisBps = ((price - currentSpotPrice) / currentSpotPrice) * 10000.0;
+            currentValues.put(IndicatorType.BASIS, currentBasisBps);
         }
     }
 
@@ -164,18 +157,18 @@ public class DynamicIndicatorEngine {
      */
     public void onFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {
         if (requiredIndicators.contains(IndicatorType.ORDER_BOOK_IMBALANCE)) {
-            this.currentObi = obi;
             currentValues.put(IndicatorType.ORDER_BOOK_IMBALANCE, obi);
         }
 
         if (requiredIndicators.contains(IndicatorType.MICRO_PRICE)) {
             double totalDepth = depthBids + depthAsks;
+            double currentMicroPrice;
             if (totalDepth > 0.0) {
-                this.currentMicroPrice = (depthAsks * bestBid + depthBids * bestAsk) / totalDepth;
+                currentMicroPrice = (depthAsks * bestBid + depthBids * bestAsk) / totalDepth;
             } else {
-                this.currentMicroPrice = (bestBid + bestAsk) / 2.0;
+                currentMicroPrice = (bestBid + bestAsk) / 2.0;
             }
-            currentValues.put(IndicatorType.MICRO_PRICE, this.currentMicroPrice);
+            currentValues.put(IndicatorType.MICRO_PRICE, currentMicroPrice);
         }
     }
 
@@ -231,26 +224,5 @@ public class DynamicIndicatorEngine {
      */
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
-    }
-
-    /**
-     * Returns the latest observed futures asset price.
-     */
-    public double getCurrentFuturesPrice() {
-        return currentFuturesPrice;
-    }
-
-    /**
-     * Returns the current basis spread in basis points.
-     */
-    public double getCurrentBasisBps() {
-        return currentBasisBps;
-    }
-
-    /**
-     * Returns the opening reference price for TWAP comparison.
-     */
-    public double getTwapOpenPrice() {
-        return twapOpenPrice;
     }
 }

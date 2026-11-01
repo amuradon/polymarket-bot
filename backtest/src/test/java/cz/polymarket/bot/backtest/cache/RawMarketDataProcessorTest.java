@@ -6,9 +6,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
@@ -75,21 +77,6 @@ class RawMarketDataProcessorTest {
     }
 
     @Test
-    @DisplayName("Should track missing raw files in MissingRawDataRegistry")
-    void shouldTrackMissingRawFiles() {
-        long tStart = 1790812800L;
-        String dateHour = "2026-10-01-08";
-
-        assertThat(missingRegistry.isPolymarketMissing(tStart)).isFalse();
-        assertThat(missingRegistry.isFuturesOrderBookMissing(dateHour)).isFalse();
-
-        processor.checkAndRecordMissingRawFiles("BTCUSDT", tStart, dateHour);
-
-        assertThat(missingRegistry.isPolymarketMissing(tStart)).isTrue();
-        assertThat(missingRegistry.isFuturesOrderBookMissing(dateHour)).isTrue();
-    }
-
-    @Test
     @DisplayName("Should import BacktestMarketRows into cache and persist separate indicators")
     void shouldImportRowsIntoCache() {
         long tStart = 1790812800L;
@@ -124,8 +111,8 @@ class RawMarketDataProcessorTest {
     }
 
     @Test
-    @DisplayName("Should process raw Spot and Futures Parquet files for a month and write cached rows")
-    void shouldProcessRawParquetFilesForMonth() throws IOException {
+    @DisplayName("Should process raw Spot and Futures Parquet files for a month, write cached rows, and record missing files")
+    void shouldProcessRawParquetFilesForMonth() throws Exception {
         String symbol = "BTCUSDT";
         String month = "2026-08";
         String dateStr = "2026-08-01";
@@ -135,34 +122,30 @@ class RawMarketDataProcessorTest {
         Files.createDirectories(spotDir);
         Files.createDirectories(futDir);
 
-        cz.polymarket.bot.backtest.service.BinanceAggTradesParquetConverter converter =
-                new cz.polymarket.bot.backtest.service.BinanceAggTradesParquetConverter();
-
-        Path tempSpotCsv = tempDir.resolve("temp-spot.csv");
         Path spotParquet = spotDir.resolve(symbol + "-aggTrades-" + dateStr + ".parquet");
-        String syntheticSpotCsv = """
-                4000000001,65000.50,0.015,5000000001,5000000002,1785542400100000,true,true
-                4000000002,65001.00,0.020,5000000003,5000000003,1785542400200000,false,true
-                """;
-        Files.writeString(tempSpotCsv, syntheticSpotCsv);
-        converter.convertSpotCsvToParquet(tempSpotCsv, spotParquet);
-        Files.deleteIfExists(tempSpotCsv);
-
-        Path tempFutCsv = tempDir.resolve("temp-fut.csv");
         Path futParquet = futDir.resolve(symbol + "-aggTrades-" + dateStr + ".parquet");
-        String syntheticFutCsv = """
-                agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker
-                2000000001,65010.0,0.05,3000000001,3000000001,1785542400123,true
-                2000000002,65012.0,0.10,3000000002,3000000005,1785542400234,false
-                """;
-        Files.writeString(tempFutCsv, syntheticFutCsv);
-        converter.convertFuturesCsvToParquet(tempFutCsv, futParquet);
-        Files.deleteIfExists(tempFutCsv);
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement()) {
+            String normSpot = spotParquet.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(1785542400100000::BIGINT, 65000.50::DOUBLE, 0.015::DOUBLE, true::BOOLEAN), " +
+                    "(1785542400200000::BIGINT, 65001.00::DOUBLE, 0.020::DOUBLE, false::BOOLEAN)" +
+                    ") AS t(transact_time, price, quantity, is_buyer_maker)) TO '" + normSpot + "' (FORMAT PARQUET)");
+
+            String normFut = futParquet.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(1785542400123::BIGINT, 65010.0::DOUBLE, 0.05::DOUBLE, true::BOOLEAN), " +
+                    "(1785542400234::BIGINT, 65012.0::DOUBLE, 0.10::DOUBLE, false::BOOLEAN)" +
+                    ") AS t(transact_time, price, quantity, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
+        }
 
         processor.processRawDataForMonth(symbol, month);
 
         assertThat(cacheService.hasMarketRowsCache(symbol, month)).isTrue();
         List<CachedMarketRow> rows = cacheService.readMarketRowsCache(symbol, month);
         assertThat(rows).isNotEmpty();
+        assertThat(missingRegistry.isPolymarketMissing(1785542400L)).isTrue();
+        assertThat(missingRegistry.isFuturesOrderBookMissing("2026-08-01-00")).isTrue();
     }
 }

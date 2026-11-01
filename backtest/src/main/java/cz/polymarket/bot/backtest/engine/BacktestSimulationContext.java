@@ -10,7 +10,6 @@ import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.TradeDirection;
-import cz.polymarket.bot.strategy.TradingStrategy;
 
 import java.util.Map;
 
@@ -24,8 +23,6 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     private final SimulatedMatchingEngine matchingEngine;
     private final DynamicIndicatorEngine indicatorEngine;
 
-    private TradingStrategy strategy;
-    private BacktestMarketRow currentRow;
     private long currentTimestampMs;
 
     /**
@@ -41,13 +38,8 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
 
     /**
      * Resets the execution state for a newly starting 15-minute candle.
-     *
-     * @param row current candle market row
-     * @param strategy active trading strategy
      */
-    public void resetForCandle(BacktestMarketRow row, TradingStrategy strategy) {
-        this.currentRow = row;
-        this.strategy = strategy;
+    public void resetForCandle() {
         if (matchingEngine != null) {
             matchingEngine.resetForCandle();
         }

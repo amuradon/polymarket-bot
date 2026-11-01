@@ -31,23 +31,19 @@ public class BacktestDataCacheService {
 
     private final BinaryMarketCacheService cacheService;
     private final RawMarketDataProcessor processor;
-    private final MissingRawDataRegistry missingRegistry;
 
     /**
      * Constructs the high-level backtest data cache service.
      *
      * @param cacheService low-level memory-mapped binary cache service
      * @param processor raw market data ingestion processor
-     * @param missingRegistry registry recording missing datasets
      */
     @Inject
     public BacktestDataCacheService(
             BinaryMarketCacheService cacheService,
-            RawMarketDataProcessor processor,
-            MissingRawDataRegistry missingRegistry) {
+            RawMarketDataProcessor processor) {
         this.cacheService = cacheService;
         this.processor = processor;
-        this.missingRegistry = missingRegistry;
     }
 
     /**

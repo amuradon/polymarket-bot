@@ -8,7 +8,6 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -98,17 +97,6 @@ public class MissingRawDataRegistry {
      */
     public void recordMissingPolymarket(long tStart) {
         missingPolymarketIntervals.add(tStart);
-    }
-
-    /**
-     * Bulk-records a collection of missing Polymarket 15m timestamps.
-     *
-     * @param tStarts collection of timestamps in epoch seconds
-     */
-    public void recordMissingPolymarketAll(Collection<Long> tStarts) {
-        if (tStarts != null) {
-            missingPolymarketIntervals.addAll(tStarts);
-        }
     }
 
     /**

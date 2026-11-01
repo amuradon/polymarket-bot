@@ -85,13 +85,4 @@ public class BacktestJsonExporter {
 
         return targetFile;
     }
-
-    /**
-     * Returns the default directory path where exported JSON reports are saved.
-     *
-     * @return output directory path string
-     */
-    public String getDefaultOutputDir() {
-        return defaultOutputDir;
-    }
 }

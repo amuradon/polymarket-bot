@@ -2,7 +2,6 @@ package cz.polymarket.bot.backtest;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import cz.polymarket.bot.backtest.data.BacktestJob;
-import cz.polymarket.bot.backtest.data.BacktestJobStatus;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
@@ -198,7 +197,7 @@ public class BacktestResource {
             )
     })
     public Response getJobStatus(
-            @Parameter(description = "UUID of the backtest job", required = true, example = "a1b2c3d4-...")
+            @Parameter(description = "UUID of the backtest job", required = true, examples = @org.eclipse.microprofile.openapi.annotations.media.ExampleObject(value = "a1b2c3d4-..."))
             @PathParam("jobId") String jobId
     ) {
         return jobManager.getJob(jobId)
@@ -239,13 +238,13 @@ public class BacktestResource {
      */
     @Schema(name = "BacktestStatusResponse", description = "Readiness status of the backtesting engine.")
     public record BacktestStatusResponse(
-            @Schema(description = "Engine status", example = "READY")
+            @Schema(description = "Engine status", examples = "READY")
             String status,
 
-            @Schema(description = "Submodule name", example = "backtest")
+            @Schema(description = "Submodule name", examples = "backtest")
             String module,
 
-            @Schema(description = "Simulation engine description", example = "In-Memory Simulation Engine")
+            @Schema(description = "Simulation engine description", examples = "In-Memory Simulation Engine")
             String engine
     ) {}
 
@@ -260,19 +259,19 @@ public class BacktestResource {
      */
     @Schema(name = "BacktestJobSubmitResponse", description = "Response returned when a backtest simulation job is accepted.")
     public record BacktestJobSubmitResponse(
-            @Schema(description = "Unique identifier of the backtest job", example = "a1b2c3d4-...")
+            @Schema(description = "Unique identifier of the backtest job", examples = "a1b2c3d4-...")
             String jobId,
 
-            @Schema(description = "Initial lifecycle status of the job", example = "QUEUED")
+            @Schema(description = "Initial lifecycle status of the job", examples = "QUEUED")
             String status,
 
-            @Schema(description = "Trading strategy to evaluate", example = "TWAPArbitrageStrategy")
+            @Schema(description = "Trading strategy to evaluate", examples = "TWAPArbitrageStrategy")
             String strategyName,
 
-            @Schema(description = "Cryptocurrency symbol evaluated", example = "BTCUSDT")
+            @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
             String symbol,
 
-            @Schema(description = "Timestamp when the job was accepted", example = "2026-10-09T12:00:00Z")
+            @Schema(description = "Timestamp when the job was accepted", examples = "2026-10-09T12:00:00Z")
             String createdAt
     ) {}
 
@@ -295,39 +294,39 @@ public class BacktestResource {
     @Schema(name = "BacktestJobStatusResponse", description = "Current progress, lifecycle status, and results of a backtest job.")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record BacktestJobStatusResponse(
-            @Schema(description = "Unique identifier of the backtest job", example = "a1b2c3d4-...")
+            @Schema(description = "Unique identifier of the backtest job", examples = "a1b2c3d4-...")
             String jobId,
 
-            @Schema(description = "Lifecycle status: QUEUED, IN_PROGRESS, COMPLETED, or FAILED", example = "COMPLETED")
+            @Schema(description = "Lifecycle status: QUEUED, IN_PROGRESS, COMPLETED, or FAILED", examples = "COMPLETED")
             String status,
 
-            @Schema(description = "Strategy evaluated", example = "TWAPArbitrageStrategy")
+            @Schema(description = "Strategy evaluated", examples = "TWAPArbitrageStrategy")
             String strategyName,
 
-            @Schema(description = "Cryptocurrency symbol evaluated", example = "BTCUSDT")
+            @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
             String symbol,
 
             @Schema(description = "File system path to the exported JSON results file when completed",
-                    example = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
             String resultFilePath,
 
             @Schema(description = "File system path to the exported JSON results file (alias)",
-                    example = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
             String jsonFilePath,
 
-            @Schema(description = "Error description if execution failed", example = "No market rows available")
+            @Schema(description = "Error description if execution failed", examples = "No market rows available")
             String error,
 
-            @Schema(description = "Timestamp when the job was submitted", example = "2026-10-09T12:00:00Z")
+            @Schema(description = "Timestamp when the job was submitted", examples = "2026-10-09T12:00:00Z")
             String createdAt,
 
-            @Schema(description = "Timestamp when the job finished execution", example = "2026-10-09T12:01:00Z")
+            @Schema(description = "Timestamp when the job finished execution", examples = "2026-10-09T12:01:00Z")
             String completedAt,
 
-            @Schema(description = "Total number of market intervals evaluated", example = "5100")
+            @Schema(description = "Total number of market intervals evaluated", examples = "5100")
             Integer totalMarkets,
 
-            @Schema(description = "Total number of executed trades", example = "2801")
+            @Schema(description = "Total number of executed trades", examples = "2801")
             Integer tradeCount,
 
             @Schema(description = "Summary performance metrics")

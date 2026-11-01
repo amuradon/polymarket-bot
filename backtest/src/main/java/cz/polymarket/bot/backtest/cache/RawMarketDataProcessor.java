@@ -8,9 +8,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,7 +18,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -42,7 +39,6 @@ public class RawMarketDataProcessor {
 
     private static final Logger LOG = Logger.getLogger(RawMarketDataProcessor.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     static {
         try {
@@ -77,20 +73,6 @@ public class RawMarketDataProcessor {
         this.missingRegistry = missingRegistry;
         this.binanceBaseDir = Path.of(binanceBaseDirStr);
         this.polymarketBaseDir = Path.of(polymarketBaseDirStr);
-    }
-
-    /**
-     * Returns the underlying binary cache service.
-     */
-    public BinaryMarketCacheService getCacheService() {
-        return cacheService;
-    }
-
-    /**
-     * Returns the missing raw data registry.
-     */
-    public MissingRawDataRegistry getMissingRegistry() {
-        return missingRegistry;
     }
 
     /**
@@ -168,28 +150,6 @@ public class RawMarketDataProcessor {
             return alt;
         }
         return direct;
-    }
-
-    /**
-     * Checks for presence of raw Polymarket and OrderBook files and registers any missing entries.
-     *
-     * @param symbol asset symbol
-     * @param tStart interval start timestamp in seconds
-     * @param dateHour formatted date-hour string
-     */
-    public void checkAndRecordMissingRawFiles(String symbol, long tStart, String dateHour) {
-        Path pmFile = getPolymarketDir(symbol).resolve(tStart + ".parquet");
-        if (!Files.exists(pmFile)) {
-            missingRegistry.recordMissingPolymarket(tStart);
-        }
-
-        if (dateHour != null && !dateHour.isBlank()) {
-            String filename = symbol.toUpperCase() + "-orderbook-" + dateHour + ".parquet";
-            Path obFile = getBinanceFuturesOrderBookDir(symbol).resolve(filename);
-            if (!Files.exists(obFile)) {
-                missingRegistry.recordMissingFuturesOrderBook(dateHour);
-            }
-        }
     }
 
     /**

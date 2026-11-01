@@ -1,13 +1,11 @@
 package cz.polymarket.bot.backtest.cache;
 
 import cz.polymarket.bot.backtest.data.BacktestMarketRow;
-import cz.polymarket.bot.backtest.data.ParquetDatasetLoader;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -19,7 +17,6 @@ class BacktestDataCacheServiceTest {
     Path tempDir;
 
     private BinaryMarketCacheService cacheService;
-    private MissingRawDataRegistry missingRegistry;
     private RawMarketDataProcessor processor;
     private BacktestDataCacheService dataCacheService;
 
@@ -30,9 +27,9 @@ class BacktestDataCacheServiceTest {
         Path polymarketDir = tempDir.resolve("Polymarket");
 
         cacheService = new BinaryMarketCacheService(cacheDir.toString());
-        missingRegistry = new MissingRawDataRegistry("BTCUSDT");
+        MissingRawDataRegistry missingRegistry = new MissingRawDataRegistry("BTCUSDT");
         processor = new RawMarketDataProcessor(cacheService, missingRegistry, binanceDir.toString(), polymarketDir.toString());
-        dataCacheService = new BacktestDataCacheService(cacheService, processor, missingRegistry);
+        dataCacheService = new BacktestDataCacheService(cacheService, processor);
     }
 
     @Test

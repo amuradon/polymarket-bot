@@ -79,7 +79,6 @@ Navigate to `http://localhost:8082/btc-usd`.
 ./mvnw quarkus:dev -pl backtest
 ```
 - Status: `http://localhost:8083/api/status`
-- Trigger Binance historical data download: `POST http://localhost:8083/api/data/download/binance`
 - Trigger asynchronous backtest simulation: `POST http://localhost:8083/api/backtest/run`
 
 #### 4. Data Collector Application (`data` - Port 8084)

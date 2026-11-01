@@ -89,26 +89,6 @@ public class BacktestEngine {
     }
 
     /**
-     * Convenience constructor omitting optional raw data processor.
-     *
-     * @param dataCacheService high-level market data caching service
-     * @param strategyRegistry registry resolving requested strategies
-     * @param metricsCalculator performance metrics calculation service
-     * @param jsonExporter exporter serializing backtest results to disk
-     * @param defaultOutputDir default destination directory for output JSON artifacts
-     * @param defaultCapital default initial trading balance in USD
-     */
-    public BacktestEngine(
-            BacktestDataCacheService dataCacheService,
-            StrategyRegistry strategyRegistry,
-            PerformanceMetricsCalculator metricsCalculator,
-            BacktestJsonExporter jsonExporter,
-            String defaultOutputDir,
-            double defaultCapital) {
-        this(dataCacheService, null, strategyRegistry, metricsCalculator, jsonExporter, defaultOutputDir, defaultCapital);
-    }
-
-    /**
      * Executes an event-driven backtest simulation for a specified strategy over historical market data.
      * Emulates live streaming WebSocket events, on-the-fly dynamic indicators, realistic order matching
      * with execution latency, and exports final metrics and trade log to JSON.
@@ -165,8 +145,8 @@ public class BacktestEngine {
             TradeDirection actualOutcome = "UP".equalsIgnoreCase(row.actualOutcome()) ? TradeDirection.UP : TradeDirection.DOWN;
 
             orderBook.clear();
-            context.resetForCandle(row, strategy);
-            indicatorEngine.resetActiveCandle(tStart * 1000L, row.sOpen());
+            context.resetForCandle();
+            indicatorEngine.resetActiveCandle(row.sOpen());
             for (IndicatorType type : strategy.getRequiredIndicators()) {
                 double val = indicatorEngine.getIndicatorValue(type);
                 if (!Double.isNaN(val)) {

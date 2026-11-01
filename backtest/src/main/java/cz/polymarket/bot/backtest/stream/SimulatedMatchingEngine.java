@@ -199,25 +199,4 @@ public class SimulatedMatchingEngine {
     public boolean hasActiveTrade() {
         return hasActiveTrade;
     }
-
-    /**
-     * Returns the execution entry price of the active position.
-     */
-    public double getEntryPrice() {
-        return entryPrice;
-    }
-
-    /**
-     * Returns the quantity of shares in the active position.
-     */
-    public double getShares() {
-        return shares;
-    }
-
-    /**
-     * Returns the directional side of the active position.
-     */
-    public TradeDirection getSide() {
-        return side;
-    }
 }

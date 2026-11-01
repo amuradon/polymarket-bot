@@ -384,7 +384,7 @@ public class BinaryMarketCacheService {
             if (magic != MKT_MAGIC) {
                 throw new IllegalStateException("Invalid market binary cache magic in " + file.getAbsolutePath() + ": 0x" + Integer.toHexString(magic));
             }
-            int recordCount = buffer.getInt();
+            buffer.getInt(); // record count header
 
             while (buffer.remaining() >= MARKET_RECORD_SIZE) {
                 long tStart = buffer.getLong();
