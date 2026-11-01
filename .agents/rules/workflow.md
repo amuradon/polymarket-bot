@@ -4,15 +4,6 @@ This document defines the strict, non-negotiable workflow and development protoc
 
 ---
 
-## 1. General Mandates (Obecné)
-
-### Mandatory GitHub Ticket Number
-- **Ticket Required**: For every task, planning session, and commit, a GitHub ticket number is mandatory.
-- **Solicitation Protocol**: If the user has not explicitly provided a GitHub ticket number in their prompt, the agent **MUST** request it before proceeding with any implementation or file modifications.
-- **Commit Association**: The ticket number must be used across all commits (including incremental fixes) belonging to that task.
-
----
-
 ## 2. Planning Protocol (Plánování)
 
 - **Presentation Before Modification**: Before executing any source code changes always use /plan command and present native Implementation Plan artifact to the user for the review
@@ -94,12 +85,3 @@ This document defines the strict, non-negotiable workflow and development protoc
 - **Local Git Commit**: Stage all relevant modified, created, or deleted files cleanly and execute `git commit` to the local Git repository after completing the task and verifying that all tests pass.
 - **NEVER Perform Git Push**: The agent **MUST NEVER** execute `git push` under any circumstances.
 - **Manual Push by User**: Pushing commits to the remote repository is strictly reserved for the user after their review. Once the commit is created, inform the user that changes are committed locally and ready for their review and push.
-
-### 5.2 Mandatory GitHub Ticket Number & Commit Message Format
-- **Mandatory GitHub Ticket**: Every commit message **MUST** explicitly start with the GitHub ticket number.
-- **Format**:
-  ```
-  Resolves #<ticket-id> <Clear, imperative description of the changes>
-  ```
-  *Example*: `Resolves #38 Implement Kraken fee schedule parser and unit tests`
-- **Scope & Continuity**: Use the identical ticket number for every subsequent commit, including bug fixes and review refinements, in the same conversation until a new ticket number is given.
