@@ -76,6 +76,20 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     }
 
     /**
+     * Declares the external market data streams required by this strategy
+     * (Binance Spot aggTrades and Binance Futures aggTrades).
+     *
+     * @return the set of required external stream types
+     */
+    @Override
+    public Set<ExternalStreamType> getRequiredExternalStreams() {
+        return Set.of(
+                ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
+                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
+        );
+    }
+
+    /**
      * Explicitly sets the current basis spread in basis points (used in testing or calibration).
      *
      * @param basisBps basis spread in basis points
@@ -201,6 +215,65 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
             currentTimestampSec = update.point().time();
             if (update.point().medianPrice() != null) {
                 currentSpotPrice = update.point().medianPrice().doubleValue();
+            }
+        }
+    }
+
+    /**
+     * Updates the current spot/oracle reference price and clock from the {@code polymarket/price_crypto} stream.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol crypto symbol (e.g. {@code "btcusd"})
+     * @param source price feed source (e.g. {@code "chainlink"})
+     * @param price spot/oracle price in USD
+     * @param priceTimestampMs source oracle timestamp in milliseconds UTC
+     */
+    @Override
+    public void onPolymarketCryptoPrice(
+            long timestampMs,
+            String symbol,
+            String source,
+            double price,
+            long priceTimestampMs) {
+        if (price > 0.0) {
+            this.currentSpotPrice = price;
+        }
+        if (timestampMs > 0) {
+            long sec = timestampMs / 1000L;
+            if (activeCandleStart.get() <= 0 || sec >= activeCandleStart.get()) {
+                this.currentTimestampSec = sec;
+            }
+        }
+    }
+
+    /**
+     * Updates the 60-second Chainlink TWAP reference price and clock from the {@code polymarket/price_crypto_twap_60s} stream.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol crypto symbol (e.g. {@code "btcusd"})
+     * @param source TWAP feed source (e.g. {@code "chainlink"})
+     * @param twapPrice 60-second time-weighted average price in USD
+     * @param windowSeconds TWAP rolling window length in seconds
+     * @param twapTimestampMs source oracle TWAP timestamp in milliseconds UTC
+     */
+    @Override
+    public void onPolymarketCryptoTwap60s(
+            long timestampMs,
+            String symbol,
+            String source,
+            double twapPrice,
+            int windowSeconds,
+            long twapTimestampMs) {
+        if (twapPrice > 0.0) {
+            this.currentTwap = twapPrice;
+            if (this.twapOpenPrice <= 0.0) {
+                this.twapOpenPrice = twapPrice;
+            }
+        }
+        if (timestampMs > 0) {
+            long sec = timestampMs / 1000L;
+            if (activeCandleStart.get() <= 0 || sec >= activeCandleStart.get()) {
+                this.currentTimestampSec = sec;
             }
         }
     }
@@ -627,6 +700,15 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
      */
     public double getCurrentBasisBps() {
         return currentBasisBps;
+    }
+
+    /**
+     * Returns the current 60s TWAP price.
+     *
+     * @return current TWAP price
+     */
+    public double getCurrentTwap() {
+        return currentTwap;
     }
 
     /**

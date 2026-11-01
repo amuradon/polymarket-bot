@@ -76,7 +76,8 @@ public class BacktestJobManager {
                     request.startDate(),
                     request.endDate(),
                     request.initialCapital(),
-                    request.outputDirectory()
+                    request.outputDirectory(),
+                    request.latencyFactor()
             );
             job.setResult(result);
             job.setCompletedAt(Instant.now());

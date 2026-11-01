@@ -160,6 +160,12 @@ public class BacktestResource {
                     .build();
         }
 
+        if (request.latencyFactor() != null && (request.latencyFactor().isNaN() || request.latencyFactor() < 0.0)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "latencyFactor must be non-negative"))
+                    .build();
+        }
+
         BacktestJob job = jobManager.submitJob(request);
 
         BacktestJobSubmitResponse response = new BacktestJobSubmitResponse(

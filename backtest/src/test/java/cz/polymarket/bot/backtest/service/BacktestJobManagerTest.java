@@ -52,7 +52,8 @@ class BacktestJobManagerTest {
                 "2026-08-01",
                 "2026-08-05",
                 10000.0,
-                "D:/Crypto/data/Polymarket/backtesting"
+                "D:/Crypto/data/Polymarket/backtesting",
+                1.5
         );
 
         BacktestResult mockResult = new BacktestResult(
@@ -71,7 +72,8 @@ class BacktestJobManagerTest {
                 eq("2026-08-01"),
                 eq("2026-08-05"),
                 eq(10000.0),
-                eq("D:/Crypto/data/Polymarket/backtesting")
+                eq("D:/Crypto/data/Polymarket/backtesting"),
+                eq(1.5)
         )).thenReturn(mockResult);
 
         BacktestJob job = jobManager.submitJob(request);
@@ -103,7 +105,7 @@ class BacktestJobManagerTest {
                 null
         );
 
-        when(backtestEngine.runBacktest(any(), any(), any(), any(), any(), any()))
+        when(backtestEngine.runBacktest(any(), any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalArgumentException("No market data rows found for symbol BTCUSDT"));
 
         BacktestJob job = jobManager.submitJob(request);

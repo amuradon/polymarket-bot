@@ -1,6 +1,6 @@
 package cz.polymarket.bot.backtest.engine;
 
-import cz.polymarket.bot.backtest.data.BacktestMarketRow;
+import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.cache.HourlyPriceCache;
@@ -74,7 +74,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
      * Returns the on-the-fly calculated indicator value.
      *
      * @param type indicator type
-     * @return current indicator value, or Double.NaN if not available
+     * @return current indicator value, or {@link Double#NaN} if not available
      */
     @Override
     public double getIndicatorValue(IndicatorType type) {
@@ -117,16 +117,16 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     /**
      * Finalizes and records any active trade at candle close / settlement.
      *
-     * @param row completed candle market row
+     * @param metadata completed candle market metadata
      * @param actualOutcome settled binary outcome direction
      * @param currentBalance account balance before settlement
      * @return generated TradeRecord, or null if no trade was active
      */
-    public TradeRecord finalizeTrade(BacktestMarketRow row, TradeDirection actualOutcome, double currentBalance) {
-        if (matchingEngine == null) {
+    public TradeRecord finalizeTrade(CollectorMarketMetadata metadata, TradeDirection actualOutcome, double currentBalance) {
+        if (matchingEngine == null || metadata == null) {
             return null;
         }
-        return matchingEngine.finalizeTrade(row.tStart(), row.datetimeUtc(), actualOutcome, currentBalance);
+        return matchingEngine.finalizeTrade(metadata.tStart(), metadata.datetimeUtc(), actualOutcome, currentBalance);
     }
 
     /**
@@ -141,14 +141,20 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     /**
      * Computes the estimated directional probability for UP used in Brier score calibration.
      *
-     * @param row current market row
+     * @param metadata current market metadata
      * @return estimated model probability for UP
      */
-    public double getEstimatedModelProbUp(BacktestMarketRow row) {
+    public double getEstimatedModelProbUp(CollectorMarketMetadata metadata) {
+        double openRef = (metadata != null && !Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0)
+                ? metadata.twapOpen()
+                : (indicatorEngine != null ? indicatorEngine.getTwapOpenPrice() : 0.0);
         double spotPrice = (indicatorEngine != null && indicatorEngine.getCurrentSpotPrice() > 0.0)
                 ? indicatorEngine.getCurrentSpotPrice()
-                : row.sOpen();
-        double distTwap = spotPrice - row.twapOpen();
+                : openRef;
+        if (openRef <= 0.0 || spotPrice <= 0.0) {
+            return 0.50;
+        }
+        double distTwap = spotPrice - openRef;
         if (distTwap > 80.0) {
             return 0.94;
         } else if (distTwap < -80.0) {

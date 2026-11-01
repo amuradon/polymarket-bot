@@ -408,4 +408,20 @@ class TWAPArbitrageStrategyTest {
         assertThat(strategy.getActiveCandleStart()).isEqualTo(start15m);
         assertThat(strategy.getTwapOpenPrice()).isEqualTo(60000.0);
     }
+
+    @Test
+    @DisplayName("Should declare required external streams and process Polymarket crypto price and 60s TWAP streams")
+    void shouldDeclareExternalStreamsAndProcessPolymarketCryptoStreams() {
+        assertThat(strategy.getRequiredExternalStreams()).containsExactlyInAnyOrder(
+                ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
+                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
+        );
+
+        strategy.onPolymarketCryptoTwap60s(10000000L, "btcusd", "chainlink", 60125.5, 60, 9999990L);
+        assertThat(strategy.getTwapOpenPrice()).isEqualTo(60125.5);
+        assertThat(strategy.getCurrentTwap()).isEqualTo(60125.5);
+
+        strategy.onPolymarketCryptoPrice(10060000L, "btcusd", "chainlink", 60250.0, 10059990L);
+        assertThat(strategy.getCurrentSpotPrice()).isEqualTo(60250.0);
+    }
 }

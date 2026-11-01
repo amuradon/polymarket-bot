@@ -1,6 +1,8 @@
 package cz.polymarket.bot.backtest.stream;
 
+import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 import org.junit.jupiter.api.DisplayName;
@@ -16,55 +18,62 @@ import static org.assertj.core.api.Assertions.within;
 class SimulatedMatchingEngineTest {
 
     @Test
-    @DisplayName("Should simulate order submission with 50ms latency delay and execution report")
-    void shouldSimulateOrderWithLatency() {
+    @DisplayName("Should schedule pending order with time-varying latency scaled by latencyFactor and match against delayed book state")
+    void shouldSimulateOrderWithTimeVaryingLatencyAndLatencyFactor() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        book.applyDelta("SELL", 0.52, 1000.0, 1000L); // ask at 0.52
+        book.applyDelta("SELL", 0.50, 1000.0, 1000L);
+        book.setLastObservedOneWayLatencyMs(12L); // 12ms observed latency
 
-        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(book, 50L);
+        // Configure latencyFactor = 2.0 -> expected execution delay = 24ms
+        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(book, 2.0);
         List<BacktestEvent> scheduled = new ArrayList<>();
         engine.setEventScheduler(scheduled::add);
 
-        // Submit buy order at t = 1000ms
         OrderCommand buyCmd = new OrderCommand(
                 "order-1",
                 "mkt-1",
                 "BTC-UP",
-                cz.polymarket.bot.domain.Timeframe.FIFTEEN_MINUTES,
+                Timeframe.FIFTEEN_MINUTES,
                 "BUY",
-                BigDecimal.valueOf(0.52),
+                BigDecimal.valueOf(0.55),
                 BigDecimal.valueOf(100.0)
         );
         engine.submitOrder(buyCmd, 1000L);
 
-        // Verify ExecutionReportEvent scheduled at t = 1050ms (1000 + 50)
         assertThat(scheduled).hasSize(1);
         BacktestEvent event = scheduled.get(0);
-        assertThat(event.timestampMs()).isEqualTo(1050L);
-        assertThat(event).isInstanceOf(BacktestEvent.ExecutionReportEvent.class);
+        assertThat(event.timestampMs()).isEqualTo(1024L);
+        assertThat(event).isInstanceOf(BacktestEvent.PendingOrderExecutionEvent.class);
 
-        BacktestEvent.ExecutionReportEvent execEvent = (BacktestEvent.ExecutionReportEvent) event;
-        assertThat(execEvent.report().status()).isEqualTo("FILLED");
-        assertThat(execEvent.report().executedPrice().doubleValue()).isEqualTo(0.52);
-        assertThat(execEvent.report().executedSize().doubleValue()).isEqualTo(100.0);
+        // Simulate the book moving at t = 1010ms (before order reaches exchange at 1024ms):
+        // 0.50 ask disappears, new best ask is 0.52
+        book.applyDelta("SELL", 0.50, 0.0, 1010L);
+        book.applyDelta("SELL", 0.52, 1000.0, 1010L);
+
+        // Now execute pending order at t = 1024ms
+        ExecutionReport report = engine.executePendingOrder((BacktestEvent.PendingOrderExecutionEvent) event);
+        assertThat(report).isNotNull();
+        assertThat(report.status()).isEqualTo("FILLED");
+        // Must fill at 0.52 (the book price at 1024ms), NOT the stale 0.50 from 1000ms!
+        assertThat(report.executedPrice().doubleValue()).isCloseTo(0.52, within(0.0001));
+        assertThat(report.executedSize().doubleValue()).isEqualTo(100.0);
         assertThat(engine.hasActiveTrade()).isTrue();
 
-        // Finalize trade at candle close with winning outcome
         TradeRecord trade = engine.finalizeTrade(1000L, "2026-08-12T00:00:00Z", TradeDirection.UP, 10000.0);
         assertThat(trade).isNotNull();
         assertThat(trade.isWin()).isTrue();
+        assertThat(trade.entryPrice()).isCloseTo(0.52, within(0.0001));
         assertThat(trade.exitPrice()).isEqualTo(1.0);
-        // Payout = 100 * 1.0 = 100; cost = 100 * 0.52 = 52; fee = 100 * 0.07 * 0.52 * 0.48 ~= 1.7472
-        // Net pnl = 100 - 52 - 1.7472 = 46.2528
         assertThat(trade.netPnl()).isCloseTo(46.25, within(0.1));
         assertThat(trade.balanceAfterTrade()).isCloseTo(10046.25, within(0.1));
     }
 
     @Test
-    @DisplayName("Should reject order when order book has no liquidity")
+    @DisplayName("Should reject order when order book has no liquidity at execution timestamp")
     void shouldRejectOrderWhenOrderBookEmpty() {
         PolymarketOrderBook emptyBook = new PolymarketOrderBook();
-        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(emptyBook, 50L);
+        emptyBook.setLastObservedOneWayLatencyMs(10L);
+        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(emptyBook, 1.0);
         List<BacktestEvent> scheduled = new ArrayList<>();
         engine.setEventScheduler(scheduled::add);
 
@@ -72,16 +81,18 @@ class SimulatedMatchingEngineTest {
                 "order-empty",
                 "mkt-1",
                 "BTC-UP",
-                cz.polymarket.bot.domain.Timeframe.FIFTEEN_MINUTES,
+                Timeframe.FIFTEEN_MINUTES,
                 "BUY",
                 BigDecimal.valueOf(0.52),
                 BigDecimal.valueOf(100.0)
         );
         engine.submitOrder(buyCmd, 1000L);
 
-        assertThat(engine.hasActiveTrade()).isFalse();
         assertThat(scheduled).hasSize(1);
-        BacktestEvent.ExecutionReportEvent execEvent = (BacktestEvent.ExecutionReportEvent) scheduled.get(0);
-        assertThat(execEvent.report().status()).isEqualTo("REJECTED");
+        BacktestEvent.PendingOrderExecutionEvent pending = (BacktestEvent.PendingOrderExecutionEvent) scheduled.get(0);
+        ExecutionReport report = engine.executePendingOrder(pending);
+
+        assertThat(engine.hasActiveTrade()).isFalse();
+        assertThat(report.status()).isEqualTo("REJECTED");
     }
 }

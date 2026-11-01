@@ -22,11 +22,25 @@ public interface TradingStrategy {
 
     /**
      * Declares the set of technical indicators required by this strategy.
-     * The engine dynamically computes and updates these indicators on-the-fly and from cache.
+     * The engine dynamically computes and updates these indicators on-the-fly.
      *
      * @return the set of required indicator types
      */
     default Set<IndicatorType> getRequiredIndicators() {
+        return Set.of();
+    }
+
+    /**
+     * Declares the set of external (Binance, Deribit) market data streams required by this strategy.
+     * <p>
+     * If a strategy returns an empty set, the backtesting engine skips loading all external
+     * Parquet files and skips computing indicators derived from external streams, streaming
+     * exclusively Polymarket CLOB, {@code polymarket/price_crypto}, and
+     * {@code polymarket/price_crypto_twap_60s} data.
+     *
+     * @return the set of required external stream types (empty by default)
+     */
+    default Set<ExternalStreamType> getRequiredExternalStreams() {
         return Set.of();
     }
 
@@ -50,11 +64,47 @@ public interface TradingStrategy {
     void init(StrategyContext context);
 
     /**
-     * Callback triggered when a new aggregate TWAP / reference price update arrives.
+     * Optional callback triggered when a new aggregate TWAP / reference price update arrives.
      *
      * @param update the latest TWAP update
      */
-    void onTwapUpdate(TwapUpdate update);
+    default void onTwapUpdate(TwapUpdate update) {}
+
+    /**
+     * Optional callback triggered when a real-time crypto spot/oracle price update arrives
+     * from the {@code polymarket/price_crypto} stream.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol crypto symbol (e.g. {@code "btcusd"})
+     * @param source price feed source (e.g. {@code "chainlink"})
+     * @param price spot/oracle price in USD
+     * @param priceTimestampMs source oracle timestamp in milliseconds UTC
+     */
+    default void onPolymarketCryptoPrice(
+            long timestampMs,
+            String symbol,
+            String source,
+            double price,
+            long priceTimestampMs) {}
+
+    /**
+     * Optional callback triggered when a real-time 60-second TWAP update arrives
+     * from the {@code polymarket/price_crypto_twap_60s} stream.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol crypto symbol (e.g. {@code "btcusd"})
+     * @param source TWAP feed source (e.g. {@code "chainlink"})
+     * @param twapPrice 60-second time-weighted average price in USD
+     * @param windowSeconds TWAP rolling window length in seconds (typically 60)
+     * @param twapTimestampMs source oracle TWAP timestamp in milliseconds UTC
+     */
+    default void onPolymarketCryptoTwap60s(
+            long timestampMs,
+            String symbol,
+            String source,
+            double twapPrice,
+            int windowSeconds,
+            long twapTimestampMs) {}
 
     /**
      * Callback triggered upon execution feedback (fills, rejections, cancellations).
@@ -87,7 +137,7 @@ public interface TradingStrategy {
     /**
      * Optional callback triggered when an aggressive spot trade occurs on Binance.
      *
-     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price execution price
      * @param quantity trade volume
      * @param isBuyerMaker true if maker was a buyer (aggressive sell), false if aggressive buy
@@ -97,7 +147,7 @@ public interface TradingStrategy {
     /**
      * Optional callback triggered when an aggressive futures trade occurs on Binance.
      *
-     * @param timestampMs transaction timestamp in milliseconds UTC
+     * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price execution price
      * @param quantity trade volume
      * @param isBuyerMaker true if maker was a buyer (aggressive sell), false if aggressive buy
@@ -107,7 +157,7 @@ public interface TradingStrategy {
     /**
      * Optional callback triggered when Binance Futures order book depth is updated.
      *
-     * @param timestampMs update timestamp in milliseconds UTC
+     * @param timestampMs update receipt timestamp in milliseconds UTC
      * @param bestBid best bid price
      * @param bestAsk best ask price
      * @param depthBids total depth of top bid levels
@@ -115,6 +165,42 @@ public interface TradingStrategy {
      * @param obi order book imbalance (bids - asks) / (bids + asks)
      */
     default void onBinanceFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {}
+
+    /**
+     * Optional callback triggered when a liquidation force-order occurs on Binance Futures.
+     *
+     * @param timestampMs event receipt timestamp in milliseconds UTC
+     * @param side liquidation order side ({@code "BUY"} or {@code "SELL"})
+     * @param price limit price of the force order
+     * @param averagePrice average fill price of the force order
+     * @param quantity total liquidated quantity
+     */
+    default void onBinanceFuturesForceOrder(
+            long timestampMs,
+            String side,
+            double price,
+            double averagePrice,
+            double quantity) {}
+
+    /**
+     * Optional callback triggered when a perpetual futures trade occurs on Deribit.
+     *
+     * @param timestampMs event receipt timestamp in milliseconds UTC
+     * @param instrumentName Deribit instrument name (e.g. {@code "BTC-PERPETUAL"})
+     * @param direction trade direction ({@code "buy"} or {@code "sell"})
+     * @param price trade execution price
+     * @param amount trade amount in USD/contracts
+     * @param markPrice current Deribit mark price
+     * @param indexPrice current Deribit index price
+     */
+    default void onDeribitFuturesTrade(
+            long timestampMs,
+            String instrumentName,
+            String direction,
+            double price,
+            double amount,
+            double markPrice,
+            double indexPrice) {}
 
     /**
      * Optional callback triggered when a technical indicator value is updated.

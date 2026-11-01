@@ -9,14 +9,16 @@ import java.math.BigDecimal;
 import java.util.function.Consumer;
 
 /**
- * Matching engine simulating realistic order placement, network/processing latency (e.g. 50ms),
- * order book depth consumption, crypto taker fees, and contract settlements.
+ * Matching engine simulating realistic order placement, time-varying network/exchange latency
+ * derived from captured Polymarket timestamps ({@code delayMs = round(observedOneWayLatencyMs * latencyFactor)}),
+ * delayed order book depth consumption at execution time, crypto taker fees, and contract settlements.
  */
 public class SimulatedMatchingEngine {
 
     private final PolymarketOrderBook orderBook;
-    private final long latencyMs;
+    private final double latencyFactor;
     private Consumer<BacktestEvent> eventScheduler;
+    private long orderSequence = 0L;
 
     private boolean hasActiveTrade = false;
     private TradeDirection side = TradeDirection.NO_TRADE;
@@ -34,21 +36,24 @@ public class SimulatedMatchingEngine {
     private double exitFee = 0.0;
 
     /**
-     * Constructs the simulated matching engine.
+     * Constructs the simulated matching engine with a configurable latency scaling factor.
      *
      * @param orderBook reconstructed Polymarket L2 order book
-     * @param latencyMs simulated network and execution latency in milliseconds (e.g. 50ms)
+     * @param latencyFactor multiplier applied to the real-time observed Polymarket latency (default {@code 1.0})
      */
-    public SimulatedMatchingEngine(PolymarketOrderBook orderBook, long latencyMs) {
+    public SimulatedMatchingEngine(PolymarketOrderBook orderBook, double latencyFactor) {
         if (orderBook == null) {
             throw new IllegalArgumentException("orderBook cannot be null");
         }
+        if (Double.isNaN(latencyFactor) || latencyFactor < 0.0) {
+            throw new IllegalArgumentException("latencyFactor must be non-negative");
+        }
         this.orderBook = orderBook;
-        this.latencyMs = Math.max(0L, latencyMs);
+        this.latencyFactor = latencyFactor;
     }
 
     /**
-     * Registers the event scheduler consumer to dispatch delayed execution reports.
+     * Registers the event scheduler consumer to dispatch delayed order executions and execution reports.
      *
      * @param eventScheduler consumer scheduling future BacktestEvents
      */
@@ -76,36 +81,67 @@ public class SimulatedMatchingEngine {
     }
 
     /**
-     * Submits an order into the matching engine.
-     * With simulated latency, an ExecutionReportEvent is scheduled at (submitTimestampMs + latencyMs).
+     * Submits an order into the matching engine at {@code submitTimestampMs}.
+     * <p>
+     * Computes the time-varying execution delay {@code delayMs = round(observedOneWayLatencyMs * latencyFactor)}
+     * and schedules a {@link BacktestEvent.PendingOrderExecutionEvent} at {@code submitTimestampMs + delayMs}
+     * so that any order book updates occurring during transit are applied before the order matches.
+     *
+     * @param command order command specifying token, direction, price, and size
+     * @param submitTimestampMs local EC2 timestamp when the strategy submitted the order
      */
     public void submitOrder(OrderCommand command, long submitTimestampMs) {
         if (command == null) {
             return;
         }
 
-        long fillTimestampMs = submitTimestampMs + latencyMs;
+        long observedOneWayMs = orderBook.getLastObservedOneWayLatencyMs();
+        long delayMs = Math.max(0L, Math.round(observedOneWayMs * latencyFactor));
+        long executionTimestampMs = submitTimestampMs + delayMs;
+
+        if (eventScheduler != null) {
+            eventScheduler.accept(new BacktestEvent.PendingOrderExecutionEvent(
+                    executionTimestampMs,
+                    command,
+                    delayMs,
+                    ++orderSequence
+            ));
+        } else {
+            executeOrderAtExchange(command, executionTimestampMs, delayMs);
+        }
+    }
+
+    /**
+     * Executes a scheduled pending order when it arrives at the exchange matching engine at {@code event.timestampMs()},
+     * sweeping the current order book depth at that exact delayed timestamp.
+     *
+     * @param event pending order execution event popped from the chronological event queue
+     * @return generated {@link ExecutionReport} to deliver to the strategy
+     */
+    public ExecutionReport executePendingOrder(BacktestEvent.PendingOrderExecutionEvent event) {
+        if (event == null || event.command() == null) {
+            return null;
+        }
+        return executeOrderAtExchange(event.command(), event.timestampMs(), event.delayMs());
+    }
+
+    private ExecutionReport executeOrderAtExchange(OrderCommand command, long fillTimestampMs, long delayMs) {
         boolean isBuy = "BUY".equalsIgnoreCase(command.side());
-        boolean isUpToken = !command.token().toLowerCase().contains("down");
+        boolean isUpToken = orderBook.isUpToken(command.token());
         double reqShares = command.size().doubleValue();
         double limitPrice = command.price().doubleValue();
 
-        // Simulate fill against order book at time of fill
         PolymarketOrderBook.FillResult fill = orderBook.simulateFill(isUpToken, isBuy, reqShares, limitPrice);
         if (fill.executedShares() <= 0.0) {
-            ExecutionReport rejectedReport = new ExecutionReport(
+            return new ExecutionReport(
                     command.clientOrderId(),
                     "sim-reject-" + command.clientOrderId(),
                     "REJECTED",
                     BigDecimal.ZERO,
                     BigDecimal.ZERO,
                     fillTimestampMs,
-                    "No liquidity available in order book"
+                    "No liquidity available in order book at execution timestamp (latency " + delayMs + "ms)"
             );
-            if (eventScheduler != null) {
-                eventScheduler.accept(new BacktestEvent.ExecutionReportEvent(fillTimestampMs, rejectedReport));
-            }
-            return;
         }
 
         if (isBuy) {
@@ -119,38 +155,30 @@ public class SimulatedMatchingEngine {
             this.modelProbability = Math.min(0.95, this.entryPrice + 0.10);
             this.edge = Math.max(0.0, this.modelProbability - this.marketPrice);
 
-            ExecutionReport report = new ExecutionReport(
+            return new ExecutionReport(
                     command.clientOrderId(),
                     "sim-fill-" + command.clientOrderId(),
                     "FILLED",
                     BigDecimal.valueOf(fill.avgPrice()),
                     BigDecimal.valueOf(fill.executedShares()),
                     fillTimestampMs,
-                    "Simulated fill with " + latencyMs + "ms latency"
+                    "Simulated fill with " + delayMs + "ms time-varying latency"
             );
-
-            if (eventScheduler != null) {
-                eventScheduler.accept(new BacktestEvent.ExecutionReportEvent(fillTimestampMs, report));
-            }
         } else {
             this.exitExecuted = true;
             this.exitPrice = fill.avgPrice();
             this.exitFee = fill.fee();
             this.exitReason = fill.avgPrice() >= 0.70 ? "Take Profit (0.70)" : "Trailing Stop (+0.05)";
 
-            ExecutionReport report = new ExecutionReport(
+            return new ExecutionReport(
                     command.clientOrderId(),
                     "sim-exit-" + command.clientOrderId(),
                     "FILLED",
                     BigDecimal.valueOf(fill.avgPrice()),
                     BigDecimal.valueOf(fill.executedShares()),
                     fillTimestampMs,
-                    "Simulated exit fill with " + latencyMs + "ms latency"
+                    "Simulated exit fill with " + delayMs + "ms time-varying latency"
             );
-
-            if (eventScheduler != null) {
-                eventScheduler.accept(new BacktestEvent.ExecutionReportEvent(fillTimestampMs, report));
-            }
         }
     }
 
@@ -210,6 +238,8 @@ public class SimulatedMatchingEngine {
 
     /**
      * Checks if the matching engine currently holds an active trade.
+     *
+     * @return true if holding an active position
      */
     public boolean hasActiveTrade() {
         return hasActiveTrade;

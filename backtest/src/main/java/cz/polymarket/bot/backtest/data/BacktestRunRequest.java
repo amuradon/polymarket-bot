@@ -11,6 +11,7 @@ import org.eclipse.microprofile.openapi.annotations.media.Schema;
  * @param endDate optional end date filter in ISO format (yyyy-MM-dd)
  * @param initialCapital optional initial starting capital in USD (defaults to 10000.0)
  * @param outputDirectory optional directory path where exported JSON reports are saved
+ * @param latencyFactor optional multiplier for simulated order execution latency (defaults to 1.0)
  */
 @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
 public record BacktestRunRequest(
@@ -30,5 +31,28 @@ public record BacktestRunRequest(
         Double initialCapital,
 
         @Schema(description = "Optional directory to store exported JSON results", examples = "D:/Crypto/data/Polymarket/backtesting")
-        String outputDirectory
-) {}
+        String outputDirectory,
+
+        @Schema(description = "Optional latency scaling factor (default 1.0)", examples = "1.0")
+        Double latencyFactor
+) {
+    /**
+     * Convenience constructor defaulting {@code latencyFactor} to {@code null} (uses engine default 1.0).
+     *
+     * @param strategyName mandatory name of the registered trading strategy
+     * @param symbol optional cryptocurrency symbol
+     * @param startDate optional start date filter (yyyy-MM-dd)
+     * @param endDate optional end date filter (yyyy-MM-dd)
+     * @param initialCapital optional initial capital in USD
+     * @param outputDirectory optional output directory path
+     */
+    public BacktestRunRequest(
+            String strategyName,
+            String symbol,
+            String startDate,
+            String endDate,
+            Double initialCapital,
+            String outputDirectory) {
+        this(strategyName, symbol, startDate, endDate, initialCapital, outputDirectory, null);
+    }
+}
