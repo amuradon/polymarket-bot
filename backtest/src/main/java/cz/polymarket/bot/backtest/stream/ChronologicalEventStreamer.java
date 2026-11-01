@@ -2,7 +2,6 @@ package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.cache.RawMarketDataProcessor;
 import cz.polymarket.bot.backtest.data.BacktestMarketRow;
-import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TwapPoint;
 import cz.polymarket.bot.domain.TwapUpdate;
@@ -21,7 +20,7 @@ import java.util.PriorityQueue;
 
 /**
  * Multiplexes and streams time-ordered market events across Polymarket, Binance Spot,
- * Binance Futures trades, and OrderBook depth.
+ * Binance Futures trades, and OrderBook depth directly from captured raw files.
  */
 public class ChronologicalEventStreamer {
 
@@ -66,17 +65,15 @@ public class ChronologicalEventStreamer {
     }
 
     /**
-     * Loads events for a specific 15-minute candle interval into the priority queue.
-     * Uses raw data files if available, otherwise synthesizes events from candle metrics.
+     * Loads events for a specific 15-minute candle interval into the priority queue
+     * strictly from raw data files without synthesizing missing events.
      *
      * @param candle candle interval market row
-     * @param preferRawFiles true to attempt loading granular raw Parquet events
      * @param rawProcessor processor providing raw directory locations and reading
      * @param symbol trading asset pair
      */
     public void loadCandleEvents(
             BacktestMarketRow candle,
-            boolean preferRawFiles,
             RawMarketDataProcessor rawProcessor,
             String symbol) {
 
@@ -109,170 +106,128 @@ public class ChronologicalEventStreamer {
                 tStart, tEnd, actualOutcome, candle.toMarketCandle()
         ));
 
-        boolean rawLoaded = false;
-        if (preferRawFiles && rawProcessor != null) {
-            rawLoaded = tryLoadFromRawFiles(candle, rawProcessor, symbol);
-        }
-
-        if (!rawLoaded) {
-            loadSynthesizedCandleEvents(candle);
+        if (rawProcessor != null) {
+            loadFromRawFiles(candle, rawProcessor, symbol);
         }
     }
 
     /**
-     * Attempts to read raw Level 2 Polymarket book snapshots, deltas, and trades from Parquet file.
+     * Reads raw Level 2 Polymarket book snapshots, deltas, trades, and Binance Spot/Futures trades from Parquet files.
+     * Missing files are not synthesized.
      *
      * @param candle market row
      * @param rawProcessor processor resolving directory paths
      * @param symbol asset symbol
-     * @return true if raw events were successfully read and scheduled
      */
-    private boolean tryLoadFromRawFiles(BacktestMarketRow candle, RawMarketDataProcessor rawProcessor, String symbol) {
+    private void loadFromRawFiles(BacktestMarketRow candle, RawMarketDataProcessor rawProcessor, String symbol) {
         long tStart = candle.tStart();
         long tEnd = candle.tEnd();
         long tStartMs = tStart * 1000L;
         long tEndMs = tEnd * 1000L;
+        String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
 
-        Path pmFile = rawProcessor.getPolymarketDir(symbol).resolve(tStart + ".parquet");
-        if (!Files.exists(pmFile)) {
-            return false;
-        }
+        // 1. Load Polymarket Parquet L2 events if file exists
+        Path pmFile = rawProcessor.getPolymarketDir(sym).resolve(tStart + ".parquet");
+        if (Files.exists(pmFile)) {
+            String normPath = pmFile.toAbsolutePath().toString().replace('\\', '/');
+            String query = "SELECT event_type, t, price, size, side, bids, asks FROM read_parquet('" + normPath + "') " +
+                    "WHERE t >= " + tStartMs + " AND t <= " + tEndMs + " ORDER BY t ASC";
 
-        int loadedCount = 0;
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(query)) {
 
-        // 1. Load Polymarket Parquet L2 events
-        String normPath = pmFile.toAbsolutePath().toString().replace('\\', '/');
-        String query = "SELECT event_type, t, price, size, side, bids, asks FROM read_parquet('" + normPath + "') " +
-                "WHERE t >= " + tStartMs + " AND t <= " + tEndMs + " ORDER BY t ASC";
+                while (rs.next()) {
+                    String et = rs.getString(1);
+                    long tMs = rs.getLong(2);
+                    double price = rs.getDouble(3);
+                    double size = rs.getDouble(4);
+                    String side = rs.getString(5);
+                    String bidsJson = rs.getString(6);
+                    String asksJson = rs.getString(7);
 
-        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(query)) {
-
-            while (rs.next()) {
-                String et = rs.getString(1);
-                long tMs = rs.getLong(2);
-                double price = rs.getDouble(3);
-                double size = rs.getDouble(4);
-                String side = rs.getString(5);
-                String bidsJson = rs.getString(6);
-                String asksJson = rs.getString(7);
-
-                scheduleEvent(new BacktestEvent.PolymarketL2UpdateEvent(
-                        tMs, et, price, size, side, bidsJson, asksJson
-                ));
-                loadedCount++;
+                    scheduleEvent(new BacktestEvent.PolymarketL2UpdateEvent(
+                            tMs, et, price, size, side, bidsJson, asksJson
+                    ));
+                }
+            } catch (SQLException e) {
+                LOG.warnf("Could not stream raw Polymarket events for %d: %s", tStart, e.getMessage());
             }
-        } catch (SQLException e) {
-            LOG.warnf("Could not stream raw Polymarket events for %d: %s", tStart, e.getMessage());
-            return false;
         }
 
-        // 2. Synthesize or stream Spot / Futures trade updates
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(tStartMs, candle.sOpen(), 1.0, false));
-        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(tStartMs, candle.fOpen(), 1.0, false));
+        // 2. Load raw Binance Spot trades if daily file exists
+        String dateStr = candle.dateStr();
+        if (dateStr != null && !dateStr.isBlank()) {
+            Path spotFile = rawProcessor.getBinanceSpotAggTradesDir(sym)
+                    .resolve(sym + "-aggTrades-" + dateStr + ".parquet");
+            if (Files.exists(spotFile)) {
+                double lastSpotPrice = Double.NaN;
+                String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
+                String spotQuery = "SELECT transact_time, price, quantity, is_buyer_maker FROM read_parquet('" + normSpot + "') " +
+                        "WHERE (CASE WHEN transact_time > 1000000000000000 THEN transact_time / 1000 ELSE transact_time END) >= " + tStartMs +
+                        " AND (CASE WHEN transact_time > 1000000000000000 THEN transact_time / 1000 ELSE transact_time END) <= " + tEndMs +
+                        " ORDER BY transact_time ASC";
 
-        scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                (tStart + 60L) * 1000L,
-                new TwapUpdate(
-                    Timeframe.FIFTEEN_MINUTES,
-                        tStart,
-                        tEnd,
-                        BigDecimal.valueOf(candle.twapOpen()),
-                        new TwapPoint(tStart + 60L, BigDecimal.valueOf(candle.sOpen()), BigDecimal.valueOf(candle.sOpen())),
-                        false
-                )
-        ));
+                try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                     Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery(spotQuery)) {
 
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent((tStart + 60L) * 1000L, candle.sOpen(), 1.0, false));
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(tEndMs, candle.sClose(), 1.0, false));
-        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(tEndMs, candle.fClose(), 1.0, false));
+                    while (rs.next()) {
+                        long tRaw = rs.getLong(1);
+                        long tMs = (tRaw > 1_000_000_000_000_000L) ? (tRaw / 1000L) : tRaw;
+                        double price = rs.getDouble(2);
+                        double qty = rs.getDouble(3);
+                        boolean isBuyerMaker = rs.getBoolean(4);
+                        lastSpotPrice = price;
 
-        return loadedCount > 0;
-    }
+                        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(tMs, price, qty, isBuyerMaker));
+                    }
+                } catch (SQLException e) {
+                    LOG.warnf("Could not stream raw Binance Spot events for %d: %s", tStart, e.getMessage());
+                }
 
-    /**
-     * Synthesizes representative intra-candle events (t=0s open, t=60s Phase 1, t=300s Phase 2, t=900s close)
-     * using metrics stored in the cached market row.
-     *
-     * @param candle candle market row
-     */
-    private void loadSynthesizedCandleEvents(BacktestMarketRow candle) {
-        long tStart = candle.tStart();
-        long tEnd = candle.tEnd();
-        long tStartMs = tStart * 1000L;
-        long tEndMs = tEnd * 1000L;
+                if (!Double.isNaN(candle.twapOpen()) && candle.twapOpen() > 0.0 && !Double.isNaN(lastSpotPrice)) {
+                    scheduleEvent(new BacktestEvent.TwapUpdateEvent(
+                            (tStart + 60L) * 1000L,
+                            new TwapUpdate(
+                                    Timeframe.FIFTEEN_MINUTES,
+                                    tStart,
+                                    tEnd,
+                                    BigDecimal.valueOf(candle.twapOpen()),
+                                    new TwapPoint(tStart + 60L, BigDecimal.valueOf(lastSpotPrice), BigDecimal.valueOf(lastSpotPrice)),
+                                    false
+                            )
+                    ));
+                }
+            }
 
-        // Spot & Futures trades at Open
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(tStartMs, candle.sOpen(), 1.0, false));
-        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(tStartMs, candle.fOpen(), 1.0, false));
+            // 3. Load raw Binance Futures trades if daily file exists
+            Path futFile = rawProcessor.getBinanceFuturesAggTradesDir(sym)
+                    .resolve(sym + "-aggTrades-" + dateStr + ".parquet");
+            if (Files.exists(futFile)) {
+                String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
+                String futQuery = "SELECT transact_time, price, quantity, is_buyer_maker FROM read_parquet('" + normFut + "') " +
+                        "WHERE (CASE WHEN transact_time > 1000000000000000 THEN transact_time / 1000 ELSE transact_time END) >= " + tStartMs +
+                        " AND (CASE WHEN transact_time > 1000000000000000 THEN transact_time / 1000 ELSE transact_time END) <= " + tEndMs +
+                        " ORDER BY transact_time ASC";
 
-        // Initial TWAP at Open
-        scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                tStartMs + 5L,
-                new TwapUpdate(
-                        Timeframe.FIFTEEN_MINUTES,
-                        tStart,
-                        tEnd,
-                        BigDecimal.valueOf(candle.twapOpen()),
-                        new TwapPoint(tStart, BigDecimal.valueOf(candle.sOpen()), BigDecimal.valueOf(candle.sOpen())),
-                        false
-                )
-        ));
+                try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                     Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery(futQuery)) {
 
-        // Initial Quote at t = 0
-        OrderBookQuote quote0 = candle.toOrderBookQuote(0);
-        scheduleEvent(new BacktestEvent.PolymarketQuoteEvent(tStartMs + 10L, quote0));
+                    while (rs.next()) {
+                        long tRaw = rs.getLong(1);
+                        long tMs = (tRaw > 1_000_000_000_000_000L) ? (tRaw / 1000L) : tRaw;
+                        double price = rs.getDouble(2);
+                        double qty = rs.getDouble(3);
+                        boolean isBuyerMaker = rs.getBoolean(4);
 
-        // Intermediate spot & futures price and delta at t = 60s
-        double spotPrice60 = (Math.abs(candle.sClose() - candle.twapOpen()) > 50.0) ? candle.sClose() : candle.sOpen();
-        double spotDelta = candle.sDeltaBtc();
-        boolean isSpotBuyerMaker = spotDelta < 0.0;
-        double spotSize = Math.max(1.0, Math.abs(spotDelta));
-
-        // TWAP update at t = 60s
-        scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                (tStart + 60L) * 1000L,
-                new TwapUpdate(
-                        Timeframe.FIFTEEN_MINUTES,
-                        tStart,
-                        tEnd,
-                        BigDecimal.valueOf(candle.twapOpen()),
-                        new TwapPoint(tStart + 60L, BigDecimal.valueOf(spotPrice60), BigDecimal.valueOf(spotPrice60)),
-                        true
-                )
-        ));
-
-        // Spot & Futures Trades at t = 60s
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent((tStart + 60L) * 1000L, spotPrice60, spotSize, isSpotBuyerMaker));
-        double futPrice60 = (Math.abs(candle.fClose() - candle.fOpen()) > 50.0) ? candle.fClose() : candle.fOpen();
-        double futDelta = candle.fDeltaBtc();
-        boolean isFutBuyerMaker = futDelta < 0.0;
-        double futSize = Math.max(1.0, Math.abs(futDelta));
-        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent((tStart + 60L) * 1000L, futPrice60, futSize, isFutBuyerMaker));
-
-        // Order Book Quote at t = 60s
-        OrderBookQuote quote60 = candle.toOrderBookQuote(60);
-        scheduleEvent(new BacktestEvent.PolymarketQuoteEvent((tStart + 60L) * 1000L + 5L, quote60));
-
-        // Intermediate Quote at t = 300s (5 min) for intra-candle exit checks
-        OrderBookQuote quote300 = candle.toOrderBookQuote(300);
-        scheduleEvent(new BacktestEvent.PolymarketQuoteEvent((tStart + 300L) * 1000L, quote300));
-
-        // High / Low contract extremes if available
-        if (!Double.isNaN(candle.pmMaxPrice()) && candle.pmMaxPrice() > 0.0) {
-            OrderBookQuote maxQuote = new OrderBookQuote(
-                    candle.pmMaxPrice(), candle.pmMaxPrice(),
-                    Math.max(0.01, 1.0 - candle.pmMinPrice()), Math.max(0.01, 1.0 - candle.pmMinPrice()),
-                    candle.pmDepth1cUp(), candle.pmDepth1cDown(),
-                    candle.pmMaxPrice(), Math.max(0.01, 1.0 - candle.pmMinPrice()),
-                    (tStart + 450L) * 1000L
-            );
-            scheduleEvent(new BacktestEvent.PolymarketQuoteEvent((tStart + 450L) * 1000L, maxQuote));
+                        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(tMs, price, qty, isBuyerMaker));
+                    }
+                } catch (SQLException e) {
+                    LOG.warnf("Could not stream raw Binance Futures events for %d: %s", tStart, e.getMessage());
+                }
+            }
         }
-
-        // Spot & Futures trades at Close
-        scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(tEndMs - 10L, candle.sClose(), 1.0, false));
-        scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(tEndMs - 10L, candle.fClose(), 1.0, false));
     }
 }

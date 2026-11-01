@@ -92,6 +92,21 @@ public class SimulatedMatchingEngine {
 
         // Simulate fill against order book at time of fill
         PolymarketOrderBook.FillResult fill = orderBook.simulateFill(isUpToken, isBuy, reqShares, limitPrice);
+        if (fill.executedShares() <= 0.0) {
+            ExecutionReport rejectedReport = new ExecutionReport(
+                    command.clientOrderId(),
+                    "sim-reject-" + command.clientOrderId(),
+                    "REJECTED",
+                    BigDecimal.ZERO,
+                    BigDecimal.ZERO,
+                    fillTimestampMs,
+                    "No liquidity available in order book"
+            );
+            if (eventScheduler != null) {
+                eventScheduler.accept(new BacktestEvent.ExecutionReportEvent(fillTimestampMs, rejectedReport));
+            }
+            return;
+        }
 
         if (isBuy) {
             this.hasActiveTrade = true;

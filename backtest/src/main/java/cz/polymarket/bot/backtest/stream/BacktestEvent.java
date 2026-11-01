@@ -1,7 +1,6 @@
 package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.domain.MarketCandle;
-import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.TradeDirection;
@@ -118,22 +117,6 @@ public interface BacktestEvent extends Comparable<BacktestEvent> {
         @Override
         public int priority() {
             return 5;
-        }
-    }
-
-    /**
-     * Synthesized or discrete order book quote state event for Polymarket.
-     *
-     * @param timestampMs event timestamp in milliseconds UTC
-     * @param quote order book quote snapshot
-     */
-    record PolymarketQuoteEvent(
-            long timestampMs,
-            OrderBookQuote quote
-    ) implements BacktestEvent {
-        @Override
-        public int priority() {
-            return 20;
         }
     }
 

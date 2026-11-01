@@ -85,51 +85,35 @@ public class PolymarketOrderBook {
     }
 
     /**
-     * Overwrites book top-of-book levels from a discrete {@link OrderBookQuote}.
-     *
-     * @param quote discrete quote instance
-     */
-    public void applyQuote(OrderBookQuote quote) {
-        if (quote == null) {
-            return;
-        }
-        this.lastUpdateTimeMs = quote.timestampMs();
-        this.bids.clear();
-        this.asks.clear();
-        if (quote.bestBidUp() > 0.0) {
-            this.bids.put(quote.bestBidUp(), quote.depth1cDown() > 0.0 ? quote.depth1cDown() : 300.0);
-        }
-        if (quote.bestAskUp() > 0.0) {
-            this.asks.put(quote.bestAskUp(), quote.depth1cUp() > 0.0 ? quote.depth1cUp() : 300.0);
-        }
-    }
-
-    /**
-     * Returns best bid price for UP (YES) token.
+     * Returns best bid price for UP (YES) token, or Double.NaN when the book has no bids.
      */
     public double getBestBidUp() {
-        return bids.isEmpty() ? 0.49 : bids.firstKey();
+        return bids.isEmpty() ? Double.NaN : bids.firstKey();
     }
 
     /**
-     * Returns best ask price for UP (YES) token.
+     * Returns best ask price for UP (YES) token, or Double.NaN when the book has no asks.
      */
     public double getBestAskUp() {
-        return asks.isEmpty() ? 0.50 : asks.firstKey();
+        return asks.isEmpty() ? Double.NaN : asks.firstKey();
     }
 
     /**
-     * Returns derived best bid price for DOWN (NO) token via complementarity: P_bid_down = 1 - P_ask_up.
+     * Returns derived best bid price for DOWN (NO) token via complementarity: P_bid_down = 1 - P_ask_up,
+     * or Double.NaN when no UP ask exists.
      */
     public double getBestBidDown() {
-        return Math.max(0.001, 1.0 - getBestAskUp());
+        double bestAskUp = getBestAskUp();
+        return Double.isNaN(bestAskUp) ? Double.NaN : Math.max(0.001, 1.0 - bestAskUp);
     }
 
     /**
-     * Returns derived best ask price for DOWN (NO) token via complementarity: P_ask_down = 1 - P_bid_up.
+     * Returns derived best ask price for DOWN (NO) token via complementarity: P_ask_down = 1 - P_bid_up,
+     * or Double.NaN when no UP bid exists.
      */
     public double getBestAskDown() {
-        return Math.max(0.001, 1.0 - getBestBidUp());
+        double bestBidUp = getBestBidUp();
+        return Double.isNaN(bestBidUp) ? Double.NaN : Math.max(0.001, 1.0 - bestBidUp);
     }
 
     /**
@@ -137,6 +121,9 @@ public class PolymarketOrderBook {
      */
     public double getDepth1cUp() {
         double bestAsk = getBestAskUp();
+        if (Double.isNaN(bestAsk)) {
+            return 0.0;
+        }
         double sum = 0.0;
         for (Map.Entry<Double, Double> e : asks.entrySet()) {
             if (e.getKey() <= bestAsk + 0.01) {
@@ -145,7 +132,7 @@ public class PolymarketOrderBook {
                 break;
             }
         }
-        return sum > 0.0 ? sum : 300.0;
+        return sum;
     }
 
     /**
@@ -153,6 +140,9 @@ public class PolymarketOrderBook {
      */
     public double getDepth1cDown() {
         double bestBid = getBestBidUp();
+        if (Double.isNaN(bestBid)) {
+            return 0.0;
+        }
         double sum = 0.0;
         for (Map.Entry<Double, Double> e : bids.entrySet()) {
             if (e.getKey() >= bestBid - 0.01) {
@@ -161,7 +151,7 @@ public class PolymarketOrderBook {
                 break;
             }
         }
-        return sum > 0.0 ? sum : 300.0;
+        return sum;
     }
 
     /**
@@ -195,7 +185,7 @@ public class PolymarketOrderBook {
     }
 
     /**
-     * Simulates order execution against current book depth.
+     * Simulates order execution against current book depth without synthesizing missing liquidity.
      *
      * @param isUpToken true for UP contract, false for DOWN contract
      * @param isBuy true for BUY (taker buying), false for SELL (taker selling)
@@ -273,16 +263,6 @@ public class PolymarketOrderBook {
                     if (remainingShares <= 0) break;
                 }
             }
-        }
-
-        // If not enough liquidity in L2 snapshots, fallback to best price for remaining
-        if (executedShares < requestedShares) {
-            double fallbackPrice = isUpToken
-                    ? (isBuy ? getBestAskUp() : getBestBidUp())
-                    : (isBuy ? getBestAskDown() : getBestBidDown());
-            double remaining = requestedShares - executedShares;
-            cost += remaining * fallbackPrice;
-            executedShares = requestedShares;
         }
 
         double avgPrice = executedShares > 0 ? (cost / executedShares) : 0.0;

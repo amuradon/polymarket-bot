@@ -46,7 +46,7 @@ class PolymarketOrderBookTest {
 
         // Remove level with size 0
         book.applyDelta("BUY", 0.55, 0.0, 2100L);
-        assertThat(book.getBestBidUp()).isEqualTo(0.49); // default fallback
+        assertThat(book.getBestBidUp()).isNaN();
     }
 
     @Test
@@ -64,5 +64,23 @@ class PolymarketOrderBookTest {
 
         // Fee = shares * 0.07 * P * (1 - P) = 100 * 0.07 * 0.51 * 0.49 ~= 1.7489
         assertThat(fill.fee()).isCloseTo(1.7489, within(0.01));
+    }
+
+    @Test
+    @DisplayName("Should not synthesize liquidity when order book is empty or has partial depth")
+    void shouldNotSynthesizeLiquidityWhenBookInsufficient() {
+        PolymarketOrderBook book = new PolymarketOrderBook();
+
+        PolymarketOrderBook.FillResult emptyFill = book.simulateFill(true, true, 100.0, 1.0);
+        assertThat(emptyFill.executedShares()).isEqualTo(0.0);
+        assertThat(emptyFill.avgPrice()).isEqualTo(0.0);
+        assertThat(emptyFill.fee()).isEqualTo(0.0);
+
+        String asksJson = "[{\"price\":\"0.50\",\"size\":\"40.0\"}]";
+        book.applySnapshot("[]", asksJson, 3000L);
+
+        PolymarketOrderBook.FillResult partialFill = book.simulateFill(true, true, 100.0, 1.0);
+        assertThat(partialFill.executedShares()).isEqualTo(40.0);
+        assertThat(partialFill.avgPrice()).isEqualTo(0.50);
     }
 }

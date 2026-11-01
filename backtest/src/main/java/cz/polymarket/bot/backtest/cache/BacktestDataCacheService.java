@@ -96,8 +96,8 @@ public class BacktestDataCacheService {
                 }
 
                 Map<String, Double> twapVals = twapInd.get(r.tStart());
-                double twapOpen = (twapVals != null && twapVals.containsKey("twap_open")) ? twapVals.get("twap_open") : r.sOpen();
-                double twapClose = (twapVals != null && twapVals.containsKey("twap_close")) ? twapVals.get("twap_close") : r.sClose();
+                double twapOpen = (twapVals != null && twapVals.containsKey("twap_open")) ? twapVals.get("twap_open") : Double.NaN;
+                double twapClose = (twapVals != null && twapVals.containsKey("twap_close")) ? twapVals.get("twap_close") : Double.NaN;
 
                 Map<String, Double> basisVals = basisInd.get(r.tStart());
                 double basisOpen = (basisVals != null && basisVals.containsKey("basis_open_bps")) ? basisVals.get("basis_open_bps") : 0.0;

@@ -59,4 +59,29 @@ class SimulatedMatchingEngineTest {
         assertThat(trade.netPnl()).isCloseTo(46.25, within(0.1));
         assertThat(trade.balanceAfterTrade()).isCloseTo(10046.25, within(0.1));
     }
+
+    @Test
+    @DisplayName("Should reject order when order book has no liquidity")
+    void shouldRejectOrderWhenOrderBookEmpty() {
+        PolymarketOrderBook emptyBook = new PolymarketOrderBook();
+        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(emptyBook, 50L);
+        List<BacktestEvent> scheduled = new ArrayList<>();
+        engine.setEventScheduler(scheduled::add);
+
+        OrderCommand buyCmd = new OrderCommand(
+                "order-empty",
+                "mkt-1",
+                "BTC-UP",
+                cz.polymarket.bot.domain.Timeframe.FIFTEEN_MINUTES,
+                "BUY",
+                BigDecimal.valueOf(0.52),
+                BigDecimal.valueOf(100.0)
+        );
+        engine.submitOrder(buyCmd, 1000L);
+
+        assertThat(engine.hasActiveTrade()).isFalse();
+        assertThat(scheduled).hasSize(1);
+        BacktestEvent.ExecutionReportEvent execEvent = (BacktestEvent.ExecutionReportEvent) scheduled.get(0);
+        assertThat(execEvent.report().status()).isEqualTo("REJECTED");
+    }
 }

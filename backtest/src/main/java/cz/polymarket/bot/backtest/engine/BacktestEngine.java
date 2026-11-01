@@ -155,7 +155,7 @@ public class BacktestEngine {
             }
 
             streamer.clear();
-            streamer.loadCandleEvents(row, rawMarketDataProcessor != null, rawMarketDataProcessor, sym);
+            streamer.loadCandleEvents(row, rawMarketDataProcessor, sym);
 
             while (streamer.hasNext()) {
                 BacktestEvent event = streamer.next();
@@ -194,9 +194,6 @@ public class BacktestEngine {
                     }
                     OrderBookQuote quote = orderBook.toOrderBookQuote(e.timestampMs());
                     strategy.onOrderBookQuote(quote);
-                } else if (event instanceof BacktestEvent.PolymarketQuoteEvent e) {
-                    orderBook.applyQuote(e.quote());
-                    strategy.onOrderBookQuote(e.quote());
                 } else if (event instanceof BacktestEvent.TwapUpdateEvent e) {
                     strategy.onTwapUpdate(e.update());
                 } else if (event instanceof BacktestEvent.ExecutionReportEvent e) {

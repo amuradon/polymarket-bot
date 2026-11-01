@@ -403,23 +403,21 @@ public class RawMarketDataProcessor {
             for (Long tStart : intervalStarts) {
                 long tEnd = tStart + 900L;
                 IntervalCandle sCandle = s15m.get(tStart);
-                IntervalCandle fCandle = f15m.getOrDefault(tStart, sCandle);
+                IntervalCandle fCandle = f15m.get(tStart);
 
                 // Check Polymarket raw parquet
                 Path pmFile = pmDir.resolve(tStart + ".parquet");
-                PolymarketExtractedData pmData = null;
+                PolymarketExtractedData pmData;
                 if (!Files.exists(pmFile)) {
                     missingRegistry.recordMissingPolymarket(tStart);
+                    pmData = new PolymarketExtractedData(
+                            Double.NaN, Double.NaN, Double.NaN, Double.NaN,
+                            Double.NaN, Double.NaN, Double.NaN, Double.NaN,
+                            Double.NaN, Double.NaN, Double.NaN, Double.NaN,
+                            Double.NaN, Double.NaN, 0.0, 0.0
+                    );
                 } else {
                     pmData = extractPolymarketData(pmFile, tStart);
-                }
-
-                // If Polymarket file missing, synthesize default reference quotes
-                if (pmData == null) {
-                    pmData = new PolymarketExtractedData(
-                            0.50, 0.49, 0.50, 0.49, 0.50, 0.49, 0.50, 0.49,
-                            0.50, 0.015, 0.51, 0.015, 0.50, 0.49, 300.0, 300.0
-                    );
                 }
 
                 // Check Binance Futures OrderBook for corresponding hour
@@ -448,17 +446,17 @@ public class RawMarketDataProcessor {
                 }
 
                 double twapOpen = computeTwap(combinedSpot, tStart, 60.0);
-                if (twapOpen <= 0.0) {
-                    twapOpen = sCandle.open();
-                }
                 double twapClose = computeTwap(combinedSpot, tEnd, 60.0);
-                if (twapClose <= 0.0) {
-                    twapClose = sCandle.close();
-                }
-                String actualOutcome = (twapClose >= twapOpen) ? "UP" : "DOWN";
+                String actualOutcome = (!Double.isNaN(twapClose) && !Double.isNaN(twapOpen) && twapClose >= twapOpen) ? "UP" : "DOWN";
 
-                double basisOpenBps = (sCandle.open() > 0.0) ? (((fCandle.open() - sCandle.open()) / sCandle.open()) * 10000.0) : 0.0;
-                double basisCloseBps = (sCandle.close() > 0.0) ? (((fCandle.close() - sCandle.close()) / sCandle.close()) * 10000.0) : 0.0;
+                double fOpen = (fCandle != null) ? fCandle.open() : Double.NaN;
+                double fClose = (fCandle != null) ? fCandle.close() : Double.NaN;
+                double fVolBtc = (fCandle != null) ? fCandle.volBtc() : 0.0;
+                double fVolUsd = (fCandle != null) ? fCandle.volUsd() : 0.0;
+                double fDeltaBtc = (fCandle != null) ? fCandle.deltaBtc() : 0.0;
+
+                double basisOpenBps = (sCandle.open() > 0.0 && !Double.isNaN(fOpen)) ? (((fOpen - sCandle.open()) / sCandle.open()) * 10000.0) : Double.NaN;
+                double basisCloseBps = (sCandle.close() > 0.0 && !Double.isNaN(fClose)) ? (((fClose - sCandle.close()) / sCandle.close()) * 10000.0) : Double.NaN;
 
                 String datetimeUtc = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(tStart));
 
@@ -467,8 +465,8 @@ public class RawMarketDataProcessor {
                         twapOpen, twapClose, actualOutcome,
                         sCandle.open(), sCandle.high(), sCandle.low(), sCandle.close(),
                         sCandle.volBtc(), sCandle.volUsd(), sCandle.deltaBtc(),
-                        fCandle.open(), fCandle.close(),
-                        fCandle.volBtc(), fCandle.volUsd(), fCandle.deltaBtc(),
+                        fOpen, fClose,
+                        fVolBtc, fVolUsd, fDeltaBtc,
                         basisOpenBps, basisCloseBps,
                         pmData.ask0(), pmData.bid0(),
                         pmData.ask60(), pmData.bid60(),
@@ -515,13 +513,13 @@ public class RawMarketDataProcessor {
 
         double pmMax = Double.NaN;
         double pmMin = Double.NaN;
-        double pmAsk0 = 0.50, pmBid0 = 0.49;
-        double pmAsk60 = 0.50, pmBid60 = 0.49;
-        double pmAsk180 = 0.50, pmBid180 = 0.49;
-        double pmAsk300 = 0.50, pmBid300 = 0.49;
-        double pmDepth1cUp = 300.0, pmDepth1cDown = 300.0;
-        double pmFill100Up = 0.50, pmFee100Up = 0.015;
-        double pmFill100Down = 0.51, pmFee100Down = 0.015;
+        double pmAsk0 = Double.NaN, pmBid0 = Double.NaN;
+        double pmAsk60 = Double.NaN, pmBid60 = Double.NaN;
+        double pmAsk180 = Double.NaN, pmBid180 = Double.NaN;
+        double pmAsk300 = Double.NaN, pmBid300 = Double.NaN;
+        double pmDepth1cUp = 0.0, pmDepth1cDown = 0.0;
+        double pmFill100Up = Double.NaN, pmFee100Up = Double.NaN;
+        double pmFill100Down = Double.NaN, pmFee100Down = Double.NaN;
 
         long t0Ms = tStartSec * 1000L + 10L;
         long t60Ms = tStartSec * 1000L + 60_000L;
@@ -555,8 +553,8 @@ public class RawMarketDataProcessor {
                 }
 
                 if (!captured0 && tMs >= t0Ms) {
-                    pmAsk0 = getBestAsk(asks, 0.50);
-                    pmBid0 = getBestBid(bids, 0.49);
+                    pmAsk0 = getBestAsk(asks, Double.NaN);
+                    pmBid0 = getBestBid(bids, Double.NaN);
                     pmDepth1cUp = getDepthWithin1c(asks, pmAsk0, true);
                     pmDepth1cDown = getDepthWithin1c(bids, pmBid0, false);
                     FillFeeResult ffUp = calculateFillAndFee(asks, 100.0, true);
@@ -734,7 +732,7 @@ public class RawMarketDataProcessor {
      * Calculates cumulative liquidity depth within 1 cent of best price.
      */
     private double getDepthWithin1c(Map<Double, Double> book, double bestPrice, boolean isAsk) {
-        if (book == null || book.isEmpty()) return 300.0;
+        if (book == null || book.isEmpty() || Double.isNaN(bestPrice)) return 0.0;
         double depth = 0.0;
         for (Map.Entry<Double, Double> e : book.entrySet()) {
             double p = e.getKey();
@@ -745,7 +743,7 @@ public class RawMarketDataProcessor {
                 depth += s;
             }
         }
-        return depth > 0.0 ? depth : 300.0;
+        return depth;
     }
 
     /**
@@ -753,7 +751,7 @@ public class RawMarketDataProcessor {
      */
     private FillFeeResult calculateFillAndFee(Map<Double, Double> levels, double sizeUsd, boolean isUp) {
         if (levels == null || levels.isEmpty()) {
-            return new FillFeeResult(0.50, 0.015);
+            return new FillFeeResult(Double.NaN, Double.NaN);
         }
 
         List<Map.Entry<Double, Double>> sorted = new ArrayList<>(levels.entrySet());
@@ -793,7 +791,7 @@ public class RawMarketDataProcessor {
             return new FillFeeResult(avgP, fee);
         }
 
-        return new FillFeeResult(0.50, 0.015);
+        return new FillFeeResult(Double.NaN, Double.NaN);
     }
 
     /**
@@ -905,7 +903,7 @@ public class RawMarketDataProcessor {
                 usdSum += t.price() * t.qty();
             }
         }
-        return (volSum > 0.0) ? (usdSum / volSum) : 0.0;
+        return (volSum > 0.0) ? (usdSum / volSum) : Double.NaN;
     }
 
     /**
