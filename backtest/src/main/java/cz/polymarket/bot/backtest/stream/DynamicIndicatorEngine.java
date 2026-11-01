@@ -17,9 +17,9 @@ import java.util.Set;
 /**
  * High-performance dynamic technical indicator calculation engine.
  * <p>
- * Computes on-the-fly intra-candle indicators strictly for the indicator types declared
- * by the active strategy, and tracks intra-candle OHLCV to construct completed
- * {@link MarketCandle} instances at candle close without extra Parquet scans.
+ * Computes on-the-fly intra-candle indicators strictly from Spot and Futures exchange streams
+ * for the indicator types declared by the active strategy. Polymarket streams are never mixed
+ * into Spot/Futures indicator calculations.
  */
 public class DynamicIndicatorEngine {
 
@@ -54,7 +54,7 @@ public class DynamicIndicatorEngine {
     private double currentSpotPrice = 0.0;
     private double currentFuturesPrice = 0.0;
 
-    // Active candle OHLCV accumulators
+    // Active candle Spot/Futures OHLCV accumulators
     private double sOpen = 0.0;
     private double sHigh = 0.0;
     private double sLow = 0.0;
@@ -104,9 +104,31 @@ public class DynamicIndicatorEngine {
     }
 
     /**
+     * Replaces the historical completed candle list (used when initializing isolated parallel market workers).
+     *
+     * @param priorCandles chronological list of completed candles preceding the active market
+     */
+    public void setCandleHistory(List<MarketCandle> priorCandles) {
+        candleHistory.clear();
+        if (priorCandles != null && !priorCandles.isEmpty()) {
+            candleHistory.addAll(priorCandles);
+        }
+        if (hasAnyIndicators) {
+            recalculateAll();
+        }
+    }
+
+    /**
+     * Resets intra-candle rolling accumulators for a new active candle interval without any initial price.
+     */
+    public void resetActiveCandle() {
+        resetActiveCandle(0.0);
+    }
+
+    /**
      * Resets intra-candle rolling accumulators for a new active candle interval.
      *
-     * @param openPrice candle opening reference price (or {@code 0.0} / {@link Double#NaN} if not yet known)
+     * @param openPrice candle opening spot price (or {@code 0.0} / {@link Double#NaN} if not yet known)
      */
     public void resetActiveCandle(double openPrice) {
         double cleanOpen = (!Double.isNaN(openPrice) && openPrice > 0.0) ? openPrice : 0.0;
@@ -153,13 +175,17 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Builds a completed {@link MarketCandle} for the current 15-minute interval from accumulated stream data.
+     * Builds a completed {@link MarketCandle} for the current 15-minute interval from accumulated
+     * Spot and Futures exchange stream data, or returns {@code null} if no spot exchange data was observed.
      *
      * @param tStart candle start epoch seconds
      * @param tEnd candle end epoch seconds
-     * @return constructed MarketCandle
+     * @return constructed MarketCandle, or {@code null} when no spot trades occurred
      */
     public MarketCandle buildCompletedCandle(long tStart, long tEnd) {
+        if (sOpen <= 0.0 || sHigh <= 0.0 || sLow <= 0.0 || sClose <= 0.0) {
+            return null;
+        }
         double basisBps = (sClose > 0.0 && fClose > 0.0)
                 ? ((fClose - sClose) / sClose) * 10000.0
                 : 0.0;
@@ -178,53 +204,7 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Updates spot price and candle OHLC from the {@code polymarket/price_crypto} stream.
-     *
-     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
-     * @param price crypto spot price in USD
-     */
-    public void onPolymarketCryptoPrice(long timestampMs, double price) {
-        if (Double.isNaN(price) || price <= 0.0) {
-            return;
-        }
-        this.currentSpotPrice = price;
-        updateSpotOhlc(price);
-
-        if (needTwap) {
-            this.rollingTwapSum += price;
-            this.rollingTwapCount++;
-            currentValues[IndicatorType.TWAP.ordinal()] = rollingTwapSum / rollingTwapCount;
-        }
-        if (needVwapZScore) {
-            VwapCalculator.VwapResult res = vwapCalculator.calculate(candleHistory, price);
-            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = res.zScore();
-        }
-    }
-
-    /**
-     * Updates the 60-second TWAP reference from the {@code polymarket/price_crypto_twap_60s} stream.
-     *
-     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
-     * @param twapPrice 60-second TWAP price in USD
-     */
-    public void onPolymarketCryptoTwap60s(long timestampMs, double twapPrice) {
-        if (Double.isNaN(twapPrice) || twapPrice <= 0.0) {
-            return;
-        }
-        if (this.twapOpenPrice <= 0.0) {
-            this.twapOpenPrice = twapPrice;
-        }
-        if (this.currentSpotPrice <= 0.0) {
-            this.currentSpotPrice = twapPrice;
-        }
-        updateSpotOhlc(twapPrice);
-        if (needTwap) {
-            currentValues[IndicatorType.TWAP.ordinal()] = twapPrice;
-        }
-    }
-
-    /**
-     * Updates rolling price, TWAP, VWAP, CVD, and Basis indicators upon receiving a spot trade.
+     * Updates rolling price, TWAP, VWAP, CVD, and Basis indicators upon receiving a spot exchange trade.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price spot execution price
@@ -233,7 +213,16 @@ public class DynamicIndicatorEngine {
      */
     public void onSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
         this.currentSpotPrice = price;
-        updateSpotOhlc(price);
+        if (sOpen <= 0.0) {
+            sOpen = price;
+            sHigh = price;
+            sLow = price;
+        } else {
+            if (price > sHigh) sHigh = price;
+            if (price < sLow) sLow = price;
+        }
+        sClose = price;
+
         double usd = price * quantity;
         double delta = isBuyerMaker ? -quantity : quantity;
         this.spotVolBtc += quantity;
@@ -275,7 +264,7 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Updates futures reference price and basis spread upon receiving a futures trade.
+     * Updates futures reference price and basis spread upon receiving a futures exchange trade.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price futures execution price
@@ -304,7 +293,7 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Updates order book imbalance (OBI) and depth-weighted micro price from book depth.
+     * Updates order book imbalance (OBI) and depth-weighted micro price from futures book depth.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param bestBid best bid price
@@ -325,18 +314,6 @@ public class DynamicIndicatorEngine {
                     : (bestBid + bestAsk) / 2.0;
             currentValues[IndicatorType.MICRO_PRICE.ordinal()] = currentMicroPrice;
         }
-    }
-
-    private void updateSpotOhlc(double price) {
-        if (sOpen <= 0.0) {
-            sOpen = price;
-            sHigh = price;
-            sLow = price;
-        } else {
-            if (price > sHigh) sHigh = price;
-            if (price < sLow) sLow = price;
-        }
-        sClose = price;
     }
 
     private void recalculateAll() {
@@ -401,9 +378,9 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Returns the opening TWAP reference price of the active candle.
+     * Returns the opening reference price of the active candle.
      *
-     * @return TWAP open price
+     * @return open reference price
      */
     public double getTwapOpenPrice() {
         return twapOpenPrice;

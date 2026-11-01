@@ -50,6 +50,19 @@ public interface TradingStrategy {
     default void reset() {}
 
     /**
+     * Creates a new isolated instance of this strategy for parallel backtest execution across
+     * multiple markets simultaneously.
+     * <p>
+     * Strategies maintaining mutable per-market state should override this method to return
+     * a fresh instance configured with the same immutable parameters and models.
+     *
+     * @return isolated strategy instance
+     */
+    default TradingStrategy createInstance() {
+        return this;
+    }
+
+    /**
      * The primary market timeframe for which this strategy evaluates TWAP candles.
      */
     default cz.polymarket.bot.domain.Timeframe getTimeframe() {

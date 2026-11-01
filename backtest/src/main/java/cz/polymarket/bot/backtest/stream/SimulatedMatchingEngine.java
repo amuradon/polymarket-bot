@@ -6,34 +6,28 @@ import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Matching engine simulating realistic order placement, time-varying network/exchange latency
- * derived from captured Polymarket timestamps ({@code delayMs = round(observedOneWayLatencyMs * latencyFactor)}),
- * delayed order book depth consumption at execution time, crypto taker fees, and contract settlements.
+ * Matching engine simulating realistic order placement, round-trip network/exchange latency
+ * derived from captured Polymarket timestamps ({@code delayMs = round(2.0 * observedOneWayLatencyMs * latencyFactor)}),
+ * delayed order book liquidity depletion at execution time, multiple simultaneous positions per market,
+ * crypto taker fees, and contract settlements.
  */
 public class SimulatedMatchingEngine {
+
+    private static final double EPS = 1e-9;
 
     private final PolymarketOrderBook orderBook;
     private final double latencyFactor;
     private Consumer<BacktestEvent> eventScheduler;
     private long orderSequence = 0L;
 
-    private boolean hasActiveTrade = false;
-    private TradeDirection side = TradeDirection.NO_TRADE;
-    private double entryPrice = 0.0;
-    private double sizeUsd = 0.0;
-    private double shares = 0.0;
-    private double entryFee = 0.0;
-    private double modelProbability = 0.5;
-    private double marketPrice = 0.5;
-    private double edge = 0.0;
-
-    private boolean exitExecuted = false;
-    private double exitPrice = 0.0;
-    private String exitReason = null;
-    private double exitFee = 0.0;
+    private final List<OpenPosition> openPositions = new ArrayList<>();
+    private final List<CompletedPosition> completedPositions = new ArrayList<>();
 
     /**
      * Constructs the simulated matching engine with a configurable latency scaling factor.
@@ -65,27 +59,18 @@ public class SimulatedMatchingEngine {
      * Resets trade tracking state between candle intervals.
      */
     public void resetForCandle() {
-        this.hasActiveTrade = false;
-        this.side = TradeDirection.NO_TRADE;
-        this.entryPrice = 0.0;
-        this.sizeUsd = 0.0;
-        this.shares = 0.0;
-        this.entryFee = 0.0;
-        this.modelProbability = 0.5;
-        this.marketPrice = 0.5;
-        this.edge = 0.0;
-        this.exitExecuted = false;
-        this.exitPrice = 0.0;
-        this.exitReason = null;
-        this.exitFee = 0.0;
+        this.openPositions.clear();
+        this.completedPositions.clear();
     }
 
     /**
      * Submits an order into the matching engine at {@code submitTimestampMs}.
      * <p>
-     * Computes the time-varying execution delay {@code delayMs = round(observedOneWayLatencyMs * latencyFactor)}
-     * and schedules a {@link BacktestEvent.PendingOrderExecutionEvent} at {@code submitTimestampMs + delayMs}
-     * so that any order book updates occurring during transit are applied before the order matches.
+     * Because collector order book states are indexed by local EC2 receipt timestamp
+     * {@code ts = T_server + delta_1way}, an order submitted by the strategy at {@code T_submit}
+     * reaches the Polymarket exchange server at {@code T_server + 2 * delta_1way}, which corresponds
+     * to the collector order book state at:
+     * {@code T_exec = T_submit + round(2.0 * observedOneWayLatencyMs * latencyFactor)}.
      *
      * @param command order command specifying token, direction, price, and size
      * @param submitTimestampMs local EC2 timestamp when the strategy submitted the order
@@ -96,7 +81,7 @@ public class SimulatedMatchingEngine {
         }
 
         long observedOneWayMs = orderBook.getLastObservedOneWayLatencyMs();
-        long delayMs = Math.max(0L, Math.round(observedOneWayMs * latencyFactor));
+        long delayMs = Math.max(0L, Math.round(2.0 * observedOneWayMs * latencyFactor));
         long executionTimestampMs = submitTimestampMs + delayMs;
 
         if (eventScheduler != null) {
@@ -113,7 +98,7 @@ public class SimulatedMatchingEngine {
 
     /**
      * Executes a scheduled pending order when it arrives at the exchange matching engine at {@code event.timestampMs()},
-     * sweeping the current order book depth at that exact delayed timestamp.
+     * sweeping and depleting the current order book depth at that exact delayed timestamp.
      *
      * @param event pending order execution event popped from the chronological event queue
      * @return generated {@link ExecutionReport} to deliver to the strategy
@@ -131,7 +116,7 @@ public class SimulatedMatchingEngine {
         double reqShares = command.size().doubleValue();
         double limitPrice = command.price().doubleValue();
 
-        PolymarketOrderBook.FillResult fill = orderBook.simulateFill(isUpToken, isBuy, reqShares, limitPrice);
+        PolymarketOrderBook.FillResult fill = orderBook.executeFill(isUpToken, isBuy, reqShares, limitPrice);
         if (fill.executedShares() <= 0.0) {
             return new ExecutionReport(
                     command.clientOrderId(),
@@ -144,16 +129,24 @@ public class SimulatedMatchingEngine {
             );
         }
 
+        TradeDirection tokenDirection = isUpToken ? TradeDirection.UP : TradeDirection.DOWN;
+
         if (isBuy) {
-            this.hasActiveTrade = true;
-            this.entryPrice = fill.avgPrice();
-            this.shares = fill.executedShares();
-            this.sizeUsd = this.entryPrice * this.shares;
-            this.side = isUpToken ? TradeDirection.UP : TradeDirection.DOWN;
-            this.entryFee = fill.fee();
-            this.marketPrice = this.entryPrice;
-            this.modelProbability = Math.min(0.95, this.entryPrice + 0.10);
-            this.edge = Math.max(0.0, this.modelProbability - this.marketPrice);
+            double entryPrice = fill.avgPrice();
+            double shares = fill.executedShares();
+            double entryFee = fill.fee();
+            double modelProb = Math.min(0.95, entryPrice + 0.10);
+            double edge = Math.max(0.0, modelProb - entryPrice);
+
+            openPositions.add(new OpenPosition(
+                    tokenDirection,
+                    entryPrice,
+                    shares,
+                    entryFee,
+                    modelProb,
+                    entryPrice,
+                    edge
+            ));
 
             return new ExecutionReport(
                     command.clientOrderId(),
@@ -162,13 +155,47 @@ public class SimulatedMatchingEngine {
                     BigDecimal.valueOf(fill.avgPrice()),
                     BigDecimal.valueOf(fill.executedShares()),
                     fillTimestampMs,
-                    "Simulated fill with " + delayMs + "ms time-varying latency"
+                    "Simulated fill with " + delayMs + "ms round-trip latency"
             );
         } else {
-            this.exitExecuted = true;
-            this.exitPrice = fill.avgPrice();
-            this.exitFee = fill.fee();
-            this.exitReason = fill.avgPrice() >= 0.70 ? "Take Profit (0.70)" : "Trailing Stop (+0.05)";
+            double sharesToClose = fill.executedShares();
+            double totalSoldShares = fill.executedShares();
+            double exitPrice = fill.avgPrice();
+            double totalExitFee = fill.fee();
+            String exitReason = exitPrice >= 0.70 ? "Take Profit (0.70)" : "Trailing Stop (+0.05)";
+
+            Iterator<OpenPosition> it = openPositions.iterator();
+            while (it.hasNext() && sharesToClose > EPS) {
+                OpenPosition pos = it.next();
+                if (pos.side != tokenDirection || pos.remainingShares <= EPS) {
+                    continue;
+                }
+                double closedShares = Math.min(sharesToClose, pos.remainingShares);
+                double posFraction = closedShares / pos.remainingShares;
+                double allocatedEntryFee = pos.remainingFee * posFraction;
+                double allocatedExitFee = totalExitFee * (closedShares / totalSoldShares);
+
+                completedPositions.add(new CompletedPosition(
+                        pos.side,
+                        pos.entryPrice,
+                        exitPrice,
+                        closedShares * pos.entryPrice,
+                        closedShares,
+                        allocatedEntryFee + allocatedExitFee,
+                        exitReason,
+                        pos.modelProbability,
+                        pos.marketPrice,
+                        pos.edge
+                ));
+
+                pos.remainingShares -= closedShares;
+                pos.remainingFee -= allocatedEntryFee;
+                sharesToClose -= closedShares;
+
+                if (pos.remainingShares <= EPS) {
+                    it.remove();
+                }
+            }
 
             return new ExecutionReport(
                     command.clientOrderId(),
@@ -177,71 +204,142 @@ public class SimulatedMatchingEngine {
                     BigDecimal.valueOf(fill.avgPrice()),
                     BigDecimal.valueOf(fill.executedShares()),
                     fillTimestampMs,
-                    "Simulated exit fill with " + delayMs + "ms time-varying latency"
+                    "Simulated exit fill with " + delayMs + "ms round-trip latency"
             );
         }
     }
 
     /**
-     * Resolves and finalizes an active trade against actual candle outcome or prior market exit.
-     * Computes net PnL after entry and exit fees, resulting account balance, and win/loss classification.
+     * Resolves and finalizes all active and previously exited positions for the candle interval
+     * against the actual candle outcome.
      *
      * @param candleStartSec candle interval start in epoch seconds
      * @param datetimeUtc ISO-8601 formatted datetime UTC
      * @param actualOutcome settled binary outcome direction
-     * @param currentBalance account balance before trade payout
-     * @return constructed TradeRecord, or null if no trade was active
+     * @param currentBalance account balance before trade payouts
+     * @return list of finalized {@link TradeRecord} entries in execution order
      */
-    public TradeRecord finalizeTrade(long candleStartSec, String datetimeUtc, TradeDirection actualOutcome, double currentBalance) {
-        if (!hasActiveTrade) {
-            return null;
+    public List<TradeRecord> finalizeTrades(
+            long candleStartSec,
+            String datetimeUtc,
+            TradeDirection actualOutcome,
+            double currentBalance) {
+
+        if (completedPositions.isEmpty() && openPositions.isEmpty()) {
+            return List.of();
         }
 
-        double finalExitPrice;
-        String finalExitReason;
-        double finalExitFee;
+        List<TradeRecord> records = new ArrayList<>(completedPositions.size() + openPositions.size());
+        double runningBalance = currentBalance;
 
-        if (exitExecuted) {
-            finalExitPrice = this.exitPrice;
-            finalExitReason = this.exitReason;
-            finalExitFee = this.exitFee;
-        } else {
-            finalExitPrice = (this.side == actualOutcome) ? 1.00 : 0.00;
-            finalExitReason = "Resolution (TWAP Oracle)";
-            finalExitFee = 0.0;
+        for (CompletedPosition cp : completedPositions) {
+            double payout = cp.shares * cp.exitPrice;
+            double netPnl = payout - cp.sizeUsd - cp.totalFee;
+            runningBalance += netPnl;
+            boolean isWin = netPnl > 0.0;
+
+            records.add(new TradeRecord(
+                    datetimeUtc,
+                    candleStartSec,
+                    cp.side,
+                    cp.entryPrice,
+                    cp.exitPrice,
+                    cp.sizeUsd,
+                    cp.shares,
+                    cp.totalFee,
+                    netPnl,
+                    cp.exitReason,
+                    cp.modelProbability,
+                    cp.marketPrice,
+                    cp.edge,
+                    isWin,
+                    runningBalance
+            ));
         }
 
-        double payout = this.shares * finalExitPrice;
-        double totalFee = this.entryFee + finalExitFee;
-        double netPnl = payout - this.sizeUsd - totalFee;
-        double newBalance = currentBalance + netPnl;
-        boolean isWin = netPnl > 0.0;
+        for (OpenPosition op : openPositions) {
+            if (op.remainingShares <= EPS) {
+                continue;
+            }
+            double finalExitPrice = (op.side == actualOutcome) ? 1.00 : 0.00;
+            String finalExitReason = "Resolution (TWAP Oracle)";
+            double sizeUsd = op.remainingShares * op.entryPrice;
+            double payout = op.remainingShares * finalExitPrice;
+            double totalFee = op.remainingFee;
+            double netPnl = payout - sizeUsd - totalFee;
+            runningBalance += netPnl;
+            boolean isWin = netPnl > 0.0;
 
-        return new TradeRecord(
-                datetimeUtc,
-                candleStartSec,
-                this.side,
-                this.entryPrice,
-                finalExitPrice,
-                this.sizeUsd,
-                this.shares,
-                totalFee,
-                netPnl,
-                finalExitReason,
-                this.modelProbability,
-                this.marketPrice,
-                this.edge,
-                isWin,
-                newBalance
-        );
+            records.add(new TradeRecord(
+                    datetimeUtc,
+                    candleStartSec,
+                    op.side,
+                    op.entryPrice,
+                    finalExitPrice,
+                    sizeUsd,
+                    op.remainingShares,
+                    totalFee,
+                    netPnl,
+                    finalExitReason,
+                    op.modelProbability,
+                    op.marketPrice,
+                    op.edge,
+                    isWin,
+                    runningBalance
+            ));
+        }
+
+        completedPositions.clear();
+        openPositions.clear();
+        return records;
     }
 
     /**
-     * Checks if the matching engine currently holds an active trade.
+     * Checks if the matching engine holds any open or completed trades in the current candle.
      *
-     * @return true if holding an active position
+     * @return true if at least one trade was executed in the current candle
      */
     public boolean hasActiveTrade() {
-        return hasActiveTrade;
+        return !openPositions.isEmpty() || !completedPositions.isEmpty();
     }
+
+    private static final class OpenPosition {
+        private final TradeDirection side;
+        private final double entryPrice;
+        private double remainingShares;
+        private double remainingFee;
+        private final double modelProbability;
+        private final double marketPrice;
+        private final double edge;
+
+        private OpenPosition(
+                TradeDirection side,
+                double entryPrice,
+                double remainingShares,
+                double remainingFee,
+                double modelProbability,
+                double marketPrice,
+                double edge) {
+            this.side = side;
+            this.entryPrice = entryPrice;
+            this.remainingShares = remainingShares;
+            this.remainingFee = remainingFee;
+            this.modelProbability = modelProbability;
+            this.marketPrice = marketPrice;
+            this.edge = edge;
+        }
+    }
+
+    private record CompletedPosition(
+            TradeDirection side,
+            double entryPrice,
+            double exitPrice,
+            double sizeUsd,
+            double shares,
+            double totalFee,
+            String exitReason,
+            double modelProbability,
+            double marketPrice,
+            double edge
+    ) {}
 }

@@ -130,6 +130,17 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     }
 
     /**
+     * Creates a fresh isolated instance of {@link TWAPArbitrageStrategy} sharing the stateless
+     * probability model and configuration for parallel market simulation.
+     *
+     * @return isolated strategy instance
+     */
+    @Override
+    public TradingStrategy createInstance() {
+        return new TWAPArbitrageStrategy(probabilityModel, config);
+    }
+
+    /**
      * Constructs the TWAPArbitrageStrategy with injected statistical probability model and configuration.
      *
      * @param probabilityModel predictive model computing directional probability and edge

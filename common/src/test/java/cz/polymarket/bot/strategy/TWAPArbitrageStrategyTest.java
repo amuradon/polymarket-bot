@@ -423,5 +423,8 @@ class TWAPArbitrageStrategyTest {
 
         strategy.onPolymarketCryptoPrice(10060000L, "btcusd", "chainlink", 60250.0, 10059990L);
         assertThat(strategy.getCurrentSpotPrice()).isEqualTo(60250.0);
+
+        TradingStrategy isolated = strategy.createInstance();
+        assertThat(isolated).isNotNull().isNotSameAs(strategy);
     }
 }

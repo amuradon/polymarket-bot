@@ -122,21 +122,23 @@ class BacktestResourceTest {
         Files.createDirectories(twapFile.getParent());
 
         Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
-        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
-             Statement stmt = conn.createStatement()) {
-            String normPm = pmFile.toAbsolutePath().toString().replace('\\', '/');
-            stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (tStart * 1000L - 2000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"clobTokenIds\":\"[\\\"101\\\", \\\"102\\\"]\"}'::JSON), " +
-                    "(" + (tStart * 1000L + 1000L) + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"asset_id\":\"101\",\"timestamp\":\"" + (tStart * 1000L + 990L) + "\",\"bids\":[{\"price\":\"0.49\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"300.0\"}]}'::JSON)" +
-                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm + "' (FORMAT PARQUET)");
+        if (!Files.exists(pmFile) || !Files.exists(twapFile)) {
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                 Statement stmt = conn.createStatement()) {
+                String normPm = pmFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (tStart * 1000L - 2000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                        "'{\"clobTokenIds\":\"[\\\"101\\\", \\\"102\\\"]\"}'::JSON), " +
+                        "(" + (tStart * 1000L + 1000L) + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                        "'{\"asset_id\":\"101\",\"timestamp\":\"" + (tStart * 1000L + 990L) + "\",\"bids\":[{\"price\":\"0.49\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"300.0\"}]}'::JSON)" +
+                        ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm + "' (FORMAT PARQUET)");
 
-            String normTwap = twapFile.toAbsolutePath().toString().replace('\\', '/');
-            stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (tStart * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (tStart * 1000L) + "::UBIGINT), " +
-                    "(" + ((tStart + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60050.0::DOUBLE, '60050.0'::VARCHAR, 60::INT, " + ((tStart + 900L) * 1000L) + "::UBIGINT)" +
-                    ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+                String normTwap = twapFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (tStart * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (tStart * 1000L) + "::UBIGINT), " +
+                        "(" + ((tStart + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60050.0::DOUBLE, '60050.0'::VARCHAR, 60::INT, " + ((tStart + 900L) * 1000L) + "::UBIGINT)" +
+                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+            }
         }
 
         String jobId = given()

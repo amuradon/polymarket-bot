@@ -11,6 +11,7 @@ import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.TradeDirection;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -24,6 +25,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     private final DynamicIndicatorEngine indicatorEngine;
 
     private long currentTimestampMs;
+    private double lastReferencePrice;
 
     /**
      * Constructs the simulation context with matching engine and dynamic indicators.
@@ -40,6 +42,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
      * Resets the execution state for a newly starting 15-minute candle.
      */
     public void resetForCandle() {
+        this.lastReferencePrice = 0.0;
         if (matchingEngine != null) {
             matchingEngine.resetForCandle();
         }
@@ -52,6 +55,17 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
      */
     public void setCurrentTimestampMs(long currentTimestampMs) {
         this.currentTimestampMs = currentTimestampMs;
+    }
+
+    /**
+     * Updates the latest observed underlying reference price for Brier calibration.
+     *
+     * @param price latest observed underlying price
+     */
+    public void setLastReferencePrice(double price) {
+        if (!Double.isNaN(price) && price > 0.0) {
+            this.lastReferencePrice = price;
+        }
     }
 
     /**
@@ -115,18 +129,18 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     }
 
     /**
-     * Finalizes and records any active trade at candle close / settlement.
+     * Finalizes and records all active and completed trades at candle close / settlement.
      *
      * @param metadata completed candle market metadata
      * @param actualOutcome settled binary outcome direction
      * @param currentBalance account balance before settlement
-     * @return generated TradeRecord, or null if no trade was active
+     * @return list of generated {@link TradeRecord} entries
      */
-    public TradeRecord finalizeTrade(CollectorMarketMetadata metadata, TradeDirection actualOutcome, double currentBalance) {
+    public List<TradeRecord> finalizeTrades(CollectorMarketMetadata metadata, TradeDirection actualOutcome, double currentBalance) {
         if (matchingEngine == null || metadata == null) {
-            return null;
+            return List.of();
         }
-        return matchingEngine.finalizeTrade(metadata.tStart(), metadata.datetimeUtc(), actualOutcome, currentBalance);
+        return matchingEngine.finalizeTrades(metadata.tStart(), metadata.datetimeUtc(), actualOutcome, currentBalance);
     }
 
     /**
@@ -150,7 +164,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
                 : (indicatorEngine != null ? indicatorEngine.getTwapOpenPrice() : 0.0);
         double spotPrice = (indicatorEngine != null && indicatorEngine.getCurrentSpotPrice() > 0.0)
                 ? indicatorEngine.getCurrentSpotPrice()
-                : openRef;
+                : (lastReferencePrice > 0.0 ? lastReferencePrice : openRef);
         if (openRef <= 0.0 || spotPrice <= 0.0) {
             return 0.50;
         }

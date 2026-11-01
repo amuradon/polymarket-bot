@@ -122,4 +122,53 @@ class PolymarketOrderBookTest {
         assertThat(partialFill.executedShares()).isEqualTo(40.0);
         assertThat(partialFill.avgPrice()).isCloseTo(0.50, within(0.0001));
     }
+
+    @Test
+    @DisplayName("Should deplete liquidity across 200ms batch buys, clamp on partial reductions, and reset when level disappears")
+    void shouldDepleteLiquidityAcrossBatchPurchasesAndResetWhenLevelDisappears() {
+        PolymarketOrderBook book = new PolymarketOrderBook();
+        String asksJson = "[{\"price\":\"0.50\",\"size\":\"100.0\"},{\"price\":\"0.52\",\"size\":\"100.0\"}]";
+        book.applySnapshot("[]", asksJson, 1000L);
+
+        // Batch 1 at t=1000ms: buy 40 shares -> takes 40 @ 0.50, 60 remaining at 0.50
+        PolymarketOrderBook.FillResult batch1 = book.executeFill(true, true, 40.0, 0.55);
+        assertThat(batch1.executedShares()).isEqualTo(40.0);
+        assertThat(batch1.avgPrice()).isCloseTo(0.50, within(0.0001));
+        assertThat(book.getBestAskUp()).isCloseTo(0.50, within(0.0001));
+        assertThat(book.getDepth1cUp()).isCloseTo(60.0, within(0.0001));
+
+        // Batch 2 at t=1200ms: buy 40 shares -> takes 40 @ 0.50, 20 remaining at 0.50
+        PolymarketOrderBook.FillResult batch2 = book.executeFill(true, true, 40.0, 0.55);
+        assertThat(batch2.executedShares()).isEqualTo(40.0);
+        assertThat(batch2.avgPrice()).isCloseTo(0.50, within(0.0001));
+        assertThat(book.getDepth1cUp()).isCloseTo(20.0, within(0.0001));
+
+        // Batch 3 at t=1400ms: buy 40 shares -> takes remaining 20 @ 0.50 + 20 @ 0.52 (avg 0.51)
+        PolymarketOrderBook.FillResult batch3 = book.executeFill(true, true, 40.0, 0.55);
+        assertThat(batch3.executedShares()).isEqualTo(40.0);
+        assertThat(batch3.avgPrice()).isCloseTo(0.51, within(0.0001));
+        // Level 0.50 is now completely depleted -> best ask is 0.52 with 80 shares remaining
+        assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
+        assertThat(book.getDepth1cUp()).isCloseTo(80.0, within(0.0001));
+
+        // External delta updates 0.50 to size 90 (below our 100 consumed, level has not disappeared):
+        // consumed is clamped to 90 -> effective size at 0.50 is still 0
+        book.applyDelta("SELL", 0.50, 90.0, 1500L);
+        assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
+
+        // External maker adds 25 shares at 0.50 (size becomes 115):
+        // since consumed was clamped to 90, 25 new shares become available at 0.50
+        book.applyDelta("SELL", 0.50, 115.0, 1600L);
+        assertThat(book.getBestAskUp()).isCloseTo(0.50, within(0.0001));
+        assertThat(book.getDepth1cUp()).isCloseTo(25.0, within(0.0001));
+
+        // Level 0.50 completely disappears from the order book (size = 0) -> resets consumed memory
+        book.applyDelta("SELL", 0.50, 0.0, 1700L);
+        assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
+
+        // Level 0.50 reappears with size 50 -> full 50 shares available because consumed memory was reset
+        book.applyDelta("SELL", 0.50, 50.0, 1800L);
+        assertThat(book.getBestAskUp()).isCloseTo(0.50, within(0.0001));
+        assertThat(book.getDepth1cUp()).isCloseTo(50.0, within(0.0001));
+    }
 }

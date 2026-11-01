@@ -142,8 +142,9 @@ class BacktestEngineTest {
         NextCandleProbabilityModel probabilityModel = new NextCandleProbabilityModel(positionSizer);
         TWAPArbitrageStrategy twapStrategy = new TWAPArbitrageStrategy(probabilityModel, config);
 
-        // Polymarket-only strategy requiring zero external streams and zero indicators
-        TradingStrategy polymarketOnlyStrategy = new TradingStrategy() {
+        // Polymarket-only strategy requiring zero external streams and zero indicators,
+        // buying in two consecutive batches per market and supporting parallel market instances
+        class PolymarketOnlyBatchStrategy implements TradingStrategy {
             private StrategyContext ctx;
             private boolean orderedInCandle = false;
 
@@ -154,12 +155,17 @@ class BacktestEngineTest {
 
             @Override
             public Set<IndicatorType> getRequiredIndicators() {
-                return Set.of();
+                return Set.of(IndicatorType.VWAP);
             }
 
             @Override
             public Set<ExternalStreamType> getRequiredExternalStreams() {
                 return Set.of();
+            }
+
+            @Override
+            public TradingStrategy createInstance() {
+                return new PolymarketOnlyBatchStrategy();
             }
 
             @Override
@@ -170,11 +176,14 @@ class BacktestEngineTest {
             @Override
             public void onPolymarketCryptoPrice(long timestampMs, String symbol, String source, double price, long priceTimestampMs) {
                 polymarketCryptoPriceCount.incrementAndGet();
+                // Polymarket data must NOT be mixed into spot indicators (VWAP must remain NaN when no spot trades loaded)
+                assertThat(ctx.getIndicatorValue(IndicatorType.VWAP)).isNaN();
             }
 
             @Override
             public void onPolymarketCryptoTwap60s(long timestampMs, String symbol, String source, double twapPrice, int windowSeconds, long twapTimestampMs) {
                 polymarketTwap60sCount.incrementAndGet();
+                assertThat(ctx.getIndicatorValue(IndicatorType.VWAP)).isNaN();
             }
 
             @Override
@@ -186,9 +195,14 @@ class BacktestEngineTest {
             public void onOrderBookQuote(OrderBookQuote quote) {
                 if (!orderedInCandle && !Double.isNaN(quote.bestAskUp())) {
                     orderedInCandle = true;
+                    // Submit 2 separate batch orders in the same market to verify multi-position support
                     ctx.getExecutionRouter().submitOrder(new OrderCommand(
                             "pm-only-1", "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
-                            "BUY", BigDecimal.valueOf(quote.bestAskUp()), BigDecimal.valueOf(50.0)
+                            "BUY", BigDecimal.valueOf(quote.bestAskUp()), BigDecimal.valueOf(25.0)
+                    ));
+                    ctx.getExecutionRouter().submitOrder(new OrderCommand(
+                            "pm-only-2", "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                            "BUY", BigDecimal.valueOf(quote.bestAskUp()), BigDecimal.valueOf(25.0)
                     ));
                 }
             }
@@ -201,7 +215,8 @@ class BacktestEngineTest {
             @Override
             public void onExecutionReport(ExecutionReport report) {
             }
-        };
+        }
+        TradingStrategy polymarketOnlyStrategy = new PolymarketOnlyBatchStrategy();
 
         StrategyRegistry strategyRegistry = new StrategyRegistry(Map.of(
                 twapStrategy.getName(), twapStrategy,
@@ -265,7 +280,7 @@ class BacktestEngineTest {
 
         assertThat(result).isNotNull();
         assertThat(result.totalMarkets()).isEqualTo(3);
-        assertThat(result.trades()).hasSize(3);
+        assertThat(result.trades()).hasSize(6);
         assertThat(polymarketCryptoPriceCount.get()).isEqualTo(3);
         assertThat(polymarketTwap60sCount.get()).isGreaterThanOrEqualTo(3);
         assertThat(externalSpotTradeCount.get()).isZero();

@@ -18,13 +18,13 @@ import static org.assertj.core.api.Assertions.within;
 class SimulatedMatchingEngineTest {
 
     @Test
-    @DisplayName("Should schedule pending order with time-varying latency scaled by latencyFactor and match against delayed book state")
+    @DisplayName("Should schedule pending order with 2x round-trip latency scaled by latencyFactor and match against delayed book state")
     void shouldSimulateOrderWithTimeVaryingLatencyAndLatencyFactor() {
         PolymarketOrderBook book = new PolymarketOrderBook();
         book.applyDelta("SELL", 0.50, 1000.0, 1000L);
-        book.setLastObservedOneWayLatencyMs(12L); // 12ms observed latency
+        book.setLastObservedOneWayLatencyMs(15L); // 15ms one-way latency -> 30ms round-trip at factor 1.0
 
-        // Configure latencyFactor = 2.0 -> expected execution delay = 24ms
+        // Configure latencyFactor = 2.0 -> expected execution delay = 2 * 15ms * 2.0 = 60ms
         SimulatedMatchingEngine engine = new SimulatedMatchingEngine(book, 2.0);
         List<BacktestEvent> scheduled = new ArrayList<>();
         engine.setEventScheduler(scheduled::add);
@@ -42,30 +42,76 @@ class SimulatedMatchingEngineTest {
 
         assertThat(scheduled).hasSize(1);
         BacktestEvent event = scheduled.get(0);
-        assertThat(event.timestampMs()).isEqualTo(1024L);
+        assertThat(event.timestampMs()).isEqualTo(1060L);
         assertThat(event).isInstanceOf(BacktestEvent.PendingOrderExecutionEvent.class);
 
-        // Simulate the book moving at t = 1010ms (before order reaches exchange at 1024ms):
+        // Simulate the book moving at t = 1030ms (before order reaches exchange at 1060ms):
         // 0.50 ask disappears, new best ask is 0.52
-        book.applyDelta("SELL", 0.50, 0.0, 1010L);
-        book.applyDelta("SELL", 0.52, 1000.0, 1010L);
+        book.applyDelta("SELL", 0.50, 0.0, 1030L);
+        book.applyDelta("SELL", 0.52, 1000.0, 1030L);
 
-        // Now execute pending order at t = 1024ms
+        // Now execute pending order at t = 1060ms
         ExecutionReport report = engine.executePendingOrder((BacktestEvent.PendingOrderExecutionEvent) event);
         assertThat(report).isNotNull();
         assertThat(report.status()).isEqualTo("FILLED");
-        // Must fill at 0.52 (the book price at 1024ms), NOT the stale 0.50 from 1000ms!
+        // Must fill at 0.52 (the book price at 1060ms), NOT the stale 0.50 from 1000ms!
         assertThat(report.executedPrice().doubleValue()).isCloseTo(0.52, within(0.0001));
         assertThat(report.executedSize().doubleValue()).isEqualTo(100.0);
         assertThat(engine.hasActiveTrade()).isTrue();
 
-        TradeRecord trade = engine.finalizeTrade(1000L, "2026-08-12T00:00:00Z", TradeDirection.UP, 10000.0);
-        assertThat(trade).isNotNull();
+        List<TradeRecord> trades = engine.finalizeTrades(1000L, "2026-08-12T00:00:00Z", TradeDirection.UP, 10000.0);
+        assertThat(trades).hasSize(1);
+        TradeRecord trade = trades.getFirst();
         assertThat(trade.isWin()).isTrue();
         assertThat(trade.entryPrice()).isCloseTo(0.52, within(0.0001));
         assertThat(trade.exitPrice()).isEqualTo(1.0);
         assertThat(trade.netPnl()).isCloseTo(46.25, within(0.1));
         assertThat(trade.balanceAfterTrade()).isCloseTo(10046.25, within(0.1));
+    }
+
+    @Test
+    @DisplayName("Should support multiple simultaneous positions in a single market and deplete book liquidity across orders")
+    void shouldSupportMultipleSimultaneousPositionsAndDepleteLiquidity() {
+        PolymarketOrderBook book = new PolymarketOrderBook();
+        book.applyDelta("SELL", 0.50, 50.0, 1000L);
+        book.applyDelta("SELL", 0.52, 100.0, 1000L);
+        book.applyDelta("BUY", 0.75, 100.0, 1000L);
+        book.setLastObservedOneWayLatencyMs(15L);
+
+        SimulatedMatchingEngine engine = new SimulatedMatchingEngine(book, 1.0);
+
+        // Order 1 at t=1000ms: BUY 50 shares -> consumes all 50 shares at 0.50
+        engine.submitOrder(new OrderCommand(
+                "buy-1", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "BUY", BigDecimal.valueOf(0.55), BigDecimal.valueOf(50.0)
+        ), 1000L);
+
+        // Order 2 at t=1200ms: BUY 50 shares -> 0.50 is depleted, fills at 0.52!
+        engine.submitOrder(new OrderCommand(
+                "buy-2", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "BUY", BigDecimal.valueOf(0.55), BigDecimal.valueOf(50.0)
+        ), 1200L);
+
+        // Order 3 at t=1400ms: Partial SELL exit of 25 shares @ 0.75 (FIFO closes half of buy-1)
+        engine.submitOrder(new OrderCommand(
+                "sell-1", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "SELL", BigDecimal.valueOf(0.70), BigDecimal.valueOf(25.0)
+        ), 1400L);
+
+        List<TradeRecord> trades = engine.finalizeTrades(1000L, "2026-08-12T00:00:00Z", TradeDirection.UP, 10000.0);
+        // 1 early-exited trade (25 shares) + 2 remaining open positions settled at resolution (25 shares @ 0.50, 50 shares @ 0.52)
+        assertThat(trades).hasSize(3);
+        assertThat(trades.get(0).entryPrice()).isCloseTo(0.50, within(0.0001));
+        assertThat(trades.get(0).exitPrice()).isCloseTo(0.75, within(0.0001));
+        assertThat(trades.get(0).shares()).isEqualTo(25.0);
+
+        assertThat(trades.get(1).entryPrice()).isCloseTo(0.50, within(0.0001));
+        assertThat(trades.get(1).exitPrice()).isEqualTo(1.0);
+        assertThat(trades.get(1).shares()).isEqualTo(25.0);
+
+        assertThat(trades.get(2).entryPrice()).isCloseTo(0.52, within(0.0001));
+        assertThat(trades.get(2).exitPrice()).isEqualTo(1.0);
+        assertThat(trades.get(2).shares()).isEqualTo(50.0);
     }
 
     @Test

@@ -2,6 +2,7 @@ package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TwapPoint;
 import cz.polymarket.bot.domain.TwapUpdate;
@@ -18,10 +19,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
 
 /**
  * High-performance chronological event multiplexer and streamer for backtesting.
@@ -97,6 +100,260 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
+     * Loads all shared daily stream events ({@code polymarket/price_crypto}, {@code polymarket/price_crypto_twap_60s},
+     * and any strategy-requested external Binance/Deribit streams) for a single UTC day into a sorted,
+     * immutable array that can be shared read-only across all parallel 15-minute market workers of that day.
+     *
+     * @param datasetService collector Parquet dataset service
+     * @param symbol trading asset symbol
+     * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @param requiredExternalStreams set of external streams required by the strategy
+     * @return sorted array of daily stream events
+     */
+    public static BacktestEvent[] loadSharedDailyStreams(
+            CollectorParquetDatasetService datasetService,
+            String symbol,
+            String dateStr,
+            Set<ExternalStreamType> requiredExternalStreams) {
+
+        if (datasetService == null || dateStr == null || dateStr.isBlank()) {
+            return EMPTY_EVENTS;
+        }
+
+        Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
+
+        record DailyLoaderTask(Path file, BiConsumer<Statement, List<BacktestEvent>> loader) {}
+        List<DailyLoaderTask> tasks = new ArrayList<>(8);
+
+        Path priceFile = datasetService.getPolymarketCryptoPriceFile(symbol, dateStr);
+        if (priceFile != null && Files.exists(priceFile)) {
+            tasks.add(new DailyLoaderTask(priceFile, (stmt, out) -> loadDailyPolymarketCryptoPrice(stmt, priceFile, out)));
+        }
+
+        Path twapFile = datasetService.getPolymarketCryptoTwap60sFile(symbol, dateStr);
+        if (twapFile != null && Files.exists(twapFile)) {
+            tasks.add(new DailyLoaderTask(twapFile, (stmt, out) -> loadDailyPolymarketCryptoTwap60s(stmt, twapFile, out)));
+        }
+
+        if (extStreams.contains(ExternalStreamType.BINANCE_SPOT_AGG_TRADES)) {
+            Path f = datasetService.getBinanceSpotAggTradesFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceSpotTrades(stmt, f, out)));
+            }
+        }
+        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES)) {
+            Path f = datasetService.getBinanceFuturesAggTradesFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesTrades(stmt, f, out)));
+            }
+        }
+        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_PARTIAL)) {
+            Path f = datasetService.getBinanceFuturesDepthPartialFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesDepth(stmt, f, out)));
+            }
+        }
+        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_DIFF)) {
+            Path f = datasetService.getBinanceFuturesDepthDiffFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesDepth(stmt, f, out)));
+            }
+        }
+        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_FORCE_ORDER)) {
+            Path f = datasetService.getBinanceFuturesForceOrderFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesForceOrders(stmt, f, out)));
+            }
+        }
+        if (extStreams.contains(ExternalStreamType.DERIBIT_FUTURES_TRADES)) {
+            Path f = datasetService.getDeribitFuturesTradesFile(symbol, dateStr);
+            if (f != null && Files.exists(f)) {
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyDeribitTrades(stmt, f, out)));
+            }
+        }
+
+        if (tasks.isEmpty()) {
+            return EMPTY_EVENTS;
+        }
+
+        if (tasks.size() == 1) {
+            List<BacktestEvent> singleList = new ArrayList<>(16_384);
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                 Statement stmt = conn.createStatement()) {
+                tasks.getFirst().loader().accept(stmt, singleList);
+            } catch (SQLException e) {
+                LOG.warnf("Failed loading daily stream file %s: %s", tasks.getFirst().file(), e.getMessage());
+            }
+            BacktestEvent[] arr = singleList.toArray(EMPTY_EVENTS);
+            Arrays.parallelSort(arr);
+            return arr;
+        }
+
+        @SuppressWarnings("unchecked")
+        CompletableFuture<List<BacktestEvent>>[] futures = new CompletableFuture[tasks.size()];
+        for (int i = 0; i < tasks.size(); i++) {
+            DailyLoaderTask task = tasks.get(i);
+            futures[i] = CompletableFuture.supplyAsync(() -> {
+                List<BacktestEvent> localEvents = new ArrayList<>(16_384);
+                try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                     Statement stmt = conn.createStatement()) {
+                    task.loader().accept(stmt, localEvents);
+                } catch (SQLException e) {
+                    LOG.warnf("Failed loading daily stream file %s: %s", task.file(), e.getMessage());
+                }
+                return localEvents;
+            });
+        }
+
+        int totalSize = 0;
+        List<List<BacktestEvent>> loadedLists = new ArrayList<>(tasks.size());
+        for (CompletableFuture<List<BacktestEvent>> future : futures) {
+            List<BacktestEvent> part = future.join();
+            loadedLists.add(part);
+            totalSize += part.size();
+        }
+
+        BacktestEvent[] combined = new BacktestEvent[totalSize];
+        int offset = 0;
+        for (List<BacktestEvent> part : loadedLists) {
+            for (int i = 0, n = part.size(); i < n; i++) {
+                combined[offset++] = part.get(i);
+            }
+        }
+        Arrays.parallelSort(combined);
+        return combined;
+    }
+
+    /**
+     * Builds a completed 15-minute {@link MarketCandle} directly from the pre-loaded daily stream array
+     * using {@code O(log N)} binary search over {@link BacktestEvent.BinanceSpotTradeEvent} and
+     * {@link BacktestEvent.BinanceFuturesTradeEvent} entries.
+     *
+     * @param sharedDailyEvents sorted array of daily stream events
+     * @param tStart candle start epoch seconds
+     * @param tEnd candle end epoch seconds
+     * @return constructed MarketCandle
+     */
+    public static MarketCandle buildSpotCandleFromDailyEvents(BacktestEvent[] sharedDailyEvents, long tStart, long tEnd) {
+        if (sharedDailyEvents == null || sharedDailyEvents.length == 0) {
+            return null;
+        }
+        long tStartMs = tStart * 1000L;
+        long tEndMs = tEnd * 1000L;
+        int startIdx = findFirstIndexAtOrAfter(sharedDailyEvents, tStartMs);
+
+        double sOpen = 0.0;
+        double sHigh = 0.0;
+        double sLow = 0.0;
+        double sClose = 0.0;
+        double spotVolBtc = 0.0;
+        double spotVolUsd = 0.0;
+        double spotDeltaBtc = 0.0;
+
+        double fOpen = 0.0;
+        double fHigh = 0.0;
+        double fLow = 0.0;
+        double fClose = 0.0;
+        double futVolBtc = 0.0;
+        double futVolUsd = 0.0;
+        double futDeltaBtc = 0.0;
+
+        for (int i = startIdx; i < sharedDailyEvents.length; i++) {
+            BacktestEvent ev = sharedDailyEvents[i];
+            if (ev.timestampMs() > tEndMs) {
+                break;
+            }
+            if (ev instanceof BacktestEvent.BinanceSpotTradeEvent spot) {
+                double p = spot.price();
+                double q = spot.quantity();
+                if (sOpen <= 0.0) {
+                    sOpen = p;
+                    sHigh = p;
+                    sLow = p;
+                } else {
+                    if (p > sHigh) sHigh = p;
+                    if (p < sLow) sLow = p;
+                }
+                sClose = p;
+                spotVolBtc += q;
+                spotVolUsd += p * q;
+                spotDeltaBtc += spot.isBuyerMaker() ? -q : q;
+            } else if (ev instanceof BacktestEvent.BinanceFuturesTradeEvent fut) {
+                double p = fut.price();
+                double q = fut.quantity();
+                if (fOpen <= 0.0) {
+                    fOpen = p;
+                    fHigh = p;
+                    fLow = p;
+                } else {
+                    if (p > fHigh) fHigh = p;
+                    if (p < fLow) fLow = p;
+                }
+                fClose = p;
+                futVolBtc += q;
+                futVolUsd += p * q;
+                futDeltaBtc += fut.isBuyerMaker() ? -q : q;
+            }
+        }
+
+        if (sOpen <= 0.0 || sHigh <= 0.0 || sLow <= 0.0 || sClose <= 0.0) {
+            return null;
+        }
+
+        double basisBps = (sClose > 0.0 && fClose > 0.0)
+                ? ((fClose - sClose) / sClose) * 10000.0
+                : 0.0;
+
+        return new MarketCandle(
+                tStart,
+                tEnd,
+                sOpen, sHigh, sLow, sClose,
+                spotVolBtc, spotVolUsd, spotDeltaBtc,
+                fOpen > 0.0 ? fOpen : sOpen,
+                fHigh > 0.0 ? fHigh : sHigh,
+                fLow > 0.0 ? fLow : sLow,
+                fClose > 0.0 ? fClose : sClose,
+                futVolBtc, futVolUsd, futDeltaBtc,
+                basisBps
+        );
+    }
+
+    /**
+     * Loads all chronological events for a specific 15-minute market interval using pre-loaded
+     * shared daily stream events for the UTC day and loading only the market-specific Polymarket CLOB file.
+     *
+     * @param metadata market metadata descriptor
+     * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
+     */
+    public void loadCandleEvents(
+            CollectorMarketMetadata metadata,
+            BacktestEvent[] sharedDailyStreamEvents) {
+
+        if (metadata == null) {
+            return;
+        }
+
+        long tStart = metadata.tStart();
+        long tEnd = metadata.tEnd();
+        long tStartMs = tStart * 1000L;
+        long tEndMs = tEnd * 1000L;
+        TradeDirection actualOutcome = metadata.actualOutcome() != null ? metadata.actualOutcome() : TradeDirection.UP;
+
+        scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
+
+        try {
+            Statement stmt = getOrCreateStatement();
+            loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
+        } catch (SQLException e) {
+            LOG.warnf("Failed to stream collector Parquet CLOB events for candle %d: %s", tStart, e.getMessage());
+        }
+
+        if (sharedDailyStreamEvents != null && sharedDailyStreamEvents.length > 0) {
+            scheduleDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
+        }
+    }
+
+    /**
      * Loads all chronological events for a specific 15-minute market interval from the collector
      * Parquet archives, loading only the external streams requested by the active strategy.
      *
@@ -122,7 +379,37 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         TradeDirection actualOutcome = metadata.actualOutcome() != null ? metadata.actualOutcome() : TradeDirection.UP;
         Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
 
-        // 1. Mandatory Candle Lifecycle Milestones
+        scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
+
+        if (datasetService == null) {
+            return;
+        }
+
+        try {
+            Statement stmt = getOrCreateStatement();
+
+            // Load 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
+            loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
+
+            // Slice daily PolyBolt & External streams for [tStartMs, tEndMs] from day cache
+            String dateStr = metadata.dateStr();
+            if (dateStr != null && !dateStr.isBlank()) {
+                ensureDailyStreamsLoaded(datasetService, symbol, dateStr, extStreams);
+                scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
+            }
+        } catch (SQLException e) {
+            LOG.warnf("Failed to stream collector Parquet events for candle %d: %s", tStart, e.getMessage());
+        }
+    }
+
+    private void scheduleMandatoryLifecycleEvents(
+            CollectorMarketMetadata metadata,
+            long tStart,
+            long tEnd,
+            long tStartMs,
+            long tEndMs,
+            TradeDirection actualOutcome) {
+
         scheduleEvent(new BacktestEvent.CandleLifecycleEvent(
                 tStartMs,
                 BacktestEvent.CandleLifecycleType.CANDLE_START,
@@ -154,26 +441,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                             true
                     )
             ));
-        }
-
-        if (datasetService == null) {
-            return;
-        }
-
-        try {
-            Statement stmt = getOrCreateStatement();
-
-            // 2. Load 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
-            loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
-
-            // 3. Slice daily PolyBolt & External streams for [tStartMs, tEndMs] from day cache
-            String dateStr = metadata.dateStr();
-            if (dateStr != null && !dateStr.isBlank()) {
-                ensureDailyStreamsLoaded(stmt, datasetService, symbol, dateStr, extStreams);
-                scheduleDailySlice(tStartMs, tEndMs, metadata, tStart, tEnd);
-            }
-        } catch (SQLException e) {
-            LOG.warnf("Failed to stream collector Parquet events for candle %d: %s", tStart, e.getMessage());
         }
     }
 
@@ -211,7 +478,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     private void ensureDailyStreamsLoaded(
-            Statement stmt,
             CollectorParquetDatasetService datasetService,
             String symbol,
             String dateStr,
@@ -224,48 +490,21 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             return;
         }
 
-        List<BacktestEvent> dayEvents = new ArrayList<>(65_536);
-
-        // Always load Polymarket crypto price and 60s TWAP streams
-        loadDailyPolymarketCryptoPrice(stmt, datasetService.getPolymarketCryptoPriceFile(symbol, dateStr), dayEvents);
-        loadDailyPolymarketCryptoTwap60s(stmt, datasetService.getPolymarketCryptoTwap60sFile(symbol, dateStr), dayEvents);
-
-        // Conditionally load external streams only if required by the strategy
-        if (extStreams.contains(ExternalStreamType.BINANCE_SPOT_AGG_TRADES)) {
-            loadDailyBinanceSpotTrades(stmt, datasetService.getBinanceSpotAggTradesFile(symbol, dateStr), dayEvents);
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES)) {
-            loadDailyBinanceFuturesTrades(stmt, datasetService.getBinanceFuturesAggTradesFile(symbol, dateStr), dayEvents);
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_PARTIAL)) {
-            loadDailyBinanceFuturesDepth(stmt, datasetService.getBinanceFuturesDepthPartialFile(symbol, dateStr), dayEvents);
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_DIFF)) {
-            loadDailyBinanceFuturesDepth(stmt, datasetService.getBinanceFuturesDepthDiffFile(symbol, dateStr), dayEvents);
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_FORCE_ORDER)) {
-            loadDailyBinanceFuturesForceOrders(stmt, datasetService.getBinanceFuturesForceOrderFile(symbol, dateStr), dayEvents);
-        }
-        if (extStreams.contains(ExternalStreamType.DERIBIT_FUTURES_TRADES)) {
-            loadDailyDeribitTrades(stmt, datasetService.getDeribitFuturesTradesFile(symbol, dateStr), dayEvents);
-        }
-
-        dayEvents.sort(Comparator.naturalOrder());
         this.cachedDateStr = dateStr;
         this.cachedSymbol = symKey;
         this.cachedExternalStreams = Set.copyOf(extStreams);
-        this.cachedDailyStreamEvents = dayEvents.toArray(EMPTY_EVENTS);
+        this.cachedDailyStreamEvents = loadSharedDailyStreams(datasetService, symbol, dateStr, extStreams);
     }
 
     private void scheduleDailySlice(
+            BacktestEvent[] events,
             long tStartMs,
             long tEndMs,
             CollectorMarketMetadata metadata,
             long tStart,
             long tEnd) {
 
-        BacktestEvent[] events = this.cachedDailyStreamEvents;
-        if (events.length == 0) {
+        if (events == null || events.length == 0) {
             return;
         }
 
@@ -345,7 +584,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         return result;
     }
 
-    private void loadDailyPolymarketCryptoPrice(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyPolymarketCryptoPrice(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -368,7 +607,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyPolymarketCryptoTwap60s(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyPolymarketCryptoTwap60s(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -392,7 +631,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyBinanceSpotTrades(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyBinanceSpotTrades(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -414,7 +653,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyBinanceFuturesTrades(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyBinanceFuturesTrades(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -436,7 +675,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyBinanceFuturesDepth(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyBinanceFuturesDepth(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -464,7 +703,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyBinanceFuturesForceOrders(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyBinanceFuturesForceOrders(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
@@ -488,7 +727,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadDailyDeribitTrades(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyDeribitTrades(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }

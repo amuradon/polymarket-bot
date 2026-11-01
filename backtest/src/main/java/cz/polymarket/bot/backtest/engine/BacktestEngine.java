@@ -27,8 +27,13 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * High-performance event-driven backtesting engine streaming historical market data directly from
@@ -161,141 +166,131 @@ public class BacktestEngine {
         boolean needBasis = reqIndicatorsSet.contains(IndicatorType.BASIS);
         boolean needObi = reqIndicatorsSet.contains(IndicatorType.ORDER_BOOK_IMBALANCE);
         boolean needMicroPrice = reqIndicatorsSet.contains(IndicatorType.MICRO_PRICE);
+        boolean needCandleHistory = reqIndicatorsSet.contains(IndicatorType.VOLATILITY_4H)
+                || reqIndicatorsSet.contains(IndicatorType.VWAP_ZSCORE);
 
         Set<ExternalStreamType> requiredExternalStreams = strategy.getRequiredExternalStreams() != null
                 ? strategy.getRequiredExternalStreams()
                 : Set.of();
 
-        PolymarketOrderBook orderBook = new PolymarketOrderBook();
-        SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
-        DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(reqIndicatorsSet);
+        // Group markets by UTC day so shared daily streams (PolyBolt, Binance, Deribit) are loaded strictly once per day
+        Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
+        for (CollectorMarketMetadata market : markets) {
+            String dayKey = market.dateStr() != null ? market.dateStr() : "";
+            marketsByDay.computeIfAbsent(dayKey, k -> new ArrayList<>()).add(market);
+        }
+
+        TradingStrategy probeInstance = strategy.createInstance();
+        boolean parallelCapable = (probeInstance != null && probeInstance != strategy);
 
         List<TradeRecord> trades = new ArrayList<>();
         double currentBalance = capital;
         double brierSum = 0.0;
         int evaluatedCount = 0;
 
-        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
-            matchingEngine.setEventScheduler(streamer::scheduleEvent);
-            BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
-            strategy.init(context);
+        List<MarketCandle> rollingCandleHistory = needCandleHistory ? new ArrayList<>(markets.size()) : List.of();
 
-            for (CollectorMarketMetadata market : markets) {
-                long tStart = market.tStart();
-                long tStartMs = tStart * 1000L;
-                TradeDirection actualOutcome = market.actualOutcome() != null ? market.actualOutcome() : TradeDirection.UP;
+        for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
+            String dateStr = dayEntry.getKey();
+            List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
+            int dayMarketCount = dayMarkets.size();
 
-                orderBook.clear();
-                orderBook.setMarketTokenIds(market.upTokenId(), market.downTokenId());
-                context.resetForCandle();
-                indicatorEngine.resetActiveCandle(market.twapOpen());
+            // 1. Load shared daily streams strictly ONCE for this UTC day
+            BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
+                    ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr, requiredExternalStreams)
+                    : new BacktestEvent[0];
 
-                if (hasIndicators) {
-                    notifyIndicators(strategy, indicatorEngine, requiredIndicators, tStartMs);
-                }
-
-                streamer.clear();
-                streamer.loadCandleEvents(market, datasetService, sym, requiredExternalStreams);
-
-                while (streamer.hasNext()) {
-                    BacktestEvent event = streamer.next();
-                    long evTs = event.timestampMs();
-                    context.setCurrentTimestampMs(evTs);
-
-                    switch (event) {
-                        case BacktestEvent.PolymarketClobEvent e -> {
-                            orderBook.applyCollectorEvent(e);
-                            if (evTs >= tStartMs) {
-                                OrderBookQuote quote = orderBook.toOrderBookQuote(evTs);
-                                strategy.onOrderBookQuote(quote);
-                            }
-                        }
-                        case BacktestEvent.PolymarketCryptoPriceEvent e -> {
-                            indicatorEngine.onPolymarketCryptoPrice(evTs, e.price());
-                            if (hasIndicators) {
-                                notifyIndicators(strategy, indicatorEngine, requiredIndicators, evTs);
-                            }
-                            strategy.onPolymarketCryptoPrice(evTs, e.symbol(), e.source(), e.price(), e.priceTimestampMs());
-                        }
-                        case BacktestEvent.PolymarketCryptoTwap60sEvent e -> {
-                            indicatorEngine.onPolymarketCryptoTwap60s(evTs, e.twapPrice());
-                            if (hasIndicators) {
-                                notifyIndicators(strategy, indicatorEngine, requiredIndicators, evTs);
-                            }
-                            strategy.onPolymarketCryptoTwap60s(
-                                    evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
-                        }
-                        case BacktestEvent.BinanceSpotTradeEvent e -> {
-                            indicatorEngine.onSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                            if (hasIndicators) {
-                                notifyIndicators(strategy, indicatorEngine, requiredIndicators, evTs);
-                            }
-                            strategy.onBinanceSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                        }
-                        case BacktestEvent.BinanceFuturesTradeEvent e -> {
-                            indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                            if (needBasis) {
-                                double val = indicatorEngine.getIndicatorValue(IndicatorType.BASIS);
-                                if (!Double.isNaN(val)) {
-                                    strategy.onIndicatorUpdate(IndicatorType.BASIS, val, evTs);
-                                }
-                            }
-                            strategy.onBinanceFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                        }
-                        case BacktestEvent.BinanceFuturesOrderBookEvent e -> {
-                            indicatorEngine.onFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
-                            if (needObi) {
-                                strategy.onIndicatorUpdate(IndicatorType.ORDER_BOOK_IMBALANCE,
-                                        indicatorEngine.getIndicatorValue(IndicatorType.ORDER_BOOK_IMBALANCE), evTs);
-                            }
-                            if (needMicroPrice) {
-                                strategy.onIndicatorUpdate(IndicatorType.MICRO_PRICE,
-                                        indicatorEngine.getIndicatorValue(IndicatorType.MICRO_PRICE), evTs);
-                            }
-                            strategy.onBinanceFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
-                        }
-                        case BacktestEvent.BinanceFuturesForceOrderEvent e ->
-                                strategy.onBinanceFuturesForceOrder(evTs, e.side(), e.price(), e.averagePrice(), e.quantity());
-                        case BacktestEvent.DeribitFuturesTradeEvent e ->
-                                strategy.onDeribitFuturesTrade(
-                                        evTs, e.instrumentName(), e.direction(), e.price(), e.amount(), e.markPrice(), e.indexPrice());
-                        case BacktestEvent.TwapUpdateEvent e ->
-                                strategy.onTwapUpdate(e.update());
-                        case BacktestEvent.PendingOrderExecutionEvent e -> {
-                            ExecutionReport report = matchingEngine.executePendingOrder(e);
-                            if (report != null) {
-                                strategy.onExecutionReport(report);
-                            }
-                        }
-                        case BacktestEvent.CandleLifecycleEvent e -> {
-                            if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_CLOSE) {
-                                strategy.onCandleResolution(actualOutcome);
-
-                                if (context.hasActiveTrade()) {
-                                    TradeRecord trade = context.finalizeTrade(market, actualOutcome, currentBalance);
-                                    if (trade != null) {
-                                        trades.add(trade);
-                                        currentBalance = trade.balanceAfterTrade();
-                                    }
-                                }
-
-                                MarketCandle completedCandle = (e.completedCandle() != null)
-                                        ? e.completedCandle()
-                                        : indicatorEngine.buildCompletedCandle(market.tStart(), market.tEnd());
-                                indicatorEngine.onMarketCandleCompleted(completedCandle);
-                                strategy.onMarketCandleCompleted(completedCandle);
-                                if (hasIndicators) {
-                                    notifyIndicators(strategy, indicatorEngine, requiredIndicators, evTs);
-                                }
-
-                                double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
-                                double pModelUp = context.getEstimatedModelProbUp(market);
-                                double diff = pModelUp - actualUp;
-                                brierSum += diff * diff;
-                                evaluatedCount++;
-                            }
-                        }
+            // 2. Pre-build prior MarketCandle snapshots if strategy uses multi-candle indicators
+            @SuppressWarnings("unchecked")
+            List<MarketCandle>[] priorCandlesPerMarket = needCandleHistory ? new List[dayMarketCount] : null;
+            if (needCandleHistory) {
+                for (int i = 0; i < dayMarketCount; i++) {
+                    CollectorMarketMetadata m = dayMarkets.get(i);
+                    priorCandlesPerMarket[i] = List.copyOf(rollingCandleHistory);
+                    MarketCandle built = ChronologicalEventStreamer.buildSpotCandleFromDailyEvents(
+                            sharedDailyEvents, m.tStart(), m.tEnd());
+                    if (built != null) {
+                        rollingCandleHistory.add(built);
                     }
+                }
+            }
+
+            // 3. Process the day's 15-minute Polymarket markets in parallel across CPU cores
+            MarketSimulationOutcome[] dayOutcomes = new MarketSimulationOutcome[dayMarketCount];
+            int numWorkers = parallelCapable
+                    ? Math.min(dayMarketCount, Math.max(1, Runtime.getRuntime().availableProcessors()))
+                    : 1;
+
+            if (numWorkers <= 1) {
+                executeWorkerLoop(
+                        new AtomicInteger(0),
+                        dayMarkets,
+                        sharedDailyEvents,
+                        priorCandlesPerMarket,
+                        dayOutcomes,
+                        strategy,
+                        parallelCapable,
+                        reqIndicatorsSet,
+                        requiredIndicators,
+                        hasIndicators,
+                        needBasis,
+                        needObi,
+                        needMicroPrice,
+                        resolvedLatencyFactor
+                );
+            } else {
+                AtomicInteger cursor = new AtomicInteger(0);
+                CompletableFuture<?>[] workers = new CompletableFuture<?>[numWorkers];
+                for (int w = 0; w < numWorkers; w++) {
+                    workers[w] = CompletableFuture.runAsync(() -> executeWorkerLoop(
+                            cursor,
+                            dayMarkets,
+                            sharedDailyEvents,
+                            priorCandlesPerMarket,
+                            dayOutcomes,
+                            strategy,
+                            true,
+                            reqIndicatorsSet,
+                            requiredIndicators,
+                            hasIndicators,
+                            needBasis,
+                            needObi,
+                            needMicroPrice,
+                            resolvedLatencyFactor
+                    ), ForkJoinPool.commonPool());
+                }
+                CompletableFuture.allOf(workers).join();
+            }
+
+            // 4. Deterministic chronological reduction of trades, account balance, and Brier score
+            for (int i = 0; i < dayMarketCount; i++) {
+                MarketSimulationOutcome outcome = dayOutcomes[i];
+                if (outcome == null) {
+                    continue;
+                }
+                for (TradeRecord rawTrade : outcome.rawTrades()) {
+                    currentBalance += rawTrade.netPnl();
+                    trades.add(new TradeRecord(
+                            rawTrade.entryTimeUtc(),
+                            rawTrade.intervalStartSec(),
+                            rawTrade.side(),
+                            rawTrade.entryPrice(),
+                            rawTrade.exitPrice(),
+                            rawTrade.sizeUsd(),
+                            rawTrade.shares(),
+                            rawTrade.feeUsd(),
+                            rawTrade.netPnl(),
+                            rawTrade.exitReason(),
+                            rawTrade.modelProbability(),
+                            rawTrade.marketPrice(),
+                            rawTrade.edge(),
+                            rawTrade.isWin(),
+                            currentBalance
+                    ));
+                }
+                if (outcome.evaluated()) {
+                    brierSum += outcome.brierDiffSq();
+                    evaluatedCount++;
                 }
             }
         }
@@ -320,6 +315,179 @@ public class BacktestEngine {
             throw new RuntimeException("Failed to export backtest results to JSON: " + e.getMessage(), e);
         }
     }
+
+    private void executeWorkerLoop(
+            AtomicInteger cursor,
+            List<CollectorMarketMetadata> dayMarkets,
+            BacktestEvent[] sharedDailyEvents,
+            List<MarketCandle>[] priorCandlesPerMarket,
+            MarketSimulationOutcome[] dayOutcomes,
+            TradingStrategy templateStrategy,
+            boolean createFreshStrategyPerMarket,
+            Set<IndicatorType> reqIndicatorsSet,
+            IndicatorType[] requiredIndicators,
+            boolean hasIndicators,
+            boolean needBasis,
+            boolean needObi,
+            boolean needMicroPrice,
+            double resolvedLatencyFactor) {
+
+        int total = dayMarkets.size();
+        PolymarketOrderBook orderBook = new PolymarketOrderBook();
+        SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
+        DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(reqIndicatorsSet);
+
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
+            matchingEngine.setEventScheduler(streamer::scheduleEvent);
+            BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
+
+            TradingStrategy workerStrategy = createFreshStrategyPerMarket ? null : templateStrategy;
+            if (workerStrategy != null) {
+                workerStrategy.init(context);
+            }
+
+            while (true) {
+                int idx = cursor.getAndIncrement();
+                if (idx >= total) {
+                    break;
+                }
+
+                CollectorMarketMetadata market = dayMarkets.get(idx);
+                TradingStrategy activeStrategy = createFreshStrategyPerMarket
+                        ? templateStrategy.createInstance()
+                        : workerStrategy;
+                if (createFreshStrategyPerMarket) {
+                    activeStrategy.reset();
+                    activeStrategy.init(context);
+                }
+
+                long tStart = market.tStart();
+                long tStartMs = tStart * 1000L;
+                TradeDirection actualOutcome = market.actualOutcome() != null ? market.actualOutcome() : TradeDirection.UP;
+
+                orderBook.clear();
+                orderBook.setMarketTokenIds(market.upTokenId(), market.downTokenId());
+                context.resetForCandle();
+                indicatorEngine.resetActiveCandle();
+                if (priorCandlesPerMarket != null && priorCandlesPerMarket[idx] != null) {
+                    indicatorEngine.setCandleHistory(priorCandlesPerMarket[idx]);
+                }
+
+                if (hasIndicators) {
+                    notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, tStartMs);
+                }
+
+                streamer.clear();
+                streamer.loadCandleEvents(market, sharedDailyEvents);
+
+                List<TradeRecord> marketTrades = List.of();
+                double brierDiffSq = 0.0;
+                boolean evaluated = false;
+
+                while (streamer.hasNext()) {
+                    BacktestEvent event = streamer.next();
+                    long evTs = event.timestampMs();
+                    context.setCurrentTimestampMs(evTs);
+
+                    switch (event) {
+                        case BacktestEvent.PolymarketClobEvent e -> {
+                            orderBook.applyCollectorEvent(e);
+                            if (evTs >= tStartMs) {
+                                OrderBookQuote quote = orderBook.toOrderBookQuote(evTs);
+                                activeStrategy.onOrderBookQuote(quote);
+                            }
+                        }
+                        case BacktestEvent.PolymarketCryptoPriceEvent e -> {
+                            context.setLastReferencePrice(e.price());
+                            activeStrategy.onPolymarketCryptoPrice(evTs, e.symbol(), e.source(), e.price(), e.priceTimestampMs());
+                        }
+                        case BacktestEvent.PolymarketCryptoTwap60sEvent e -> {
+                            context.setLastReferencePrice(e.twapPrice());
+                            activeStrategy.onPolymarketCryptoTwap60s(
+                                    evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
+                        }
+                        case BacktestEvent.BinanceSpotTradeEvent e -> {
+                            context.setLastReferencePrice(e.price());
+                            indicatorEngine.onSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
+                            if (hasIndicators) {
+                                notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
+                            }
+                            activeStrategy.onBinanceSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
+                        }
+                        case BacktestEvent.BinanceFuturesTradeEvent e -> {
+                            indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
+                            if (needBasis) {
+                                double val = indicatorEngine.getIndicatorValue(IndicatorType.BASIS);
+                                if (!Double.isNaN(val)) {
+                                    activeStrategy.onIndicatorUpdate(IndicatorType.BASIS, val, evTs);
+                                }
+                            }
+                            activeStrategy.onBinanceFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
+                        }
+                        case BacktestEvent.BinanceFuturesOrderBookEvent e -> {
+                            indicatorEngine.onFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
+                            if (needObi) {
+                                activeStrategy.onIndicatorUpdate(IndicatorType.ORDER_BOOK_IMBALANCE,
+                                        indicatorEngine.getIndicatorValue(IndicatorType.ORDER_BOOK_IMBALANCE), evTs);
+                            }
+                            if (needMicroPrice) {
+                                activeStrategy.onIndicatorUpdate(IndicatorType.MICRO_PRICE,
+                                        indicatorEngine.getIndicatorValue(IndicatorType.MICRO_PRICE), evTs);
+                            }
+                            activeStrategy.onBinanceFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
+                        }
+                        case BacktestEvent.BinanceFuturesForceOrderEvent e ->
+                                activeStrategy.onBinanceFuturesForceOrder(evTs, e.side(), e.price(), e.averagePrice(), e.quantity());
+                        case BacktestEvent.DeribitFuturesTradeEvent e ->
+                                activeStrategy.onDeribitFuturesTrade(
+                                        evTs, e.instrumentName(), e.direction(), e.price(), e.amount(), e.markPrice(), e.indexPrice());
+                        case BacktestEvent.TwapUpdateEvent e ->
+                                activeStrategy.onTwapUpdate(e.update());
+                        case BacktestEvent.PendingOrderExecutionEvent e -> {
+                            ExecutionReport report = matchingEngine.executePendingOrder(e);
+                            if (report != null) {
+                                activeStrategy.onExecutionReport(report);
+                            }
+                        }
+                        case BacktestEvent.CandleLifecycleEvent e -> {
+                            if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_CLOSE) {
+                                activeStrategy.onCandleResolution(actualOutcome);
+
+                                if (context.hasActiveTrade()) {
+                                    marketTrades = context.finalizeTrades(market, actualOutcome, 0.0);
+                                }
+
+                                MarketCandle completedCandle = (e.completedCandle() != null)
+                                        ? e.completedCandle()
+                                        : indicatorEngine.buildCompletedCandle(market.tStart(), market.tEnd());
+                                if (completedCandle != null) {
+                                    indicatorEngine.onMarketCandleCompleted(completedCandle);
+                                    activeStrategy.onMarketCandleCompleted(completedCandle);
+                                }
+                                if (hasIndicators) {
+                                    notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
+                                }
+
+                                double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
+                                double pModelUp = context.getEstimatedModelProbUp(market);
+                                double diff = pModelUp - actualUp;
+                                brierDiffSq = diff * diff;
+                                evaluated = true;
+                            }
+                        }
+                    }
+                }
+
+                dayOutcomes[idx] = new MarketSimulationOutcome(marketTrades, brierDiffSq, evaluated);
+            }
+        }
+    }
+
+    private record MarketSimulationOutcome(
+            List<TradeRecord> rawTrades,
+            double brierDiffSq,
+            boolean evaluated
+    ) {}
 
     private static void notifyIndicators(
             TradingStrategy strategy,
