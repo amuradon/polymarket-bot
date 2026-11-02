@@ -441,6 +441,18 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                             true
                     )
             ));
+        } else {
+            scheduleEvent(new BacktestEvent.TwapUpdateEvent(
+                    tStartMs,
+                    new TwapUpdate(
+                            Timeframe.FIFTEEN_MINUTES,
+                            tStart,
+                            tEnd,
+                            BigDecimal.ZERO,
+                            null,
+                            true
+                    )
+            ));
         }
     }
 
@@ -508,7 +520,10 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             return;
         }
 
-        int startIdx = findFirstIndexAtOrAfter(events, tStartMs);
+        long sliceStartMs = (!Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0)
+                ? tStartMs
+                : (tStartMs - 60_000L);
+        int startIdx = findFirstIndexAtOrAfter(events, sliceStartMs);
         double lastObservedPrice = Double.NaN;
         double twapOpen = metadata.twapOpen();
         long t60Ms = (tStart + 60L) * 1000L;

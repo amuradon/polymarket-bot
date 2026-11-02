@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -30,8 +31,7 @@ public class StrategyRegistry {
         Map<String, TradingStrategy> lowerMap = new HashMap<>();
         if (strategyInstances != null) {
             for (TradingStrategy strategy : strategyInstances) {
-                map.put(strategy.getName(), strategy);
-                lowerMap.put(strategy.getName().toLowerCase(), strategy);
+                registerStrategy(map, lowerMap, strategy.getName(), strategy);
             }
         }
         this.strategies = Collections.unmodifiableMap(map);
@@ -48,18 +48,39 @@ public class StrategyRegistry {
         Map<String, TradingStrategy> lowerMap = new HashMap<>();
         if (strategies != null) {
             for (Map.Entry<String, TradingStrategy> entry : strategies.entrySet()) {
-                map.put(entry.getKey(), entry.getValue());
-                lowerMap.put(entry.getKey().toLowerCase(), entry.getValue());
+                registerStrategy(map, lowerMap, entry.getKey(), entry.getValue());
             }
         }
         this.strategies = Collections.unmodifiableMap(map);
         this.lowercaseIndex = Collections.unmodifiableMap(lowerMap);
     }
 
+    private static void registerStrategy(
+            Map<String, TradingStrategy> map,
+            Map<String, TradingStrategy> lowerMap,
+            String name,
+            TradingStrategy strategy) {
+        if (name == null || strategy == null) {
+            return;
+        }
+        map.put(name, strategy);
+        String lower = name.toLowerCase(Locale.ROOT);
+        lowerMap.put(lower, strategy);
+        String normalized = normalizeKey(lower);
+        lowerMap.putIfAbsent(normalized, strategy);
+        if (normalized.endsWith("strategy") && normalized.length() > "strategy".length()) {
+            lowerMap.putIfAbsent(normalized.substring(0, normalized.length() - "strategy".length()), strategy);
+        }
+    }
+
+    private static String normalizeKey(String key) {
+        return key.replace("_", "").replace("-", "").trim().toLowerCase(Locale.ROOT);
+    }
+
     /**
-     * Resolves a trading strategy by its case-insensitive name.
+     * Resolves a trading strategy by its case-insensitive or normalized name.
      *
-     * @param name name of the strategy to find (e.g. "TWAPArbitrageStrategy")
+     * @param name name of the strategy to find (e.g. "TWAPArbitrageStrategy" or "utter_paramecium")
      * @return matching TradingStrategy instance
      * @throws IllegalArgumentException if name is blank or strategy is not registered
      */
@@ -69,7 +90,11 @@ public class StrategyRegistry {
         }
         TradingStrategy strategy = strategies.get(name);
         if (strategy == null) {
-            strategy = lowercaseIndex.get(name.trim().toLowerCase());
+            String lower = name.trim().toLowerCase(Locale.ROOT);
+            strategy = lowercaseIndex.get(lower);
+            if (strategy == null) {
+                strategy = lowercaseIndex.get(normalizeKey(lower));
+            }
         }
         if (strategy == null) {
             throw new IllegalArgumentException("Unknown strategy: '" + name + "'. Available strategies: " + strategies.keySet());

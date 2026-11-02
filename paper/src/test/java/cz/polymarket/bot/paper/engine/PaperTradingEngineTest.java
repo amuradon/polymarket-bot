@@ -19,6 +19,8 @@ import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TWAPArbitrageStrategy;
 import cz.polymarket.bot.strategy.TWAPArbitrageStrategyConfig;
 import cz.polymarket.bot.strategy.TradeDirection;
+import cz.polymarket.bot.strategy.UtterParameciumStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,7 +61,11 @@ class PaperTradingEngineTest {
                 new NextCandleProbabilityModel(new cz.polymarket.bot.calculator.KellyPositionSizer(10000.0, 0.25, 50.0, 300.0)),
                 config
         );
-        registry = new StrategyRegistry(Map.of("TWAPArbitrageStrategy", strategy));
+        UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        registry = new StrategyRegistry(Map.of(
+                "TWAPArbitrageStrategy", strategy,
+                utterStrategy.getName(), utterStrategy
+        ));
         priceCache = new HourlyPriceCache(3600L);
         binanceHistoricalClient = mock(BinanceHistoricalClient.class);
     }
@@ -206,7 +212,7 @@ class PaperTradingEngineTest {
                 tStart,
                 tEnd,
                 BigDecimal.valueOf(85000.0),
-                new TwapPoint(tStart + 60, BigDecimal.valueOf(85100.0), BigDecimal.valueOf(85100.0)),
+                new TwapPoint(tStart, BigDecimal.valueOf(85000.0), BigDecimal.valueOf(85000.0)),
                 true
         ));
 
@@ -234,6 +240,59 @@ class PaperTradingEngineTest {
         assertThat(trade.exitReason()).isEqualTo("Resolution (TWAP 60s)");
         assertThat(trade.isWin()).isTrue();
         assertThat(trade.netPnl()).isGreaterThan(0.0);
+    }
+
+    @Test
+    void shouldAccumulateMultiBatchAndBidirectionalPositionsAndResolveAtExpiration() {
+        PaperTradingEngine engine = new PaperTradingEngine(
+                registry,
+                repository,
+                null,
+                priceCache,
+                "utter_paramecium",
+                0L,
+                vertx,
+                binanceHistoricalClient
+        );
+
+        assertThat(engine.getActiveStrategyName()).isEqualTo("UtterParameciumStrategy");
+
+        long tStart = 1791038400L;
+        long tEnd = tStart + 900L;
+
+        engine.onTwapUpdate(new TwapUpdate(
+                Timeframe.FIFTEEN_MINUTES,
+                tStart,
+                tEnd,
+                BigDecimal.valueOf(85000.0),
+                new TwapPoint(tStart, BigDecimal.valueOf(85000.0), BigDecimal.valueOf(85000.0)),
+                true
+        ));
+
+        // Submit two UP batch orders and one DOWN batch order in the same candle
+        engine.submitOrder(new OrderCommand(
+                "up-batch-1", "0xMarket15m", "0xTokenUp",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.55), BigDecimal.valueOf(15.0)
+        ));
+        engine.submitOrder(new OrderCommand(
+                "up-batch-2", "0xMarket15m", "0xTokenUp",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.58), BigDecimal.valueOf(25.0)
+        ));
+        engine.submitOrder(new OrderCommand(
+                "down-batch-1", "0xMarket15m", "0xTokenDown",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.60), BigDecimal.valueOf(10.0)
+        ));
+
+        assertThat(engine.getOpenPositions()).hasSize(3);
+
+        // Resolve candle with UP outcome -> 2 UP batches win (exit 1.00), 1 DOWN batch loses (exit 0.00)
+        engine.resolveCandle(TradeDirection.UP, 85050.0);
+
+        assertThat(engine.getOpenPositions()).isEmpty();
+        assertThat(engine.getActivePosition()).isNull();
+        assertThat(repository.getTrades()).hasSize(3);
+        assertThat(repository.getTrades().stream().filter(TradeRecord::isWin).count()).isEqualTo(2);
+        assertThat(repository.getTrades().stream().filter(t -> !t.isWin()).count()).isEqualTo(1);
     }
 
     @Test

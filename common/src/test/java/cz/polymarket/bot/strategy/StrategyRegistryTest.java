@@ -37,7 +37,7 @@ class StrategyRegistryTest {
     @DisplayName("Should retrieve strategy by exact or case-insensitive name")
     void shouldFindStrategyByName() {
         TradingStrategy s1 = new DummyStrategy("TWAPArbitrageStrategy");
-        TradingStrategy s2 = new DummyStrategy("MeanReversionStrategy");
+        TradingStrategy s2 = new DummyStrategy("UtterParameciumStrategy");
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(
                 s1.getName(), s1,
@@ -46,8 +46,11 @@ class StrategyRegistryTest {
 
         assertThat(registry.getStrategy("TWAPArbitrageStrategy")).isSameAs(s1);
         assertThat(registry.getStrategy("twaparbitragestrategy")).isSameAs(s1);
-        assertThat(registry.getStrategy("MeanReversionStrategy")).isSameAs(s2);
-        assertThat(registry.getAvailableStrategies()).containsExactlyInAnyOrder("TWAPArbitrageStrategy", "MeanReversionStrategy");
+        assertThat(registry.getStrategy("UtterParameciumStrategy")).isSameAs(s2);
+        assertThat(registry.getStrategy("utter_paramecium")).isSameAs(s2);
+        assertThat(registry.getStrategy("utter-paramecium")).isSameAs(s2);
+        assertThat(registry.getStrategy("UtterParamecium")).isSameAs(s2);
+        assertThat(registry.getAvailableStrategies()).containsExactlyInAnyOrder("TWAPArbitrageStrategy", "UtterParameciumStrategy");
     }
 
     @Test

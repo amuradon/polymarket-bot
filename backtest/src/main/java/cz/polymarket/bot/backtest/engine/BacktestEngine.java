@@ -447,6 +447,9 @@ public class BacktestEngine {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);
                             if (report != null) {
                                 activeStrategy.onExecutionReport(report);
+                                if ("FILLED".equalsIgnoreCase(report.status()) && evTs >= tStartMs) {
+                                    activeStrategy.onOrderBookQuote(orderBook.toOrderBookQuote(evTs));
+                                }
                             }
                         }
                         case BacktestEvent.CandleLifecycleEvent e -> {

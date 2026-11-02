@@ -17,6 +17,8 @@ import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TWAPArbitrageStrategy;
 import cz.polymarket.bot.strategy.TWAPArbitrageStrategyConfig;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -217,10 +219,12 @@ class BacktestEngineTest {
             }
         }
         TradingStrategy polymarketOnlyStrategy = new PolymarketOnlyBatchStrategy();
+        UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
 
         StrategyRegistry strategyRegistry = new StrategyRegistry(Map.of(
                 twapStrategy.getName(), twapStrategy,
-                polymarketOnlyStrategy.getName(), polymarketOnlyStrategy
+                polymarketOnlyStrategy.getName(), polymarketOnlyStrategy,
+                utterStrategy.getName(), utterStrategy
         ));
 
         backtestEngine = new BacktestEngine(
@@ -284,6 +288,97 @@ class BacktestEngineTest {
         assertThat(polymarketCryptoPriceCount.get()).isEqualTo(3);
         assertThat(polymarketTwap60sCount.get()).isGreaterThanOrEqualTo(3);
         assertThat(externalSpotTradeCount.get()).isZero();
+    }
+
+    @Test
+    @DisplayName("Should execute UtterParameciumStrategy final-minute TWAP lock-in sniping via normalized name")
+    void shouldExecuteUtterParameciumStrategyInFinalMinuteWindow(@TempDir Path tempDir) throws Exception {
+        Path collectorDir = tempDir.resolve("collector_utter");
+        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString());
+
+        long c1Start = BASE_START;
+        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
+        Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
+
+        Files.createDirectories(pmDir);
+        Files.createDirectories(cryptoPriceFile.getParent());
+        Files.createDirectories(twap60sFile.getParent());
+
+        Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement()) {
+
+            // 1. Polymarket price_crypto_twap_60s (strike = 60,000.00, close TWAP = 60,050.00 -> UP wins)
+            String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
+                    "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60050.0::DOUBLE, '60050.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
+                    ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+            // 2. Polymarket price_crypto in the final minute [c1Start + 840s .. c1Start + 885s]
+            String normCrypto = cryptoPriceFile.toAbsolutePath().toString().replace('\\', '/');
+            StringBuilder cryptoValues = new StringBuilder();
+            for (int sec = 835; sec <= 885; sec++) {
+                if (cryptoValues.length() > 0) {
+                    cryptoValues.append(", ");
+                }
+                long tsMs = (c1Start + sec) * 1000L;
+                double price = 60050.0 + (sec % 2 == 0 ? 1.0 : -1.0);
+                cryptoValues.append("(")
+                        .append(tsMs).append("::UBIGINT, ")
+                        .append(sec).append("::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, ")
+                        .append(price).append("::DOUBLE, '").append(price).append("'::VARCHAR, ")
+                        .append(tsMs).append("::UBIGINT)");
+            }
+            stmt.execute("COPY (SELECT * FROM (VALUES " + cryptoValues +
+                    ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
+
+            // 3. Polymarket 15m CLOB market file with stale ask at 0.55 during final minute
+            String normPm1 = pmFile1.toAbsolutePath().toString().replace('\\', '/');
+            long bookTs1 = (c1Start + 845L) * 1000L;
+            long bookTs2 = (c1Start + 860L) * 1000L;
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (c1Start * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"clobTokenIds\":\"[\\\"101\\\", \\\"102\\\"]\"}'::JSON), " +
+                    "(" + bookTs1 + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"asset_id\":\"101\",\"timestamp\":\"" + bookTs1 + "\",\"bids\":[{\"price\":\"0.53\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.55\",\"size\":\"300.0\"}]}'::JSON), " +
+                    "(" + bookTs2 + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"asset_id\":\"101\",\"timestamp\":\"" + bookTs2 + "\",\"bids\":[{\"price\":\"0.54\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.56\",\"size\":\"300.0\"}]}'::JSON)" +
+                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm1 + "' (FORMAT PARQUET)");
+        }
+
+        UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        StrategyRegistry localRegistry = new StrategyRegistry(Map.of(utterStrategy.getName(), utterStrategy));
+        BacktestEngine utterEngine = new BacktestEngine(
+                datasetService,
+                localRegistry,
+                new PerformanceMetricsCalculator(),
+                new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_utter").toString()),
+                tempDir.resolve("export_utter").toString(),
+                10000.0,
+                1.0
+        );
+
+        BacktestResult result = utterEngine.runBacktest(
+                "utter_paramecium",
+                "BTCUSDT",
+                "2026-08-01",
+                "2026-08-01",
+                10000.0,
+                tempDir.resolve("export_utter").toString(),
+                1.0
+        );
+
+        assertThat(result).isNotNull();
+        assertThat(result.totalMarkets()).isEqualTo(1);
+        assertThat(result.trades()).isNotEmpty();
+        assertThat(result.trades()).allSatisfy(trade -> {
+            assertThat(trade.isWin()).isTrue();
+            assertThat(trade.exitPrice()).isEqualTo(1.0);
+            assertThat(trade.netPnl()).isGreaterThan(0.0);
+        });
     }
 
     @Test

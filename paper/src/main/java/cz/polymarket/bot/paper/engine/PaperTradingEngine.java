@@ -55,6 +55,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     private final TradingStrategy activeStrategy;
     private final AtomicReference<PaperPosition> activePosition = new AtomicReference<>();
+    private final List<PaperPosition> openPositions = new java.util.ArrayList<>();
 
     private final AtomicLong activeCandleStart = new AtomicLong(0);
     private final AtomicLong activeCandleEnd = new AtomicLong(0);
@@ -191,11 +192,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private void executeBuyOrder(OrderCommand command) {
-        if (activePosition.get() != null) {
-            LOG.warnf("Ignoring BUY order %s because position already exists", command.clientOrderId());
-            return;
-        }
-
         double requestedPrice = command.price().doubleValue();
         double shares = command.size().doubleValue();
         double fillPrice = requestedPrice;
@@ -213,6 +209,15 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         if (repository.getCurrentBalance() < sizeUsd) {
             LOG.warnf("Insufficient virtual balance ($%.2f) for trade size $%.2f",
                     repository.getCurrentBalance(), sizeUsd);
+            activeStrategy.onExecutionReport(new ExecutionReport(
+                    command.clientOrderId(),
+                    "paper-reject-" + UUID.randomUUID(),
+                    "REJECTED",
+                    BigDecimal.ZERO,
+                    BigDecimal.ZERO,
+                    System.currentTimeMillis(),
+                    "Insufficient virtual balance"
+            ));
             return;
         }
 
@@ -241,6 +246,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 fillPrice,
                 false
         );
+        openPositions.add(pos);
         activePosition.set(pos);
 
         ExecutionReport report = new ExecutionReport(
@@ -300,16 +306,21 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     public synchronized void resolveCandle(TradeDirection actualOutcome, double finalPrice) {
-        PaperPosition pos = activePosition.get();
-        if (pos != null) {
+        if (!openPositions.isEmpty() || activePosition.get() != null) {
             activeStrategy.onCandleResolution(actualOutcome);
 
-            // If not exited by strategy during resolution call, settle at binary outcome
-            if (activePosition.get() != null) {
+            // Settle all remaining positions at binary outcome
+            List<PaperPosition> remaining = new java.util.ArrayList<>(openPositions);
+            if (remaining.isEmpty() && activePosition.get() != null) {
+                remaining.add(activePosition.get());
+            }
+            for (PaperPosition pos : remaining) {
                 double exitPrice = (actualOutcome == pos.side()) ? 1.00 : 0.00;
                 String exitReason = "Resolution (TWAP 60s)";
                 completeTrade(pos, exitPrice, 0.0, exitReason);
             }
+            openPositions.clear();
+            activePosition.set(null);
         }
 
         long start = activeCandleStart.get() > 0 ? activeCandleStart.get() : (currentTimestampSec > 0 ? currentTimestampSec - 900 : 1700000000L);
@@ -374,7 +385,8 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         );
 
         repository.recordTrade(trade);
-        activePosition.set(null);
+        openPositions.remove(pos);
+        activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
         LOG.infof("Closed paper trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, newBalance);
     }
@@ -469,6 +481,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     public synchronized void reset() {
+        openPositions.clear();
         activePosition.set(null);
         activeStrategy.reset();
         activeCandleStart.set(0);
@@ -492,6 +505,13 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     public PaperPosition getActivePosition() {
         return activePosition.get();
+    }
+
+    /**
+     * Returns an unmodifiable snapshot of all currently open batch positions in the active candle.
+     */
+    public List<PaperPosition> getOpenPositions() {
+        return List.copyOf(openPositions);
     }
 
     public String getStatus() {

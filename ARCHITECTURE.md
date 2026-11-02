@@ -80,7 +80,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 - **Domain Models**: Immutable records and compact structures (`Timeframe`, `PriceSnapshot`, `TwapPoint`, `TwapUpdate`, `CandleTwapState`, `MarketCandle`, `OrderBookQuote`, `TradeRecord`).
 - **Calculators & Math**: `MedianCalculator`, `TwapCalculator`, `VwapCalculator`, `RealizedVolatilityCalculator`, `KellyPositionSizer`, `PerformanceMetricsCalculator`.
 - **In-Memory Cache**: `HourlyPriceCache` (sliding 3600-second window).
-- **Strategy & Execution Contracts**: `TradingStrategy`, `StrategyContext`, `ExecutionRouter`, `OrderCommand`, `ExecutionReport`, `TWAPArbitrageStrategy`.
+- **Strategy & Execution Contracts**: `TradingStrategy`, `StrategyContext`, `ExecutionRouter`, `OrderCommand`, `ExecutionReport`, `StrategyRegistry`, `TWAPArbitrageStrategy`, `UtterParameciumStrategy`, `UtterParameciumStrategyConfig`.
 
 ### `connector`
 - **Resilient WebSocket Core**: `ReconnectingWebSocketStream`, `ConnectionState`, `RawWebSocketListener`, `AbstractExchangeWebSocketClient`, `ExchangePriceListener`.
