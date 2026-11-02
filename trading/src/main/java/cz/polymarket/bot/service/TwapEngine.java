@@ -12,6 +12,9 @@ import cz.polymarket.bot.exchange.CoinbaseWebSocketClient;
 import cz.polymarket.bot.exchange.ExchangePriceTracker;
 import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
 import cz.polymarket.bot.exchange.KrakenWebSocketClient;
+import cz.polymarket.bot.strategy.ExternalStreamType;
+import cz.polymarket.bot.strategy.StrategyRegistry;
+import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
@@ -47,6 +50,9 @@ public class TwapEngine {
     private final KrakenWebSocketClient krakenClient;
     private final String defaultTimeframeCode;
     private final Vertx vertx;
+    private final StrategyRegistry strategyRegistry;
+    private final String strategyName;
+    private final boolean enabledForStrategy;
 
     private final AtomicReference<Timeframe> activeTimeframe = new AtomicReference<>();
     private final Map<Timeframe, CandleTwapState> candleStates = new ConcurrentHashMap<>();
@@ -64,7 +70,9 @@ public class TwapEngine {
             CoinbaseWebSocketClient coinbaseClient,
             KrakenWebSocketClient krakenClient,
             @ConfigProperty(name = "polymarket.twap.default-timeframe", defaultValue = "5m") String defaultTimeframeCode,
-            Vertx vertx) {
+            Vertx vertx,
+            StrategyRegistry strategyRegistry,
+            @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "TWAPArbitrageStrategy") String strategyName) {
         this.priceTracker = priceTracker;
         this.reconstructor = reconstructor;
         this.cache = cache;
@@ -74,13 +82,41 @@ public class TwapEngine {
         this.krakenClient = krakenClient;
         this.defaultTimeframeCode = defaultTimeframeCode;
         this.vertx = vertx;
+        this.strategyRegistry = strategyRegistry;
+        this.strategyName = strategyName;
+        this.enabledForStrategy = resolveEnabledForStrategy(strategyRegistry, strategyName);
         this.activeTimeframe.set(Timeframe.fromCode(defaultTimeframeCode));
-        if (this.binanceClient != null) {
+        if (this.enabledForStrategy && this.binanceClient != null) {
             this.binanceClient.setTickListener(this::onBinanceTick);
         }
     }
 
+    private static boolean resolveEnabledForStrategy(StrategyRegistry registry, String name) {
+        if (registry == null || name == null || name.isBlank()) {
+            return true;
+        }
+        try {
+            TradingStrategy strategy = registry.getStrategy(name);
+            return strategy.getRequiredExternalStreams() != null
+                    && strategy.getRequiredExternalStreams().contains(ExternalStreamType.TWAP_ENGINE);
+        } catch (IllegalArgumentException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Returns whether this {@link TwapEngine} is required by and enabled for the active strategy.
+     */
+    public boolean isEnabledForStrategy() {
+        return enabledForStrategy;
+    }
+
     void onStart(@Observes StartupEvent ev) {
+        if (!enabledForStrategy) {
+            LOG.infof("Skipping TwapEngine startup because active strategy '%s' does not require TWAP_ENGINE external stream",
+                    strategyName);
+            return;
+        }
         LOG.info("Initializing TWAP Engine and starting Exchange WebSocket streams...");
         if (vertx != null) {
             vertx.executeBlocking(() -> {
@@ -107,6 +143,9 @@ public class TwapEngine {
     }
 
     void onStop(@Observes ShutdownEvent ev) {
+        if (!enabledForStrategy) {
+            return;
+        }
         LOG.info("Stopping Exchange WebSocket streams...");
         binanceClient.stop();
         coinbaseClient.stop();

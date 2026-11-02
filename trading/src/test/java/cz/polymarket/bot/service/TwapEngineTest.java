@@ -12,6 +12,10 @@ import cz.polymarket.bot.exchange.CoinbaseWebSocketClient;
 import cz.polymarket.bot.exchange.ExchangePriceTracker;
 import cz.polymarket.bot.exchange.HistoricalDataReconstructor;
 import cz.polymarket.bot.exchange.KrakenWebSocketClient;
+import cz.polymarket.bot.strategy.StrategyRegistry;
+import cz.polymarket.bot.strategy.UtterParameciumStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
+import io.quarkus.runtime.StartupEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -19,6 +23,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,7 +48,11 @@ class TwapEngineTest {
         KrakenWebSocketClient krakenClient = mock(KrakenWebSocketClient.class);
         io.vertx.core.Vertx vertx = mock(io.vertx.core.Vertx.class);
 
-        engine = new TwapEngine(priceTracker, reconstructor, cache, twapCalculator, binanceClient, coinbaseClient, krakenClient, "5m", vertx);
+        engine = new TwapEngine(
+                priceTracker, reconstructor, cache, twapCalculator,
+                binanceClient, coinbaseClient, krakenClient,
+                "5m", vertx, null, "TWAPArbitrageStrategy"
+        );
     }
 
     @Test
@@ -244,5 +253,27 @@ class TwapEngineTest {
 
         // Clamped to at most 60 seconds of forward fill (from 3600 - 60 = 3540 to 3599)
         verify(priceTracker, atMost(60)).recordForwardFilledMedian(anyLong());
+    }
+
+    @Test
+    void shouldSkipTwapEngineStartupWhenStrategyDoesNotRequireTwapEngine() {
+        BinanceWebSocketClient binanceClient = mock(BinanceWebSocketClient.class);
+        CoinbaseWebSocketClient coinbaseClient = mock(CoinbaseWebSocketClient.class);
+        KrakenWebSocketClient krakenClient = mock(KrakenWebSocketClient.class);
+        UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        StrategyRegistry registry = new StrategyRegistry(Map.of(utterStrategy.getName(), utterStrategy));
+
+        TwapEngine disabledEngine = new TwapEngine(
+                priceTracker, reconstructor, cache, twapCalculator,
+                binanceClient, coinbaseClient, krakenClient,
+                "15m", null, registry, "UtterParameciumStrategy"
+        );
+
+        assertThat(disabledEngine.isEnabledForStrategy()).isFalse();
+        disabledEngine.onStart(new StartupEvent());
+
+        verify(binanceClient, never()).start();
+        verify(coinbaseClient, never()).start();
+        verify(krakenClient, never()).start();
     }
 }

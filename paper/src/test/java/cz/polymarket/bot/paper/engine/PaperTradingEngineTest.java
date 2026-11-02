@@ -244,10 +244,11 @@ class PaperTradingEngineTest {
 
     @Test
     void shouldAccumulateMultiBatchAndBidirectionalPositionsAndResolveAtExpiration() {
+        cz.polymarket.bot.service.TwapEngine mockTwapEngine = mock(cz.polymarket.bot.service.TwapEngine.class);
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
+                mockTwapEngine,
                 priceCache,
                 "utter_paramecium",
                 0L,
@@ -257,17 +258,16 @@ class PaperTradingEngineTest {
 
         assertThat(engine.getActiveStrategyName()).isEqualTo("UtterParameciumStrategy");
 
-        long tStart = 1791038400L;
-        long tEnd = tStart + 900L;
+        // Starting PaperTradingEngine with UtterParameciumStrategy must NOT register with TwapEngine or seed Binance candles
+        engine.onStart(new io.quarkus.runtime.StartupEvent());
+        verifyNoInteractions(mockTwapEngine);
+        verifyNoInteractions(binanceHistoricalClient);
 
-        engine.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                tStart,
-                tEnd,
-                BigDecimal.valueOf(85000.0),
-                new TwapPoint(tStart, BigDecimal.valueOf(85000.0), BigDecimal.valueOf(85000.0)),
-                true
-        ));
+        long tStart = 1785542400L;
+        long tStartMs = tStart * 1000L;
+
+        engine.onPolymarketCryptoTwap60s(tStartMs, "btcusd", "chainlink", 85000.0, 60, tStartMs);
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(85000.0);
 
         // Submit two UP batch orders and one DOWN batch order in the same candle
         engine.submitOrder(new OrderCommand(
@@ -285,8 +285,9 @@ class PaperTradingEngineTest {
 
         assertThat(engine.getOpenPositions()).hasSize(3);
 
-        // Resolve candle with UP outcome -> 2 UP batches win (exit 1.00), 1 DOWN batch loses (exit 0.00)
-        engine.resolveCandle(TradeDirection.UP, 85050.0);
+        // Resolve candle via next candle's 60s TWAP update -> 2 UP batches win (exit 1.00), 1 DOWN batch loses (exit 0.00)
+        long tEndMs = (tStart + 900L) * 1000L;
+        engine.onPolymarketCryptoTwap60s(tEndMs, "btcusd", "chainlink", 85050.0, 60, tEndMs);
 
         assertThat(engine.getOpenPositions()).isEmpty();
         assertThat(engine.getActivePosition()).isNull();

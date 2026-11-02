@@ -30,7 +30,6 @@ public class UtterParameciumStrategyConfig {
     private final long defaultSigma1sCents;
     private final long minSigma1sCents;
     private final long maxSigma1sCents;
-    private final long binanceLeadWeightBps;
     private final long warmupSecsBeforeExpiry;
     private final int takerFeeRateBps;
     private final String defaultMarketId;
@@ -56,7 +55,6 @@ public class UtterParameciumStrategyConfig {
      * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents when {@code M < 5} (default {@code 1000} = $10.00)
      * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 500} = $5.00)
      * @param maxSigma1sCents upper clamp for 1-second BTC volatility in USD cents (default {@code 3500} = $35.00)
-     * @param binanceLeadWeightBps weight of Binance lead over last Chainlink tick in bps (default {@code 0})
      * @param warmupSecsBeforeExpiry warm-up window before expiry in seconds (default {@code 120})
      * @param takerFeeRateBps Polymarket parabolic taker fee multiplier in basis points (default {@code 700} = 7.00%)
      * @param defaultMarketId default market identifier for order commands
@@ -81,7 +79,6 @@ public class UtterParameciumStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "1000") long defaultSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "500") long minSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-sigma-1s-cents", defaultValue = "3500") long maxSigma1sCents,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.binance-lead-weight-bps", defaultValue = "0") long binanceLeadWeightBps,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.warmup-secs-before-expiry", defaultValue = "120") long warmupSecsBeforeExpiry,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.taker-fee-rate-bps", defaultValue = "700") int takerFeeRateBps,
             @ConfigProperty(name = "polymarket.strategy.default-market-id", defaultValue = "pm-btc-15m") String defaultMarketId,
@@ -117,7 +114,6 @@ public class UtterParameciumStrategyConfig {
         this.defaultSigma1sCents = defaultSigma1sCents;
         this.minSigma1sCents = minSigma1sCents;
         this.maxSigma1sCents = maxSigma1sCents;
-        this.binanceLeadWeightBps = binanceLeadWeightBps;
         this.warmupSecsBeforeExpiry = warmupSecsBeforeExpiry;
         this.takerFeeRateBps = takerFeeRateBps;
         this.defaultMarketId = (defaultMarketId != null && !defaultMarketId.isBlank()) ? defaultMarketId : "pm-btc-15m";
@@ -148,7 +144,6 @@ public class UtterParameciumStrategyConfig {
                 1_000L,
                 500L,
                 3_500L,
-                0L,
                 120L,
                 700,
                 "pm-btc-15m",
@@ -267,13 +262,6 @@ public class UtterParameciumStrategyConfig {
      */
     public long maxSigma1sCents() {
         return maxSigma1sCents;
-    }
-
-    /**
-     * Weight of Binance lead relative to Chainlink in basis points (0 = pure Chainlink, 5000 = 50% lead).
-     */
-    public long binanceLeadWeightBps() {
-        return binanceLeadWeightBps;
     }
 
     /**

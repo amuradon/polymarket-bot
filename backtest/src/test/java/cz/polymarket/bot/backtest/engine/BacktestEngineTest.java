@@ -306,11 +306,13 @@ class BacktestEngineTest {
         Files.createDirectories(twap60sFile.getParent());
 
         Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
+        long c2MissingTwapStart = BASE_START + 1800L;
+        Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2MissingTwapStart + ".parquet");
 
         try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
              Statement stmt = conn.createStatement()) {
 
-            // 1. Polymarket price_crypto_twap_60s (strike = 60,000.00, close TWAP = 60,050.00 -> UP wins)
+            // 1. Polymarket price_crypto_twap_60s (strike = 60,000.00, close TWAP = 60,050.00 -> UP wins; c2MissingTwapStart has NO TWAP data)
             String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
@@ -347,6 +349,16 @@ class BacktestEngineTest {
                     "(" + bookTs2 + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
                     "'{\"asset_id\":\"101\",\"timestamp\":\"" + bookTs2 + "\",\"bids\":[{\"price\":\"0.54\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.56\",\"size\":\"300.0\"}]}'::JSON)" +
                     ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm1 + "' (FORMAT PARQUET)");
+
+            // 4. Second market missing 60s TWAP target price -> must be skipped with WARN
+            String normPm2 = pmFile2.toAbsolutePath().toString().replace('\\', '/');
+            long m2BookTs = (c2MissingTwapStart + 850L) * 1000L;
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (c2MissingTwapStart * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x2'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"clobTokenIds\":\"[\\\"201\\\", \\\"202\\\"]\"}'::JSON), " +
+                    "(" + m2BookTs + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x2'::VARCHAR, '201'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"asset_id\":\"201\",\"timestamp\":\"" + m2BookTs + "\",\"bids\":[{\"price\":\"0.53\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.55\",\"size\":\"300.0\"}]}'::JSON)" +
+                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm2 + "' (FORMAT PARQUET)");
         }
 
         UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
@@ -372,9 +384,10 @@ class BacktestEngineTest {
         );
 
         assertThat(result).isNotNull();
-        assertThat(result.totalMarkets()).isEqualTo(1);
+        assertThat(result.totalMarkets()).isEqualTo(2);
         assertThat(result.trades()).isNotEmpty();
         assertThat(result.trades()).allSatisfy(trade -> {
+            assertThat(trade.intervalStartSec()).isEqualTo(c1Start);
             assertThat(trade.isWin()).isTrue();
             assertThat(trade.exitPrice()).isEqualTo(1.0);
             assertThat(trade.netPnl()).isGreaterThan(0.0);

@@ -11,6 +11,7 @@ import cz.polymarket.bot.paper.storage.PaperTradeRepository;
 import cz.polymarket.bot.service.TwapEngine;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
+import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -101,7 +102,18 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 this.activeStrategy.getName(), this.orderLatencyMs);
     }
 
+    private boolean requiresTwapEngine() {
+        return activeStrategy.getRequiredExternalStreams() != null
+                && activeStrategy.getRequiredExternalStreams().contains(ExternalStreamType.TWAP_ENGINE);
+    }
+
     void onStart(@Observes StartupEvent ev) {
+        if (!requiresTwapEngine()) {
+            LOG.infof("Active strategy '%s' does not require TWAP_ENGINE; skipping TwapEngine listener and Binance historical seeding",
+                    activeStrategy.getName());
+            return;
+        }
+
         if (binanceHistoricalClient != null && vertx != null) {
             vertx.executeBlocking(() -> {
                 seedInitialCandles();
@@ -138,7 +150,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     void onStop(@Observes ShutdownEvent ev) {
-        if (twapEngine != null) {
+        if (requiresTwapEngine() && twapEngine != null) {
             twapEngine.removeListener(this::onTwapUpdate);
         }
     }
@@ -462,6 +474,82 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
             );
             onOrderBookQuote(synthQuote);
         }
+    }
+
+    /**
+     * Forwards a PolyBolt {@code price.crypto.twap} (60s) update to the active strategy and updates
+     * the explicit target price for the current candle interval.
+     */
+    public synchronized void onPolymarketCryptoTwap60s(
+            long timestampMs,
+            String symbol,
+            String source,
+            double twapPrice,
+            int windowSeconds,
+            long twapTimestampMs) {
+        if (twapPrice <= 0.0 || timestampMs <= 0L) {
+            return;
+        }
+        long effectiveTsMs = twapTimestampMs > 0L ? twapTimestampMs : timestampMs;
+        long durationSec = activeStrategy.getTimeframe() != null
+                ? activeStrategy.getTimeframe().getDurationSeconds()
+                : 900L;
+        long candleStartSec = (effectiveTsMs / 1000L / durationSec) * durationSec;
+
+        if (activeCandleStart.get() > 0 && candleStartSec != activeCandleStart.get()) {
+            if (twapOpenPrice > 0.0) {
+                TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
+                resolveCandle(outcome, twapPrice);
+            } else {
+                LOG.warnf("Skipping candle resolution for interval %d: target price was missing from PolyBolt 60s TWAP stream",
+                        activeCandleStart.get());
+                openPositions.clear();
+                activePosition.set(null);
+            }
+            activeCandleStart.set(candleStartSec);
+            activeCandleEnd.set(candleStartSec + durationSec);
+            twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
+        } else if (activeCandleStart.get() == 0) {
+            activeCandleStart.set(candleStartSec);
+            activeCandleEnd.set(candleStartSec + durationSec);
+            twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
+        } else if (twapOpenPrice <= 0.0 && Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) {
+            twapOpenPrice = twapPrice;
+        }
+
+        activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+    }
+
+    /**
+     * Forwards a PolyBolt {@code price.crypto} update to the active strategy and tracks current spot price.
+     */
+    public synchronized void onPolymarketCryptoPrice(
+            long timestampMs,
+            String symbol,
+            String source,
+            double price,
+            long priceTimestampMs) {
+        if (price <= 0.0 || timestampMs <= 0L) {
+            return;
+        }
+        currentTimestampSec = timestampMs / 1000L;
+        currentSpotPrice = price;
+        if (candleHigh == 0.0 || price > candleHigh) {
+            candleHigh = price;
+        }
+        if (candleLow == 0.0 || price < candleLow) {
+            candleLow = price;
+        }
+        if (activeCandleStart.get() == 0) {
+            long durationSec = activeStrategy.getTimeframe() != null
+                    ? activeStrategy.getTimeframe().getDurationSeconds()
+                    : 900L;
+            long candleStartSec = (currentTimestampSec / durationSec) * durationSec;
+            activeCandleStart.set(candleStartSec);
+            activeCandleEnd.set(candleStartSec + durationSec);
+        }
+
+        activeStrategy.onPolymarketCryptoPrice(timestampMs, symbol, source, price, priceTimestampMs);
     }
 
     public synchronized void onOrderBookQuote(OrderBookQuote quote) {

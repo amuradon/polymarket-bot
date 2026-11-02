@@ -98,33 +98,9 @@ class UtterParameciumStrategyTest {
     }
 
     @Test
-    @DisplayName("Should infer and lock strike price from 60s Chainlink buffer at startTimeMs when openPrice is 0")
-    void shouldInferStrikePriceFrom60sChainlinkBufferWhenOpenPriceIsZero() {
-        // Feed 60 seconds of Chainlink ticks in [CANDLE_START_MS - 60_000, CANDLE_START_MS]
-        // First 30 ticks at $90,000.00, next 30 ticks at $90,020.00 -> mean = $90,010.00 (9_001_000 cents)
-        for (int i = 60; i >= 1; i--) {
-            long ts = CANDLE_START_MS - (i * 1000L);
-            double price = (i > 30) ? 90_000.00 : 90_020.00;
-            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", price, ts);
-        }
-
-        // Start candle with openPrice = 0
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.ZERO,
-                null,
-                true
-        ));
-
-        assertThat(strategy.getEffectiveStrikeCents()).isEqualTo(9_001_000L);
-    }
-
-    @Test
-    @DisplayName("Should emit UP signal in divergent Spot vs TWAP scenario when locked TWAP stays above strike")
-    void shouldEmitUpSignalWhenSpotDropsBelowStrikeButProjectedTwapRemainsAboveStrike() {
-        // Strike = $90,000.00
+    @DisplayName("Should ignore TwapUpdate and skip market with WARN when explicit 60s TWAP target price is missing")
+    void shouldIgnoreTwapUpdateAndSkipMarketWhenTargetPriceIsMissing() {
+        // TwapUpdate from TwapEngine must be completely ignored
         strategy.onTwapUpdate(new TwapUpdate(
                 Timeframe.FIFTEEN_MINUTES,
                 CANDLE_START_SEC,
@@ -133,6 +109,25 @@ class UtterParameciumStrategyTest {
                 new TwapPoint(CANDLE_START_SEC, BigDecimal.valueOf(90_000.00), BigDecimal.valueOf(90_000.00)),
                 true
         ));
+        assertThat(strategy.getTargetPriceCents()).isZero();
+
+        // Feed PolyBolt price.crypto and CLOB quote in the final minute WITHOUT any 60s TWAP target price at candle start
+        long tau30Ms = CANDLE_END_MS - 30_000L;
+        strategy.onPolymarketCryptoPrice(tau30Ms, "btcusd", "chainlink", 90_050.00, tau30Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, tau30Ms
+        ));
+
+        assertThat(strategy.isMissingTargetPriceWarned()).isTrue();
+        assertThat(submittedOrders).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Should emit UP signal in divergent Spot vs TWAP scenario when locked TWAP stays above explicit target")
+    void shouldEmitUpSignalWhenSpotDropsBelowStrikeButProjectedTwapRemainsAboveStrike() {
+        // Explicit target price from PolyBolt 60s TWAP stream = $90,000.00
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        assertThat(strategy.getTargetPriceCents()).isEqualTo(9_000_000L);
 
         // First 40 seconds of the final 60s window (tau = 60s down to tau = 21s): BTC holds +$25 above strike ($90,025.00)
         long windowStartMs = CANDLE_END_MS - 60_000L;
@@ -164,14 +159,7 @@ class UtterParameciumStrategyTest {
     @Test
     @DisplayName("Should skip decided markets when bestAsk exceeds maxEntryPriceMc (970 mc = $0.97)")
     void shouldSkipDecidedMarketAboveMaxEntryPrice() {
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                new TwapPoint(CANDLE_START_SEC, BigDecimal.valueOf(90_000.00), BigDecimal.valueOf(90_000.00)),
-                true
-        ));
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
         // BTC is +$120 above strike at tau = 60s
         long tau60Ms = CANDLE_END_MS - 60_000L;
@@ -204,14 +192,7 @@ class UtterParameciumStrategyTest {
     @Test
     @DisplayName("Should emit initial burst of 15 shares at tau >= 55s, enforce 200ms cooldown, and scale subsequent orders")
     void shouldEmitInitialBurstEnforceCooldownAndScaleSubsequentOrders() {
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                new TwapPoint(CANDLE_START_SEC, BigDecimal.valueOf(90_000.00), BigDecimal.valueOf(90_000.00)),
-                true
-        ));
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
         // At tau = 59.5s (ts = CANDLE_END_MS - 59_500L), BTC is +$45 above strike ($90,045)
         long t1 = CANDLE_END_MS - 59_500L;
@@ -256,14 +237,7 @@ class UtterParameciumStrategyTest {
     @Test
     @DisplayName("Should handle sub-cent BBO quotes (bestBid=0.955, bestAsk=0.965) via conservative 10-mc rounding")
     void shouldHandleSubCentBboQuotes() {
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                new TwapPoint(CANDLE_START_SEC, BigDecimal.valueOf(90_000.00), BigDecimal.valueOf(90_000.00)),
-                true
-        ));
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
         // At tau = 25s, BTC is +$80 above strike -> Z >= 4.0 -> P_Up = 999 mc
         long ts = CANDLE_END_MS - 25_000L;
@@ -280,50 +254,25 @@ class UtterParameciumStrategyTest {
     }
 
     @Test
-    @DisplayName("Should support Binance lead-lag hybrid stream declaration when binanceLeadWeightBps > 0")
-    void shouldSupportBinanceLeadLagMode() {
+    @DisplayName("Should require zero external streams and ignore Binance trade callbacks")
+    void shouldRequireZeroExternalStreamsAndIgnoreBinanceCallbacks() {
         assertThat(strategy.getRequiredExternalStreams()).isEmpty();
+        assertThat(strategy.getRequiredIndicators()).isEmpty();
 
-        UtterParameciumStrategyConfig hybridConfig = new UtterParameciumStrategyConfig(
-                10_000L, 61_000L, 200L, 300, 970, 80, 540, 15,
-                5, 35, 15, 70, 600, 1_000L, 500L, 3_500L,
-                5_000L, 120L, 700, "pm-btc-15m", "BTC-UP", "BTC-DOWN"
-        );
-        UtterParameciumStrategy hybridStrategy = new UtterParameciumStrategy(hybridConfig);
-        hybridStrategy.init(testContext);
-
-        assertThat(hybridStrategy.getRequiredExternalStreams())
-                .containsExactly(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES);
-
-        hybridStrategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                null,
-                true
-        ));
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
         long ts = CANDLE_END_MS - 30_000L;
-        hybridStrategy.onBinanceFuturesTrade(ts - 100L, 90_000.00, 1.0, false);
-        hybridStrategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 90_000.00, ts);
-        // Binance Futures jumps +$20.00 before Chainlink updates -> 50% weight = +$10.00 (+1000 cents) lead
-        hybridStrategy.onBinanceFuturesTrade(ts + 50L, 90_020.00, 2.0, false);
+        strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 90_000.00, ts);
+        strategy.onBinanceSpotTrade(ts + 10L, 95_000.00, 10.0, false);
+        strategy.onBinanceFuturesTrade(ts + 20L, 95_000.00, 10.0, false);
 
-        assertThat(hybridStrategy.computeEffectiveSpotCents()).isEqualTo(9_001_000L);
+        assertThat(strategy.getLastChainlinkPriceCents()).isEqualTo(9_000_000L);
     }
 
     @Test
     @DisplayName("Should accumulate both UP and DOWN positions on mid-window flip and hold to expiration")
     void shouldAccumulateBidirectionalPositionsOnMidWindowFlipAndHoldToExpiration() {
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                null,
-                true
-        ));
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
         // 1. At tau = 58s, BTC is +$35 above strike -> buys UP
         long tUp = CANDLE_END_MS - 58_000L;

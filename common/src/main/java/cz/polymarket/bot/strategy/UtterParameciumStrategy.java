@@ -3,9 +3,9 @@ package cz.polymarket.bot.strategy;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TwapUpdate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.util.Set;
@@ -14,11 +14,12 @@ import java.util.Set;
  * Reconstructed {@code Utter-Paramecium} (Model V1) final-minute Chainlink 60s TWAP lock-in strategy.
  * <p>
  * Operates exclusively in the final 60-second settlement window ({@code tau in [10s, 61s]}) of
- * 15-minute binary prediction markets. Projects the terminal 60-second Chainlink settlement TWAP
- * by combining the already-locked portion of the 60s integral with the current spot price (optionally
- * adjusted for Binance Futures lead-lag), models remaining TWAP uncertainty as
- * {@code sigma_rem(tau) ~ tau^(3/2)}, and executes scaled Taker BUY batches every {@code >= 200ms}
- * whenever {@code P_model(D) - Ask(D) - Fee(Ask(D)) >= min_edge_mc} and {@code Ask(D) <= $0.970}.
+ * 15-minute binary prediction markets using strictly Polymarket PolyBolt streams
+ * ({@code price.crypto} and {@code price.crypto.twap}) and Polymarket CLOB order book quotes.
+ * <p>
+ * The target price ({@code targetPriceCents}) must be explicitly determined from the PolyBolt
+ * 60-second TWAP stream at market start. If the target price is missing in any mode
+ * (live, paper, or backtest), a warning is logged and the market is skipped.
  * <p>
  * All hot-path calculations use deterministic integer/fixed-point arithmetic ({@code long} USD cents
  * for BTC and {@code int} millicents {@code 0..1000} for option prices) with pre-allocated ring buffers
@@ -26,6 +27,8 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class UtterParameciumStrategy implements TradingStrategy {
+
+    private static final Logger LOG = Logger.getLogger(UtterParameciumStrategy.class);
 
     /**
      * Pre-computed remaining 60s TWAP standard deviation weights
@@ -55,8 +58,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
     private static final int MAX_MC = 1_000;
     private static final int TICK_STEP_MC = 10;
-    private static final long MAX_BINANCE_LEAD_CENTS = 2_500L;
     private static final long MIN_SIGMA_REM_CENTS = 25L;
+    private static final long CANDLE_DURATION_MS = 900_000L;
+    private static final long MAX_TARGET_PRICE_OFFSET_MS = 10_000L;
     private static final long TWAP_WINDOW_MS = 60_000L;
     private static final long BUFFER_RETENTION_MS = 65_000L;
     private static final long INITIAL_BURST_MIN_TAU_MS = 55_000L;
@@ -70,14 +74,14 @@ public class UtterParameciumStrategy implements TradingStrategy {
     // Active 15-minute candle session state
     private long activeCandleStartMs = 0L;
     private long activeCandleEndMs = 0L;
-    private long explicitStrikeCents = 0L;
-    private long inferredStrikeCents = 0L;
+    private long targetPriceCents = 0L;
+    private long nextCandleStartMs = 0L;
+    private long nextCandleTargetPriceCents = 0L;
+    private boolean missingTargetPriceWarned = false;
 
-    // Real-time feed tracking in USD cents
+    // Real-time PolyBolt price.crypto feed tracking in USD cents
     private long lastChainlinkPriceCents = 0L;
     private long lastChainlinkTickMs = 0L;
-    private long lastBinancePriceCents = 0L;
-    private long binancePriceAtLastClTickCents = 0L;
 
     // Order book & per-market execution state
     private OrderBookQuote latestValidQuote = null;
@@ -205,9 +209,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
     @Override
     public Set<ExternalStreamType> getRequiredExternalStreams() {
-        if (config.binanceLeadWeightBps() > 0L) {
-            return Set.of(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES);
-        }
         return Set.of();
     }
 
@@ -235,12 +236,12 @@ public class UtterParameciumStrategy implements TradingStrategy {
         spotVolatilityBuffer.clear();
         activeCandleStartMs = 0L;
         activeCandleEndMs = 0L;
-        explicitStrikeCents = 0L;
-        inferredStrikeCents = 0L;
+        targetPriceCents = 0L;
+        nextCandleStartMs = 0L;
+        nextCandleTargetPriceCents = 0L;
+        missingTargetPriceWarned = false;
         lastChainlinkPriceCents = 0L;
         lastChainlinkTickMs = 0L;
-        lastBinancePriceCents = 0L;
-        binancePriceAtLastClTickCents = 0L;
         resetMarketExecutionState();
     }
 
@@ -258,46 +259,31 @@ public class UtterParameciumStrategy implements TradingStrategy {
         lastModelProbUpMc = 500;
     }
 
-    @Override
-    public void onTwapUpdate(TwapUpdate update) {
-        if (update == null) {
+    private void ensureActiveCandle(long timestampMs) {
+        if (timestampMs <= 0L) {
             return;
         }
-        if (update.timeframe() != null && update.timeframe() != Timeframe.FIFTEEN_MINUTES) {
+        if (activeCandleStartMs > 0L && timestampMs >= activeCandleStartMs && timestampMs <= activeCandleEndMs) {
             return;
         }
-
-        long startMs = update.candleStart() * 1000L;
-        long endMs = update.candleEnd() * 1000L;
-
-        if (startMs != activeCandleStartMs) {
-            if (lastChainlinkTickMs > 0L && (startMs < lastChainlinkTickMs || startMs - lastChainlinkTickMs > 120_000L)) {
+        long alignedStartMs = (timestampMs / CANDLE_DURATION_MS) * CANDLE_DURATION_MS;
+        long alignedEndMs = alignedStartMs + CANDLE_DURATION_MS;
+        if (alignedStartMs != activeCandleStartMs) {
+            if (lastChainlinkTickMs > 0L && (alignedStartMs < lastChainlinkTickMs || alignedStartMs - lastChainlinkTickMs > 120_000L)) {
                 chainlinkTwapBuffer.clear();
                 spotVolatilityBuffer.clear();
                 lastChainlinkPriceCents = 0L;
                 lastChainlinkTickMs = 0L;
-                lastBinancePriceCents = 0L;
-                binancePriceAtLastClTickCents = 0L;
             }
-            activeCandleStartMs = startMs;
-            activeCandleEndMs = endMs;
-            explicitStrikeCents = (update.openPrice() != null && update.openPrice().doubleValue() > 0.0)
-                    ? Math.round(update.openPrice().doubleValue() * 100.0)
+            activeCandleStartMs = alignedStartMs;
+            activeCandleEndMs = alignedEndMs;
+            targetPriceCents = (alignedStartMs == nextCandleStartMs && nextCandleTargetPriceCents > 0L)
+                    ? nextCandleTargetPriceCents
                     : 0L;
-            inferredStrikeCents = (explicitStrikeCents <= 0L)
-                    ? chainlinkTwapBuffer.meanCentsInWindow(startMs - TWAP_WINDOW_MS, startMs)
-                    : 0L;
+            nextCandleStartMs = 0L;
+            nextCandleTargetPriceCents = 0L;
+            missingTargetPriceWarned = false;
             resetMarketExecutionState();
-        } else if (explicitStrikeCents <= 0L && update.openPrice() != null && update.openPrice().doubleValue() > 0.0) {
-            explicitStrikeCents = Math.round(update.openPrice().doubleValue() * 100.0);
-        }
-
-        if (update.point() != null && update.point().medianPrice() != null) {
-            long pointTsMs = update.point().time() * 1000L;
-            double medianPrice = update.point().medianPrice().doubleValue();
-            if (medianPrice > 0.0 && (lastChainlinkTickMs == 0L || pointTsMs > lastChainlinkTickMs + 1_500L)) {
-                recordChainlinkSample(pointTsMs, Math.round(medianPrice * 100.0));
-            }
         }
     }
 
@@ -311,6 +297,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         if (price <= 0.0 || timestampMs <= 0L) {
             return;
         }
+        ensureActiveCandle(timestampMs);
         long priceCents = Math.round(price * 100.0);
         recordChainlinkSample(timestampMs, priceCents);
 
@@ -326,16 +313,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
         lastChainlinkPriceCents = priceCents;
         lastChainlinkTickMs = timestampMs;
-        if (lastBinancePriceCents > 0L) {
-            binancePriceAtLastClTickCents = lastBinancePriceCents;
-        }
-
-        if (activeCandleStartMs > 0L && explicitStrikeCents <= 0L && timestampMs <= activeCandleStartMs) {
-            long mean = chainlinkTwapBuffer.meanCentsInWindow(activeCandleStartMs - TWAP_WINDOW_MS, activeCandleStartMs);
-            if (mean > 0L) {
-                inferredStrikeCents = mean;
-            }
-        }
     }
 
     @Override
@@ -349,53 +326,31 @@ public class UtterParameciumStrategy implements TradingStrategy {
         if (twapPrice <= 0.0 || timestampMs <= 0L) {
             return;
         }
-        if (getEffectiveStrikeCents() <= 0L
-                && (activeCandleStartMs <= 0L || timestampMs <= activeCandleStartMs + TWAP_WINDOW_MS)) {
-            inferredStrikeCents = Math.round(twapPrice * 100.0);
-        }
-    }
+        long effectiveTsMs = twapTimestampMs > 0L ? twapTimestampMs : timestampMs;
+        long priceCents = Math.round(twapPrice * 100.0);
 
-    @Override
-    public void onBinanceFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-        if (price <= 0.0 || timestampMs <= 0L) {
+        if (activeCandleStartMs > 0L && effectiveTsMs == activeCandleEndMs) {
+            nextCandleStartMs = activeCandleEndMs;
+            nextCandleTargetPriceCents = priceCents;
             return;
         }
-        lastBinancePriceCents = Math.round(price * 100.0);
-        if (binancePriceAtLastClTickCents <= 0L) {
-            binancePriceAtLastClTickCents = lastBinancePriceCents;
-        }
-        if (config.binanceLeadWeightBps() > 0L && latestValidQuote != null) {
-            evaluateEntry(timestampMs, latestValidQuote);
-        }
-    }
 
-    @Override
-    public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-        if (price <= 0.0 || timestampMs <= 0L) {
-            return;
-        }
-        lastBinancePriceCents = Math.round(price * 100.0);
-        if (binancePriceAtLastClTickCents <= 0L) {
-            binancePriceAtLastClTickCents = lastBinancePriceCents;
-        }
-        if (config.binanceLeadWeightBps() > 0L && latestValidQuote != null) {
-            evaluateEntry(timestampMs, latestValidQuote);
+        ensureActiveCandle(effectiveTsMs);
+        if (targetPriceCents <= 0L && Math.abs(effectiveTsMs - activeCandleStartMs) <= MAX_TARGET_PRICE_OFFSET_MS) {
+            targetPriceCents = priceCents;
         }
     }
 
     @Override
     public void onOrderBookQuote(OrderBookQuote quote) {
-        if (quote == null) {
-            latestValidQuote = null;
-            return;
-        }
-        if (!isQuoteTradable(quote)) {
+        if (quote == null || !isQuoteTradable(quote)) {
             latestValidQuote = null;
             return;
         }
         latestValidQuote = quote;
         long nowMs = quote.timestampMs() > 0L ? quote.timestampMs() : lastChainlinkTickMs;
         if (nowMs > 0L) {
+            ensureActiveCandle(nowMs);
             evaluateEntry(nowMs, quote);
         }
     }
@@ -431,7 +386,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
     @Override
     public void onMarketCandleCompleted(MarketCandle candle) {
-        // Model V1 uses real-time 1s Chainlink price differences rather than historical 15m candles
+        // Model V1 uses real-time 1s PolyBolt price.crypto differences rather than historical 15m candles
     }
 
     @Override
@@ -457,12 +412,20 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
 
-        if (hasEmittedSignal && (nowMs - lastSignalMs) < config.cooldownMs()) {
+        if (targetPriceCents <= 0L) {
+            if (!missingTargetPriceWarned) {
+                missingTargetPriceWarned = true;
+                LOG.warnf("Skipping market [%d, %d]: target price is missing from PolyBolt 60s TWAP stream",
+                        activeCandleStartMs, activeCandleEndMs);
+            }
             return;
         }
 
-        long strikeCents = getEffectiveStrikeCents();
-        if (strikeCents <= 0L || lastChainlinkPriceCents <= 0L) {
+        if (lastChainlinkPriceCents <= 0L) {
+            return;
+        }
+
+        if (hasEmittedSignal && (nowMs - lastSignalMs) < config.cooldownMs()) {
             return;
         }
 
@@ -494,8 +457,8 @@ public class UtterParameciumStrategy implements TradingStrategy {
             askDownMc = MAX_MC - bidUpMc;
         }
 
-        // Compute projected final 60s TWAP and remaining uncertainty sigma_rem(tau)
-        long sHatCents = computeEffectiveSpotCents();
+        // Compute projected final 60s TWAP and remaining uncertainty sigma_rem(tau) strictly from PolyBolt price.crypto
+        long spotCents = lastChainlinkPriceCents;
         long settlementWindowStartMs = activeCandleEndMs - TWAP_WINDOW_MS;
         long lockedMeanCents = (tauMs <= TWAP_WINDOW_MS)
                 ? chainlinkTwapBuffer.meanCentsInWindow(settlementWindowStartMs, nowMs)
@@ -503,10 +466,10 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
         long projectedTwapCents;
         if (tauMs >= TWAP_WINDOW_MS || lockedMeanCents <= 0L) {
-            projectedTwapCents = sHatCents;
+            projectedTwapCents = spotCents;
         } else {
             long elapsedMs = TWAP_WINDOW_MS - tauMs;
-            projectedTwapCents = (elapsedMs * lockedMeanCents + tauMs * sHatCents) / TWAP_WINDOW_MS;
+            projectedTwapCents = (elapsedMs * lockedMeanCents + tauMs * spotCents) / TWAP_WINDOW_MS;
         }
 
         long sigma1sCents = spotVolatilityBuffer.sigma1sCents(config);
@@ -514,7 +477,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         long weightBps = TWAP_REM_WEIGHT_BPS[tauSec];
         long sigmaRemCents = Math.max(MIN_SIGMA_REM_CENTS, (sigma1sCents * weightBps) / 10_000L);
 
-        long zCenti = (100L * (projectedTwapCents - strikeCents)) / sigmaRemCents;
+        long zCenti = (100L * (projectedTwapCents - targetPriceCents)) / sigmaRemCents;
         int pUpMc = normalCdfMc(zCenti);
         int pDownMc = MAX_MC - pUpMc;
         this.lastModelProbUpMc = pUpMc;
@@ -610,36 +573,28 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     /**
-     * Computes the effective current BTC spot price in USD cents, incorporating the configured
-     * Binance lead-lag adjustment over the last Chainlink tick.
+     * Returns the explicit target price ({@code priceToBeat}) in USD cents determined from the
+     * PolyBolt 60-second TWAP stream at market start.
      *
-     * @return effective BTC spot price in USD cents
+     * @return explicit target price in USD cents, or {@code 0} if missing
      */
-    public long computeEffectiveSpotCents() {
-        long clCents = lastChainlinkPriceCents;
-        if (clCents <= 0L) {
-            return 0L;
-        }
-        long leadWeightBps = config.binanceLeadWeightBps();
-        if (leadWeightBps <= 0L || lastBinancePriceCents <= 0L || binancePriceAtLastClTickCents <= 0L) {
-            return clCents;
-        }
-        long deltaLeadCents = Math.clamp(
-                lastBinancePriceCents - binancePriceAtLastClTickCents,
-                -MAX_BINANCE_LEAD_CENTS,
-                MAX_BINANCE_LEAD_CENTS
-        );
-        return clCents + (leadWeightBps * deltaLeadCents) / 10_000L;
+    public long getTargetPriceCents() {
+        return targetPriceCents;
     }
 
     /**
-     * Returns the effective strike price ({@code priceToBeat}) in USD cents, using either the
-     * explicit strike price or the strike price inferred from the 60s Chainlink buffer at candle start.
-     *
-     * @return effective strike price in USD cents, or {@code 0} if not yet available
+     * Returns whether the active market was skipped and warned due to a missing target price
+     * from the PolyBolt 60-second TWAP stream.
      */
-    public long getEffectiveStrikeCents() {
-        return explicitStrikeCents > 0L ? explicitStrikeCents : inferredStrikeCents;
+    public boolean isMissingTargetPriceWarned() {
+        return missingTargetPriceWarned;
+    }
+
+    /**
+     * Returns the last observed PolyBolt {@code price.crypto} price in USD cents.
+     */
+    public long getLastChainlinkPriceCents() {
+        return lastChainlinkPriceCents;
     }
 
     /**
@@ -753,51 +708,55 @@ public class UtterParameciumStrategy implements TradingStrategy {
         private static final int CAPACITY = 64;
         private static final int MASK = CAPACITY - 1;
 
-        private final long[] diffSqBuffer = new long[CAPACITY];
+        private final long[] sqDiffsCents2 = new long[CAPACITY];
         private int head = 0;
         private int len = 0;
-        private long runningSumSq = 0L;
-        private long lastSampleTimestampMs = 0L;
+        private long runningSumSqCents2 = 0L;
         private long lastSamplePriceCents = 0L;
+        private long lastSampleMs = 0L;
 
         void clear() {
             head = 0;
             len = 0;
-            runningSumSq = 0L;
-            lastSampleTimestampMs = 0L;
+            runningSumSqCents2 = 0L;
             lastSamplePriceCents = 0L;
+            lastSampleMs = 0L;
         }
 
         void onTick(long timestampMs, long priceCents) {
-            if (lastSampleTimestampMs > 0L) {
-                long dtMs = timestampMs - lastSampleTimestampMs;
-                if (dtMs >= 500L && dtMs <= 2_500L) {
-                    long diff = Math.abs(priceCents - lastSamplePriceCents);
-                    long diffSq = diff * diff;
-                    if (len == CAPACITY) {
-                        runningSumSq -= diffSqBuffer[head];
-                        head = (head + 1) & MASK;
-                        len--;
-                    }
-                    int tail = (head + len) & MASK;
-                    diffSqBuffer[tail] = diffSq;
-                    runningSumSq += diffSq;
-                    len++;
-                }
-            }
-            if (lastSampleTimestampMs == 0L || timestampMs > lastSampleTimestampMs) {
-                lastSampleTimestampMs = timestampMs;
+            if (lastSamplePriceCents <= 0L) {
                 lastSamplePriceCents = priceCents;
+                lastSampleMs = timestampMs;
+                return;
             }
+            long dtMs = timestampMs - lastSampleMs;
+            if (dtMs < 800L) {
+                return;
+            }
+            if (dtMs <= 2_500L) {
+                long diff = priceCents - lastSamplePriceCents;
+                long sq = diff * diff;
+                if (len == CAPACITY) {
+                    runningSumSqCents2 -= sqDiffsCents2[head];
+                    head = (head + 1) & MASK;
+                    len--;
+                }
+                int tail = (head + len) & MASK;
+                sqDiffsCents2[tail] = sq;
+                runningSumSqCents2 += sq;
+                len++;
+            }
+            lastSamplePriceCents = priceCents;
+            lastSampleMs = timestampMs;
         }
 
         long sigma1sCents(UtterParameciumStrategyConfig cfg) {
             if (len < 5) {
                 return cfg.defaultSigma1sCents();
             }
-            long meanSq = runningSumSq / len;
-            long rms = isqrt(meanSq);
-            return Math.clamp(rms, cfg.minSigma1sCents(), cfg.maxSigma1sCents());
+            long meanSq = runningSumSqCents2 / len;
+            long rawSigma = isqrt(meanSq);
+            return Math.clamp(rawSigma, cfg.minSigma1sCents(), cfg.maxSigma1sCents());
         }
     }
 }

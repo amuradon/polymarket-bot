@@ -77,30 +77,30 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ## 3. Submodule Responsibilities
 
 ### `common`
-- **Domain Models**: Immutable records and compact structures (`Timeframe`, `PriceSnapshot`, `TwapPoint`, `TwapUpdate`, `CandleTwapState`, `MarketCandle`, `OrderBookQuote`, `TradeRecord`).
-- **Calculators & Math**: `MedianCalculator`, `TwapCalculator`, `VwapCalculator`, `RealizedVolatilityCalculator`, `KellyPositionSizer`, `PerformanceMetricsCalculator`.
-- **In-Memory Cache**: `HourlyPriceCache` (sliding 3600-second window).
-- **Strategy & Execution Contracts**: `TradingStrategy`, `StrategyContext`, `ExecutionRouter`, `OrderCommand`, `ExecutionReport`, `StrategyRegistry`, `TWAPArbitrageStrategy`, `UtterParameciumStrategy`, `UtterParameciumStrategyConfig`.
+- **Domain Models**: Immutable records and compact structures for timeframes, candles, order book quotes, price snapshots, and trade records.
+- **Calculators & Math**: Quantitative calculators for rolling TWAP, VWAP, median, realized volatility, position sizing, and performance metrics.
+- **In-Memory Cache**: Sliding 3600-second window price caching for low-latency lookups.
+- **Strategy & Execution Contracts**: Core strategy interfaces, execution routing contracts, strategy registry, and shared trading strategies that execute identically across backtest, paper, and live modes.
 
 ### `connector`
-- **Resilient WebSocket Core**: `ReconnectingWebSocketStream`, `ConnectionState`, `RawWebSocketListener`, `AbstractExchangeWebSocketClient`, `ExchangePriceListener`.
-- **Binance Connectors**: `BinanceStreamConnector`, `BinanceStreamType` (Spot `aggTrades`, Futures `aggTrades`, Futures Diff. Book Depth 100ms, Futures Partial Book Depth 100ms, Futures Liquidation Orders `forceOrder`).
-- **Deribit Connectors**: `DeribitStreamConnector` (Deribit v2 `wss://www.deribit.com/ws/api/v2` for authenticated raw Futures trade streams, e.g. `trades.BTC-PERPETUAL.raw`, with automated JSON-RPC authentication via `public/auth` client credentials, subscription, and keep-alive handling).
-- **Polymarket Connectors**: `PolymarketGammaClient` (market discovery by slug and resolution polling), `PolymarketPolyBoltClient` (PolyBolt v2 `wss://ws-live-v2.polymarket.com/ws` for `price.crypto.twap` 60s TWAP and `price.crypto`), `PolymarketClobClient` (per-market CLOB order book and trade WebSocket streams).
-- **Shared Client Configuration**: `AppConfig` (`HttpClient`, `ObjectMapper`), `Exchange`, `BinanceTicker`.
+- **Resilient WebSocket Core**: Reconnecting WebSocket stream abstractions, connection state management, and raw/parsed listener contracts.
+- **Binance Connectors**: Connectors for Binance Spot and Futures streams (`aggTrades`, differential/partial book depth, and liquidation orders).
+- **Deribit Connectors**: Authenticated Deribit v2 WebSocket stream connector (`wss://www.deribit.com/ws/api/v2`) for raw Futures trade streams with automated JSON-RPC authentication, subscription, and keep-alive handling.
+- **Polymarket Connectors**: Clients for Gamma market discovery and resolution polling, PolyBolt v2 (`wss://ws-live-v2.polymarket.com/ws`) for `price.crypto.twap` (60s TWAP) and `price.crypto`, and per-market CLOB order book and trade WebSocket streams.
+- **Shared Client Configuration**: Shared HTTP client, JSON serialization, and exchange/ticker metadata.
 
 ### `data`
 - Standalone runnable Quarkus application (`quarkus.http.port=8084`) for low-latency raw stream recording in AWS `eu-west`.
-- **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format (`ZstdJsonlWriter`) with zero WebSocket JSON parsing overhead.
-- **Binance, Deribit & PolyBolt Daily Files**: `DailyBinanceStorageManager` writes each of the 5 Binance streams into separate UTC daily files, `DailyDeribitStorageManager` writes the Deribit Futures trade stream (`trades.<instrument>.raw`) into separate UTC daily files, and `DailyPolyBoltStorageManager` writes the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
-- **Polymarket Per-Market Lifecycle Files**: `PolymarketLifecycleCoordinator` and `PolymarketMarketStorageManager` record the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
-- **Status Endpoint**: `/api/collector/status` (`CollectorStatusResource`).
+- **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format with zero WebSocket JSON parsing overhead.
+- **Binance, Deribit & PolyBolt Daily Files**: Writes each of the 5 Binance streams, the Deribit Futures trade stream (`trades.<instrument>.raw`), and the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
+- **Polymarket Per-Market Lifecycle Files**: Records the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
+- **Status Endpoint**: Exposes `/api/collector/status` for monitoring active streams and storage health.
 
 ### `trading`
-- **Exchange Trackers & Reconstructors**: `BinanceWebSocketClient`, `CoinbaseWebSocketClient`, `KrakenWebSocketClient`, `BinanceHistoricalClient`, `ExchangePayloadParser`, `ExchangePriceTracker`, `HistoricalDataReconstructor`.
-- **Engines**: `TwapEngine` (1-second tick loop, candle rollover lifecycle, Binance timestamp synchronization).
-- **Web & Streaming**: `BtcUsdResource`, `TwapWebSocketEndpoint`, Qute templates (`btc-usd.html`), static CSS and JavaScript (`btc-usd.js`).
-- **Configuration**: `ChartRangeConfig`.
+- **Exchange Trackers & Reconstructors**: Multi-exchange WebSocket price trackers, historical candle clients, payload parsers, and startup state reconstruction.
+- **Engines**: Real-time multi-exchange TWAP engine (1-second tick loop, candle rollover lifecycle, timestamp synchronization), conditionally started only when required by the active strategy.
+- **Web & Streaming**: REST endpoints, WebSocket streaming endpoints, Qute templates, and frontend assets for real-time charting and monitoring.
+- **Configuration**: Runtime configuration bindings for charting and view ranges.
 
 ### `live`
 - Standalone runnable Quarkus application for live real-money execution.

@@ -85,7 +85,8 @@ public class TWAPArbitrageStrategy implements TradingStrategy {
     public Set<ExternalStreamType> getRequiredExternalStreams() {
         return Set.of(
                 ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
-                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
+                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES,
+                ExternalStreamType.TWAP_ENGINE
         );
     }
 

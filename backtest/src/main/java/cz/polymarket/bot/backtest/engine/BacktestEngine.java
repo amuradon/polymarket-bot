@@ -22,6 +22,7 @@ import cz.polymarket.bot.strategy.TradingStrategy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -46,6 +47,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @ApplicationScoped
 public class BacktestEngine {
+
+    private static final Logger LOG = Logger.getLogger(BacktestEngine.class);
 
     private final CollectorParquetDatasetService datasetService;
     private final StrategyRegistry strategyRegistry;
@@ -353,6 +356,13 @@ public class BacktestEngine {
                 }
 
                 CollectorMarketMetadata market = dayMarkets.get(idx);
+                if (Double.isNaN(market.twapOpen()) || market.twapOpen() <= 0.0) {
+                    LOG.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream",
+                            market.tStart(), market.datetimeUtc());
+                    dayOutcomes[idx] = new MarketSimulationOutcome(List.of(), 0.0, false);
+                    continue;
+                }
+
                 TradingStrategy activeStrategy = createFreshStrategyPerMarket
                         ? templateStrategy.createInstance()
                         : workerStrategy;

@@ -460,17 +460,6 @@ public class CollectorParquetDatasetService {
                 return idx;
             }
         }
-        Path cryptoFile = getPolymarketCryptoPriceFile(symbol, dateStr);
-        if (Files.exists(cryptoFile)) {
-            TimeSeriesIndex idx = queryTimeSeries(stmt, cryptoFile, "ts", "price");
-            if (!idx.isEmpty()) {
-                return idx;
-            }
-        }
-        Path spotFile = getBinanceSpotAggTradesFile(symbol, dateStr);
-        if (Files.exists(spotFile)) {
-            return queryTimeSeries(stmt, spotFile, "ts", "price");
-        }
         return TimeSeriesIndex.EMPTY;
     }
 
@@ -506,6 +495,7 @@ public class CollectorParquetDatasetService {
 
     private record TimeSeriesIndex(long[] timestamps, double[] prices) {
         static final TimeSeriesIndex EMPTY = new TimeSeriesIndex(new long[0], new double[0]);
+        private static final long MAX_TWAP_SAMPLE_DRIFT_MS = 10_000L;
 
         boolean isEmpty() {
             return timestamps.length == 0;
@@ -520,15 +510,20 @@ public class CollectorParquetDatasetService {
                 return prices[idx];
             }
             int insertPoint = -idx - 1;
+            int bestIdx;
             if (insertPoint == 0) {
-                return prices[0];
+                bestIdx = 0;
+            } else if (insertPoint >= timestamps.length) {
+                bestIdx = timestamps.length - 1;
+            } else {
+                long diffBefore = targetTsMs - timestamps[insertPoint - 1];
+                long diffAfter = timestamps[insertPoint] - targetTsMs;
+                bestIdx = (diffBefore <= diffAfter) ? (insertPoint - 1) : insertPoint;
             }
-            if (insertPoint >= timestamps.length) {
-                return prices[timestamps.length - 1];
+            if (Math.abs(timestamps[bestIdx] - targetTsMs) > MAX_TWAP_SAMPLE_DRIFT_MS) {
+                return Double.NaN;
             }
-            long diffBefore = targetTsMs - timestamps[insertPoint - 1];
-            long diffAfter = timestamps[insertPoint] - targetTsMs;
-            return (diffBefore <= diffAfter) ? prices[insertPoint - 1] : prices[insertPoint];
+            return prices[bestIdx];
         }
     }
 }

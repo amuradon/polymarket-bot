@@ -414,7 +414,8 @@ class TWAPArbitrageStrategyTest {
     void shouldDeclareExternalStreamsAndProcessPolymarketCryptoStreams() {
         assertThat(strategy.getRequiredExternalStreams()).containsExactlyInAnyOrder(
                 ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
-                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
+                ExternalStreamType.BINANCE_FUTURES_AGG_TRADES,
+                ExternalStreamType.TWAP_ENGINE
         );
 
         strategy.onPolymarketCryptoTwap60s(10000000L, "btcusd", "chainlink", 60125.5, 60, 9999990L);
