@@ -30,4 +30,36 @@ public record CollectorMarketMetadata(
         double twapOpen,
         double twapClose,
         TradeDirection actualOutcome
-) {}
+) {
+
+    /**
+     * Creates an initial discovered market descriptor from a filename timestamp without reading
+     * any Parquet metadata. Market metadata is populated later via lazy-loading when the market is processed.
+     *
+     * @param tStart candle start timestamp in epoch seconds UTC
+     * @param tEnd candle end timestamp in epoch seconds UTC ({@code tStart + 900})
+     * @param datetimeUtc ISO-8601 formatted start timestamp in UTC
+     * @param dateStr UTC date string in {@code yyyy-MM-dd} format
+     * @param marketParquetFile path to the market Parquet file on disk
+     * @return discovered market descriptor with unloaded metadata fields
+     */
+    public static CollectorMarketMetadata discovered(
+            long tStart,
+            long tEnd,
+            String datetimeUtc,
+            String dateStr,
+            Path marketParquetFile) {
+        return new CollectorMarketMetadata(
+                tStart,
+                tEnd,
+                datetimeUtc,
+                dateStr,
+                marketParquetFile,
+                null,
+                null,
+                Double.NaN,
+                Double.NaN,
+                null
+        );
+    }
+}

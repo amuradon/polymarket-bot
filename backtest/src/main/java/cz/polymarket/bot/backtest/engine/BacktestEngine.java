@@ -402,10 +402,10 @@ public class BacktestEngine {
                     break;
                 }
 
-                CollectorMarketMetadata market = dayMarkets.get(idx);
-                if (Double.isNaN(market.twapOpen()) || market.twapOpen() <= 0.0) {
-                    Log.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream",
-                            market.tStart(), market.datetimeUtc());
+                CollectorMarketMetadata discoveredMarket = dayMarkets.get(idx);
+                CollectorMarketMetadata market = datasetService.loadMarketMetadata(discoveredMarket, sharedDailyEvents)
+                        .orElse(null);
+                if (market == null) {
                     dayOutcomes[idx] = new MarketSimulationOutcome(List.of(), 0.0, false);
                     continue;
                 }

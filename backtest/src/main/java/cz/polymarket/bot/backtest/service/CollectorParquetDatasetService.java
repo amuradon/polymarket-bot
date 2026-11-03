@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest.service;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
+import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
@@ -21,12 +22,10 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 /**
@@ -40,6 +39,7 @@ import java.util.stream.Stream;
 public class CollectorParquetDatasetService {
 
     private static final long CANDLE_DURATION_SEC = 900L;
+    private static final long MAX_TWAP_SAMPLE_DRIFT_MS = 10_000L;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE.withZone(ZoneOffset.UTC);
 
     static {
@@ -233,11 +233,15 @@ public class CollectorParquetDatasetService {
     /**
      * Discovers all 15-minute Polymarket market archives for the requested symbol and date range,
      * sorted chronologically by candle start timestamp {@code tStart} ascending.
+     * <p>
+     * Discovery relies strictly on the {@code <asset>-updown-15m-<timestamp>.parquet} filename
+     * without reading any Parquet metadata. Market metadata is read lazily via
+     * {@link #loadMarketMetadata(CollectorMarketMetadata, BacktestEvent[])} when each market is processed.
      *
      * @param symbol trading symbol (e.g. {@code "BTCUSDT"})
      * @param startDate optional start date filter ({@code yyyy-MM-dd}, inclusive)
      * @param endDate optional end date filter ({@code yyyy-MM-dd}, inclusive)
-     * @return chronologically ordered list of discovered market metadata descriptors
+     * @return chronologically ordered list of discovered market descriptors
      */
     public List<CollectorMarketMetadata> discoverMarkets(String symbol, String startDate, String endDate) {
         Path marketDir = getPolymarket15mDir(symbol);
@@ -294,50 +298,20 @@ public class CollectorParquetDatasetService {
         candidates.sort(Comparator.comparingLong(CandidateFile::tStart));
 
         List<CollectorMarketMetadata> result = new ArrayList<>(candidates.size());
-        Map<String, TimeSeriesIndex> dailyPriceIndexCache = new HashMap<>();
+        for (CandidateFile candidate : candidates) {
+            long tStart = candidate.tStart();
+            long tEnd = tStart + CANDLE_DURATION_SEC;
+            Instant startInstant = Instant.ofEpochSecond(tStart);
+            String datetimeUtc = startInstant.toString();
+            String dateStr = DATE_FORMATTER.format(startInstant);
 
-        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
-             Statement stmt = conn.createStatement()) {
-
-            for (CandidateFile candidate : candidates) {
-                long tStart = candidate.tStart();
-                long tEnd = tStart + CANDLE_DURATION_SEC;
-                Instant startInstant = Instant.ofEpochSecond(tStart);
-                String datetimeUtc = startInstant.toString();
-                String dateStr = DATE_FORMATTER.format(startInstant);
-
-                TimeSeriesIndex priceIdx = dailyPriceIndexCache.computeIfAbsent(
-                        dateStr, d -> loadDailyReferencePriceIndex(stmt, symbol, d));
-
-                double twapOpen = priceIdx.findNearestPrice(tStart * 1000L);
-                double twapClose = priceIdx.findNearestPrice(tEnd * 1000L);
-
-                ParsedMarketHeader header = readMarketHeader(stmt, candidate.path());
-
-                TradeDirection outcome;
-                if (header.resolvedOutcome() != null) {
-                    outcome = header.resolvedOutcome();
-                } else if (!Double.isNaN(twapOpen) && !Double.isNaN(twapClose)) {
-                    outcome = (twapClose >= twapOpen) ? TradeDirection.UP : TradeDirection.DOWN;
-                } else {
-                    outcome = TradeDirection.UP;
-                }
-
-                result.add(new CollectorMarketMetadata(
-                        tStart,
-                        tEnd,
-                        datetimeUtc,
-                        dateStr,
-                        candidate.path(),
-                        header.upTokenId(),
-                        header.downTokenId(),
-                        twapOpen,
-                        twapClose,
-                        outcome
-                ));
-            }
-        } catch (SQLException e) {
-            Log.warnf("DuckDB error while discovering market metadata: %s", e.getMessage());
+            result.add(CollectorMarketMetadata.discovered(
+                    tStart,
+                    tEnd,
+                    datetimeUtc,
+                    dateStr,
+                    candidate.path()
+            ));
         }
 
         if (Log.isInfoEnabled()) {
@@ -346,18 +320,96 @@ public class CollectorParquetDatasetService {
         return result;
     }
 
+    /**
+     * Lazily loads and validates the metadata for a single discovered market when the market is processed.
+     * <p>
+     * Extracts {@code twapOpen} and {@code twapClose} from the pre-loaded daily stream events and queries
+     * the market Parquet file via DuckDB for {@code market_discovered} ({@code clobTokenIds}) and
+     * {@code market_resolved} ({@code outcomePrices}). If any required data is missing or unreadable,
+     * logs a warning and returns {@link Optional#empty()} so the market file is skipped.
+     *
+     * @param discoveredMarket initial market descriptor returned by {@link #discoverMarkets}
+     * @param sharedDailyEvents pre-loaded sorted daily stream events for the market's UTC day
+     * @return resolved {@link CollectorMarketMetadata}, or {@link Optional#empty()} if metadata is incomplete
+     */
+    public Optional<CollectorMarketMetadata> loadMarketMetadata(
+            CollectorMarketMetadata discoveredMarket,
+            BacktestEvent[] sharedDailyEvents) {
+
+        if (discoveredMarket == null || discoveredMarket.marketParquetFile() == null) {
+            Log.warn("Skipping market: discovered market descriptor or file path is null");
+            return Optional.empty();
+        }
+
+        long tStart = discoveredMarket.tStart();
+        long tEnd = discoveredMarket.tEnd();
+        String datetimeUtc = discoveredMarket.datetimeUtc();
+        String dateStr = discoveredMarket.dateStr();
+        Path parquetFile = discoveredMarket.marketParquetFile();
+
+        if (!Files.isRegularFile(parquetFile)) {
+            Log.warnf("Skipping market at %d (%s): market Parquet file does not exist: %s",
+                    tStart, datetimeUtc, parquetFile);
+            return Optional.empty();
+        }
+
+        double twapOpen = findNearestTwap60sPrice(sharedDailyEvents, tStart * 1000L);
+        if (Double.isNaN(twapOpen) || twapOpen <= 0.0) {
+            Log.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream for %s",
+                    tStart, datetimeUtc, parquetFile);
+            return Optional.empty();
+        }
+
+        double twapClose = findNearestTwap60sPrice(sharedDailyEvents, tEnd * 1000L);
+
+        ParsedMarketHeader header = readMarketHeader(parquetFile);
+        if (header == null
+                || header.upTokenId() == null || header.upTokenId().isBlank()
+                || header.downTokenId() == null || header.downTokenId().isBlank()) {
+            Log.warnf("Skipping market at %d (%s): missing CLOB token IDs (market_discovered) in %s",
+                    tStart, datetimeUtc, parquetFile);
+            return Optional.empty();
+        }
+
+        TradeDirection outcome;
+        if (header.resolvedOutcome() != null) {
+            outcome = header.resolvedOutcome();
+        } else if (!Double.isNaN(twapClose) && twapClose > 0.0) {
+            outcome = (twapClose >= twapOpen) ? TradeDirection.UP : TradeDirection.DOWN;
+        } else {
+            Log.warnf("Skipping market at %d (%s): market resolution and closing 60s TWAP price are both missing for %s",
+                    tStart, datetimeUtc, parquetFile);
+            return Optional.empty();
+        }
+
+        return Optional.of(new CollectorMarketMetadata(
+                tStart,
+                tEnd,
+                datetimeUtc,
+                dateStr,
+                parquetFile,
+                header.upTokenId(),
+                header.downTokenId(),
+                twapOpen,
+                twapClose,
+                outcome
+        ));
+    }
+
     private record ParsedMarketHeader(String upTokenId, String downTokenId, TradeDirection resolvedOutcome) {}
 
-    private ParsedMarketHeader readMarketHeader(Statement stmt, Path parquetFile) {
-        String upToken = "BTC-UP";
-        String downToken = "BTC-DOWN";
+    private ParsedMarketHeader readMarketHeader(Path parquetFile) {
+        String upToken = null;
+        String downToken = null;
         TradeDirection resolvedOutcome = null;
 
         String normPath = parquetFile.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT event_type, CAST(payload AS VARCHAR) FROM read_parquet('" + normPath + "') " +
                 "WHERE event_type IN ('market_discovered', 'market_resolved')";
 
-        try (ResultSet rs = stmt.executeQuery(sql)) {
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 String eventType = rs.getString(1);
                 String payload = rs.getString(2);
@@ -376,9 +428,77 @@ public class CollectorParquetDatasetService {
             }
         } catch (SQLException e) {
             Log.warnf("Could not read metadata rows from %s: %s", parquetFile, e.getMessage());
+            return null;
         }
 
         return new ParsedMarketHeader(upToken, downToken, resolvedOutcome);
+    }
+
+    private static double findNearestTwap60sPrice(BacktestEvent[] sharedDailyEvents, long targetTsMs) {
+        if (sharedDailyEvents == null || sharedDailyEvents.length == 0) {
+            return Double.NaN;
+        }
+
+        int insertPoint = findFirstIndexAtOrAfter(sharedDailyEvents, targetTsMs);
+
+        long beforeTs = Long.MIN_VALUE;
+        double beforePrice = Double.NaN;
+        for (int i = insertPoint - 1; i >= 0; i--) {
+            BacktestEvent ev = sharedDailyEvents[i];
+            if (targetTsMs - ev.timestampMs() > MAX_TWAP_SAMPLE_DRIFT_MS) {
+                break;
+            }
+            if (ev instanceof BacktestEvent.PolymarketCryptoTwap60sEvent twapEv) {
+                beforeTs = twapEv.timestampMs();
+                beforePrice = twapEv.twapPrice();
+                break;
+            }
+        }
+
+        long afterTs = Long.MAX_VALUE;
+        double afterPrice = Double.NaN;
+        for (int i = insertPoint; i < sharedDailyEvents.length; i++) {
+            BacktestEvent ev = sharedDailyEvents[i];
+            if (ev.timestampMs() - targetTsMs > MAX_TWAP_SAMPLE_DRIFT_MS) {
+                break;
+            }
+            if (ev instanceof BacktestEvent.PolymarketCryptoTwap60sEvent twapEv) {
+                afterTs = twapEv.timestampMs();
+                afterPrice = twapEv.twapPrice();
+                break;
+            }
+        }
+
+        boolean hasBefore = !Double.isNaN(beforePrice);
+        boolean hasAfter = !Double.isNaN(afterPrice);
+        if (!hasBefore && !hasAfter) {
+            return Double.NaN;
+        }
+        if (hasBefore && !hasAfter) {
+            return beforePrice;
+        }
+        if (!hasBefore) {
+            return afterPrice;
+        }
+        long diffBefore = targetTsMs - beforeTs;
+        long diffAfter = afterTs - targetTsMs;
+        return (diffBefore <= diffAfter) ? beforePrice : afterPrice;
+    }
+
+    private static int findFirstIndexAtOrAfter(BacktestEvent[] events, long targetTsMs) {
+        int low = 0;
+        int high = events.length - 1;
+        int result = events.length;
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            if (events[mid].timestampMs() >= targetTsMs) {
+                result = mid;
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        }
+        return result;
     }
 
     static String[] extractClobTokenIds(String payload) {
@@ -462,86 +582,5 @@ public class CollectorParquetDatasetService {
             }
         }
         return list;
-    }
-
-    private TimeSeriesIndex loadDailyReferencePriceIndex(Statement stmt, String symbol, String dateStr) {
-        Path twapFile = getPolymarketCryptoTwap60sFile(symbol, dateStr);
-        if (Files.exists(twapFile)) {
-            TimeSeriesIndex idx = queryTimeSeries(stmt, twapFile, "ts", "twap_price");
-            if (!idx.isEmpty()) {
-                if (Log.isDebugEnabled()) {
-                    Log.debugf("Loaded daily 60s TWAP reference price index for %s on %s (%d samples)",
-                            symbol, dateStr, idx.timestamps().length);
-                }
-                return idx;
-            }
-        } else {
-            Log.warnf("Daily 60s TWAP reference price file not found for %s on %s: %s", symbol, dateStr, twapFile);
-        }
-        return TimeSeriesIndex.EMPTY;
-    }
-
-    private TimeSeriesIndex queryTimeSeries(Statement stmt, Path file, String tsCol, String priceCol) {
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
-        String sql = "SELECT " + tsCol + ", " + priceCol + " FROM read_parquet('" + norm + "') " +
-                "WHERE " + priceCol + " IS NOT NULL ORDER BY " + tsCol + " ASC";
-        long[] timestamps = new long[1024];
-        double[] prices = new double[1024];
-        int size = 0;
-
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                if (size == timestamps.length) {
-                    int newCap = timestamps.length << 1;
-                    timestamps = Arrays.copyOf(timestamps, newCap);
-                    prices = Arrays.copyOf(prices, newCap);
-                }
-                timestamps[size] = rs.getLong(1);
-                prices[size] = rs.getDouble(2);
-                size++;
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load reference price series from %s: %s", file, e.getMessage());
-            return TimeSeriesIndex.EMPTY;
-        }
-
-        if (size == 0) {
-            return TimeSeriesIndex.EMPTY;
-        }
-        return new TimeSeriesIndex(Arrays.copyOf(timestamps, size), Arrays.copyOf(prices, size));
-    }
-
-    private record TimeSeriesIndex(long[] timestamps, double[] prices) {
-        static final TimeSeriesIndex EMPTY = new TimeSeriesIndex(new long[0], new double[0]);
-        private static final long MAX_TWAP_SAMPLE_DRIFT_MS = 10_000L;
-
-        boolean isEmpty() {
-            return timestamps.length == 0;
-        }
-
-        double findNearestPrice(long targetTsMs) {
-            if (timestamps.length == 0) {
-                return Double.NaN;
-            }
-            int idx = Arrays.binarySearch(timestamps, targetTsMs);
-            if (idx >= 0) {
-                return prices[idx];
-            }
-            int insertPoint = -idx - 1;
-            int bestIdx;
-            if (insertPoint == 0) {
-                bestIdx = 0;
-            } else if (insertPoint >= timestamps.length) {
-                bestIdx = timestamps.length - 1;
-            } else {
-                long diffBefore = targetTsMs - timestamps[insertPoint - 1];
-                long diffAfter = timestamps[insertPoint] - targetTsMs;
-                bestIdx = (diffBefore <= diffAfter) ? (insertPoint - 1) : insertPoint;
-            }
-            if (Math.abs(timestamps[bestIdx] - targetTsMs) > MAX_TWAP_SAMPLE_DRIFT_MS) {
-                return Double.NaN;
-            }
-            return prices[bestIdx];
-        }
     }
 }
