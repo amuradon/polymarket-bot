@@ -2,12 +2,15 @@ package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExternalStreamType;
+import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -143,6 +146,71 @@ class ChronologicalEventStreamerTest {
 
             assertThat(spotCount).isEqualTo(1);
             assertThat(futCount).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("Should lazily merge-stream CLOB events with dynamically scheduled pending order events and reset cleanly")
+    void shouldLazilyMergeStreamClobEventsWithDynamicEvents(@TempDir Path tempDir) throws Exception {
+        long tStart = 1785542400L;
+        long tEnd = tStart + 900L;
+        long baseMs = tStart * 1000L;
+        Path pmFile = tempDir.resolve("btc-updown-15m-" + tStart + ".parquet");
+
+        try (Connection conn = ChronologicalEventStreamer.openStreamingConnection();
+             Statement stmt = conn.createStatement()) {
+            String normPm = pmFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 100L) + "::UBIGINT, 'clob'::VARCHAR, 'price_change'::VARCHAR, '0x1'::VARCHAR, '1001'::VARCHAR, 0.51::DOUBLE, 100.0::DOUBLE, 'BUY'::VARCHAR, '{\"price_changes\":[]}'::JSON), " +
+                    "(" + (baseMs + 200L) + "::UBIGINT, 'clob'::VARCHAR, 'clob'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, '[]'::JSON), " +
+                    "(" + (baseMs + 500L) + "::UBIGINT, 'clob'::VARCHAR, 'price_change'::VARCHAR, '0x1'::VARCHAR, '1001'::VARCHAR, 0.52::DOUBLE, 150.0::DOUBLE, 'BUY'::VARCHAR, '{\"price_changes\":[]}'::JSON), " +
+                    "(" + (baseMs + 900L) + "::UBIGINT, 'clob'::VARCHAR, 'last_trade_price'::VARCHAR, '0x1'::VARCHAR, '1001'::VARCHAR, 0.53::DOUBLE, 50.0::DOUBLE, 'BUY'::VARCHAR, '{\"price\":\"0.53\"}'::JSON)" +
+                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm + "' (FORMAT PARQUET)");
+        }
+
+        CollectorMarketMetadata metadata = new CollectorMarketMetadata(
+                tStart, tEnd, "2026-08-01T00:00:00Z", "2026-08-01", pmFile,
+                "1001", "1002", 60000.0, 60100.0, TradeDirection.UP
+        );
+
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
+            streamer.loadCandleEvents(metadata, new BacktestEvent[0]);
+
+            List<BacktestEvent> observed = new ArrayList<>();
+            boolean scheduledDynamicOrder = false;
+
+            while (streamer.hasNext()) {
+                BacktestEvent ev = streamer.next();
+                observed.add(ev);
+                if (!scheduledDynamicOrder && ev instanceof BacktestEvent.PolymarketClobEvent clob && clob.timestampMs() == baseMs + 100L) {
+                    scheduledDynamicOrder = true;
+                    streamer.scheduleEvent(new BacktestEvent.PendingOrderExecutionEvent(
+                            baseMs + 300L,
+                            new OrderCommand("ord-1", "0x1", "1001", Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.52), BigDecimal.TEN),
+                            50L,
+                            1L
+                    ));
+                }
+            }
+
+            // Empty 'clob' [] payload at +200L must be skipped; dynamic order at +300L must be interleaved before +500L CLOB event
+            List<Long> clobAndOrderTimestamps = observed.stream()
+                    .filter(e -> e instanceof BacktestEvent.PolymarketClobEvent || e instanceof BacktestEvent.PendingOrderExecutionEvent)
+                    .map(BacktestEvent::timestampMs)
+                    .toList();
+
+            assertThat(clobAndOrderTimestamps).containsExactly(
+                    baseMs + 100L,
+                    baseMs + 300L,
+                    baseMs + 500L,
+                    baseMs + 900L
+            );
+
+            // Verify clear() mid-stream closes active ResultSet cleanly and allows reloading
+            streamer.loadCandleEvents(metadata, new BacktestEvent[0]);
+            assertThat(streamer.hasNext()).isTrue();
+            streamer.clear();
+            assertThat(streamer.hasNext()).isFalse();
         }
     }
 }

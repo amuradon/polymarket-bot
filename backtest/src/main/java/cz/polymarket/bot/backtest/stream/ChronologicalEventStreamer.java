@@ -9,6 +9,7 @@ import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
+import org.duckdb.DuckDBDriver;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
@@ -55,6 +57,11 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(4096);
     private Connection sharedConnection;
+    private Statement clobStatement;
+    private ResultSet clobResultSet;
+    private Path activeClobFile;
+    private long clobSeq;
+    private BacktestEvent.PolymarketClobEvent nextClobEvent;
 
     // Rolling single-day cache for daily Parquet streams to avoid re-scanning 96 times per UTC day
     private String cachedDateStr;
@@ -63,20 +70,48 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private BacktestEvent[] cachedDailyStreamEvents = EMPTY_EVENTS;
 
     /**
-     * Checks if there are pending events in the priority queue.
+     * Opens a new in-memory DuckDB JDBC connection configured for single-threaded,
+     * lazy vector result streaming ({@code jdbc_stream_results = true}, {@code threads = 1})
+     * so large Parquet files are never materialized in native C++ memory.
+     *
+     * @return configured DuckDB {@link Connection}
+     * @throws SQLException if connection creation or configuration fails
+     */
+    public static Connection openStreamingConnection() throws SQLException {
+        Properties props = new Properties();
+        props.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
+        Connection conn = DriverManager.getConnection("jdbc:duckdb:", props);
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("SET threads = 1;");
+        }
+        return conn;
+    }
+
+    /**
+     * Checks if there are pending events in the active CLOB stream or priority queue.
      *
      * @return true if more events exist
      */
     public boolean hasNext() {
-        return !queue.isEmpty();
+        return nextClobEvent != null || !queue.isEmpty();
     }
 
     /**
-     * Retrieves and removes the next chronological event from the priority queue.
+     * Retrieves and removes the next chronological event by merge-streaming the head of the
+     * active CLOB {@link ResultSet} cursor with the priority queue of daily/lifecycle/order events.
      *
-     * @return next event, or null if queue is empty
+     * @return next event, or null if no events remain
      */
     public BacktestEvent next() {
+        BacktestEvent queuedHead = queue.peek();
+        if (nextClobEvent == null) {
+            return queue.poll();
+        }
+        if (queuedHead == null || nextClobEvent.compareTo(queuedHead) <= 0) {
+            BacktestEvent.PolymarketClobEvent current = nextClobEvent;
+            advanceClobCursor();
+            return current;
+        }
         return queue.poll();
     }
 
@@ -92,9 +127,10 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Clears all pending events from the active candle queue.
+     * Clears all pending events and closes any active CLOB streaming cursor for the current candle.
      */
     public void clear() {
+        closeClobStream();
         queue.clear();
     }
 
@@ -180,7 +216,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
         if (tasks.size() == 1) {
             List<BacktestEvent> singleList = new ArrayList<>(16_384);
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+            try (Connection conn = openStreamingConnection();
                  Statement stmt = conn.createStatement()) {
                 tasks.getFirst().loader().accept(stmt, singleList);
             } catch (SQLException e) {
@@ -201,7 +237,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             DailyLoaderTask task = tasks.get(i);
             futures[i] = CompletableFuture.supplyAsync(() -> {
                 List<BacktestEvent> localEvents = new ArrayList<>(16_384);
-                try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+                try (Connection conn = openStreamingConnection();
                      Statement stmt = conn.createStatement()) {
                     task.loader().accept(stmt, localEvents);
                 } catch (SQLException e) {
@@ -351,16 +387,11 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
         scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
 
-        try {
-            Statement stmt = getOrCreateStatement();
-            loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
-        } catch (SQLException e) {
-            Log.warnf("Failed to stream collector Parquet CLOB events for candle %d: %s", tStart, e.getMessage());
-        }
-
         if (sharedDailyStreamEvents != null && sharedDailyStreamEvents.length > 0) {
             scheduleDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
         }
+
+        openPolymarketClobStream(metadata.marketParquetFile(), tEndMs);
     }
 
     /**
@@ -395,21 +426,15 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             return;
         }
 
-        try {
-            Statement stmt = getOrCreateStatement();
-
-            // Load 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
-            loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
-
-            // Slice daily PolyBolt & External streams for [tStartMs, tEndMs] from day cache
-            String dateStr = metadata.dateStr();
-            if (dateStr != null && !dateStr.isBlank()) {
-                ensureDailyStreamsLoaded(datasetService, symbol, dateStr, extStreams);
-                scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
-            }
-        } catch (SQLException e) {
-            Log.warnf("Failed to stream collector Parquet events for candle %d: %s", tStart, e.getMessage());
+        // Slice daily PolyBolt & External streams for [tStartMs, tEndMs] from day cache
+        String dateStr = metadata.dateStr();
+        if (dateStr != null && !dateStr.isBlank()) {
+            ensureDailyStreamsLoaded(datasetService, symbol, dateStr, extStreams);
+            scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
         }
+
+        // Lazily stream 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
+        openPolymarketClobStream(metadata.marketParquetFile(), tEndMs);
     }
 
     private void scheduleMandatoryLifecycleEvents(
@@ -454,7 +479,8 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void loadPolymarketClobEvents(Statement stmt, Path marketFile, long tEndMs) {
+    private void openPolymarketClobStream(Path marketFile, long tEndMs) {
+        closeClobStream();
         if (marketFile == null || !Files.exists(marketFile)) {
             Log.warnf("Polymarket CLOB market file does not exist: %s", marketFile);
             return;
@@ -463,28 +489,64 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         String sql = "SELECT ts, event_type, asset_id, COALESCE(price, 0.0), COALESCE(size, 0.0), side, CAST(payload AS VARCHAR) " +
                 "FROM read_parquet('" + normPath + "') " +
                 "WHERE ts <= " + tEndMs +
-                " AND event_type IN ('clob', 'book', 'price_change', 'last_trade_price') " +
-                "ORDER BY ts ASC";
+                " AND event_type IN ('clob', 'book', 'price_change', 'last_trade_price')";
 
-        long seq = 0L;
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                long ts = rs.getLong(1);
-                String eventType = rs.getString(2);
-                String assetId = rs.getString(3);
-                double price = rs.getDouble(4);
-                double size = rs.getDouble(5);
-                String side = rs.getString(6);
-                String payload = rs.getString(7);
+        try {
+            this.activeClobFile = marketFile;
+            this.clobSeq = 0L;
+            this.clobStatement = getOrCreateStatement();
+            this.clobResultSet = this.clobStatement.executeQuery(sql);
+            advanceClobCursor();
+        } catch (SQLException e) {
+            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
+            closeClobStream();
+        }
+    }
+
+    private void advanceClobCursor() {
+        if (clobResultSet == null) {
+            nextClobEvent = null;
+            return;
+        }
+        try {
+            while (clobResultSet.next()) {
+                long ts = clobResultSet.getLong(1);
+                String eventType = clobResultSet.getString(2);
+                String assetId = clobResultSet.getString(3);
+                double price = clobResultSet.getDouble(4);
+                double size = clobResultSet.getDouble(5);
+                String side = clobResultSet.getString(6);
+                String payload = clobResultSet.getString(7);
                 if ("clob".equals(eventType) && (payload == null || "[]".equals(payload.trim()))) {
                     continue;
                 }
-                scheduleEvent(new BacktestEvent.PolymarketClobEvent(
-                        ts, ++seq, eventType, assetId, price, size, side, payload
-                ));
+                nextClobEvent = new BacktestEvent.PolymarketClobEvent(
+                        ts, ++clobSeq, eventType, assetId, price, size, side, payload
+                );
+                return;
             }
         } catch (SQLException e) {
-            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
+            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", activeClobFile, e.getMessage());
+        }
+        closeClobStream();
+    }
+
+    private void closeClobStream() {
+        nextClobEvent = null;
+        activeClobFile = null;
+        if (clobResultSet != null) {
+            try {
+                clobResultSet.close();
+            } catch (SQLException ignored) {
+            }
+            clobResultSet = null;
+        }
+        if (clobStatement != null) {
+            try {
+                clobStatement.close();
+            } catch (SQLException ignored) {
+            }
+            clobStatement = null;
         }
     }
 
@@ -601,7 +663,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, COALESCE(seq, 0), symbol, source, price, COALESCE(price_timestamp, ts) " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 out.add(new BacktestEvent.PolymarketCryptoPriceEvent(
@@ -624,7 +686,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, COALESCE(seq, 0), symbol, source, twap_price, COALESCE(window_seconds, 60), COALESCE(twap_timestamp, ts) " +
-                "FROM read_parquet('" + norm + "') WHERE twap_price IS NOT NULL ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE twap_price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 out.add(new BacktestEvent.PolymarketCryptoTwap60sEvent(
@@ -648,7 +710,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 out.add(new BacktestEvent.BinanceSpotTradeEvent(
@@ -670,7 +732,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 out.add(new BacktestEvent.BinanceFuturesTradeEvent(
@@ -694,7 +756,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         String sql = "SELECT ts, COALESCE(final_update_id, 0), bids[1].price, asks[1].price, " +
                 "COALESCE(list_sum([x.quantity FOR x IN bids]), 0.0), " +
                 "COALESCE(list_sum([x.quantity FOR x IN asks]), 0.0) " +
-                "FROM read_parquet('" + norm + "') WHERE len(bids) > 0 AND len(asks) > 0 ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE len(bids) > 0 AND len(asks) > 0";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 long ts = rs.getLong(1);
@@ -720,7 +782,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, side, COALESCE(price, 0.0), COALESCE(average_price, 0.0), COALESCE(accumulated_quantity, original_quantity, 0.0) " +
-                "FROM read_parquet('" + norm + "') ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "')";
         long seq = 0L;
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
@@ -745,7 +807,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         String norm = file.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT ts, COALESCE(trade_seq, 0), instrument_name, direction, price, COALESCE(amount, 0.0), " +
                 "COALESCE(mark_price, 0.0), COALESCE(index_price, 0.0) " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL ORDER BY ts ASC";
+                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 out.add(new BacktestEvent.DeribitFuturesTradeEvent(
@@ -766,13 +828,14 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
     private Statement getOrCreateStatement() throws SQLException {
         if (sharedConnection == null || sharedConnection.isClosed()) {
-            sharedConnection = DriverManager.getConnection("jdbc:duckdb:");
+            sharedConnection = openStreamingConnection();
         }
         return sharedConnection.createStatement();
     }
 
     @Override
     public void close() {
+        closeClobStream();
         queue.clear();
         cachedDailyStreamEvents = EMPTY_EVENTS;
         cachedDateStr = null;

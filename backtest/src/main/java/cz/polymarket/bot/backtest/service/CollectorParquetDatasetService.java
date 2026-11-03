@@ -2,6 +2,7 @@ package cz.polymarket.bot.backtest.service;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
+import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
@@ -13,7 +14,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -405,9 +405,10 @@ public class CollectorParquetDatasetService {
 
         String normPath = parquetFile.toAbsolutePath().toString().replace('\\', '/');
         String sql = "SELECT event_type, CAST(payload AS VARCHAR) FROM read_parquet('" + normPath + "') " +
-                "WHERE event_type IN ('market_discovered', 'market_resolved')";
+                "WHERE msg_type IN ('market_discovered', 'market_resolved', 'market_lifecycle') " +
+                "AND event_type IN ('market_discovered', 'market_resolved')";
 
-        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+        try (Connection conn = ChronologicalEventStreamer.openStreamingConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {

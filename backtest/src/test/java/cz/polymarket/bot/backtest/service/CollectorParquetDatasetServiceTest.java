@@ -93,7 +93,7 @@ class CollectorParquetDatasetServiceTest {
 
             String normPm1 = pmFile1.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (c1Start * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, " +
+                    "(" + (c1Start * 1000L - 5000L) + "::UBIGINT, 'market_discovered'::VARCHAR, 'market_discovered'::VARCHAR, " +
                     "'0x111'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
                     "'{\"slug\":\"btc-updown-15m-" + c1Start + "\",\"clobTokenIds\":\"[\\\"10001\\\", \\\"10002\\\"]\"}'::JSON)" +
                     ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) " +
@@ -103,7 +103,10 @@ class CollectorParquetDatasetServiceTest {
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(" + (c2Start * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, " +
                     "'0x222'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"slug\":\"btc-updown-15m-" + c2Start + "\",\"clobTokenIds\":\"[\\\"20001\\\", \\\"20002\\\"]\"}'::JSON)" +
+                    "'{\"slug\":\"btc-updown-15m-" + c2Start + "\",\"clobTokenIds\":\"[\\\"20001\\\", \\\"20002\\\"]\"}'::JSON), " +
+                    "(" + ((c2Start + 900L) * 1000L + 5000L) + "::UBIGINT, 'market_resolved'::VARCHAR, 'market_resolved'::VARCHAR, " +
+                    "'0x222'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"slug\":\"btc-updown-15m-" + c2Start + "\",\"outcomePrices\":\"[\\\"0\\\", \\\"1\\\"]\"}'::JSON)" +
                     ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) " +
                     "TO '" + normPm2 + "' (FORMAT PARQUET)");
 
