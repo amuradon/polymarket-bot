@@ -6,6 +6,7 @@ import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.strategy.StrategyRegistry;
+import io.quarkus.logging.Log;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -47,8 +48,16 @@ public class BacktestResource {
      */
     @Inject
     public BacktestResource(BacktestJobManager jobManager, StrategyRegistry strategyRegistry) {
-        this.jobManager = Objects.requireNonNull(jobManager, "jobManager must not be null");
-        this.strategyRegistry = Objects.requireNonNull(strategyRegistry, "strategyRegistry must not be null");
+        if (jobManager == null) {
+            Log.fatal("Fatal initialization error in BacktestResource: jobManager must not be null");
+            throw new NullPointerException("jobManager must not be null");
+        }
+        if (strategyRegistry == null) {
+            Log.fatal("Fatal initialization error in BacktestResource: strategyRegistry must not be null");
+            throw new NullPointerException("strategyRegistry must not be null");
+        }
+        this.jobManager = jobManager;
+        this.strategyRegistry = strategyRegistry;
     }
 
     /**
@@ -69,6 +78,9 @@ public class BacktestResource {
             content = @Content(schema = @Schema(implementation = BacktestStatusResponse.class))
     )
     public BacktestStatusResponse status() {
+        if (Log.isDebugEnabled()) {
+            Log.debug("Backtest engine status queried: READY");
+        }
         return new BacktestStatusResponse("READY", "backtest", "In-Memory Simulation Engine");
     }
 
@@ -104,12 +116,14 @@ public class BacktestResource {
     })
     public Response runBacktest(BacktestRunRequest request) {
         if (request == null) {
+            Log.error("Cannot start backtest run: request body must not be null");
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "Request body must not be null"))
                     .build();
         }
 
         if (request.strategyName() == null || request.strategyName().isBlank()) {
+            Log.error("Cannot start backtest run: strategyName is mandatory");
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "strategyName is mandatory"))
                     .build();
@@ -118,6 +132,7 @@ public class BacktestResource {
         try {
             strategyRegistry.getStrategy(request.strategyName());
         } catch (IllegalArgumentException e) {
+            Log.errorf("Cannot start backtest run: %s", e.getMessage());
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", e.getMessage()))
                     .build();
@@ -127,6 +142,7 @@ public class BacktestResource {
             try {
                 LocalDate.parse(request.startDate());
             } catch (DateTimeParseException e) {
+                Log.errorf("Cannot start backtest run: invalid startDate format '%s'", request.startDate());
                 return Response.status(Response.Status.BAD_REQUEST)
                         .entity(Map.of("error", "Invalid startDate format: " + request.startDate()))
                         .build();
@@ -137,6 +153,7 @@ public class BacktestResource {
             try {
                 LocalDate.parse(request.endDate());
             } catch (DateTimeParseException e) {
+                Log.errorf("Cannot start backtest run: invalid endDate format '%s'", request.endDate());
                 return Response.status(Response.Status.BAD_REQUEST)
                         .entity(Map.of("error", "Invalid endDate format: " + request.endDate()))
                         .build();
@@ -148,6 +165,8 @@ public class BacktestResource {
             LocalDate start = LocalDate.parse(request.startDate());
             LocalDate end = LocalDate.parse(request.endDate());
             if (start.isAfter(end)) {
+                Log.errorf("Cannot start backtest run: startDate %s must not be after endDate %s",
+                        request.startDate(), request.endDate());
                 return Response.status(Response.Status.BAD_REQUEST)
                         .entity(Map.of("error", "startDate must not be after endDate"))
                         .build();
@@ -155,24 +174,33 @@ public class BacktestResource {
         }
 
         if (request.initialCapital() != null && request.initialCapital() <= 0) {
+            Log.errorf("Cannot start backtest run: initialCapital must be greater than 0 (received %s)",
+                    request.initialCapital());
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "initialCapital must be greater than 0"))
                     .build();
         }
 
         if (request.latencyFactor() != null && (request.latencyFactor().isNaN() || request.latencyFactor() < 0.0)) {
+            Log.errorf("Cannot start backtest run: latencyFactor must be non-negative (received %s)",
+                    request.latencyFactor());
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "latencyFactor must be non-negative"))
                     .build();
         }
 
         BacktestJob job = jobManager.submitJob(request);
+        String resolvedSymbol = request.symbol() != null ? request.symbol() : "BTCUSDT";
+        if (Log.isInfoEnabled()) {
+            Log.infof("Accepted backtest run request: jobId=%s, strategy=%s, symbol=%s",
+                    job.jobId(), request.strategyName(), resolvedSymbol);
+        }
 
         BacktestJobSubmitResponse response = new BacktestJobSubmitResponse(
                 job.jobId(),
                 job.status().name(),
                 request.strategyName(),
-                request.symbol() != null ? request.symbol() : "BTCUSDT",
+                resolvedSymbol,
                 job.createdAt().toString()
         );
         return Response.status(Response.Status.ACCEPTED).entity(response).build();
@@ -214,6 +242,11 @@ public class BacktestResource {
                     PerformanceMetrics metrics = (job.result() != null) ? job.result().metrics() : null;
                     String completedAtStr = (job.completedAt() != null) ? job.completedAt().toString() : null;
 
+                    if (Log.isDebugEnabled()) {
+                        Log.debugf("Queried backtest job %s: status=%s, totalMarkets=%s, tradeCount=%s",
+                                job.jobId(), job.status(), totalMarkets, tradeCount);
+                    }
+
                     BacktestJobStatusResponse response = new BacktestJobStatusResponse(
                             job.jobId(),
                             job.status().name(),
@@ -230,9 +263,12 @@ public class BacktestResource {
                     );
                     return Response.ok(response).build();
                 })
-                .orElseGet(() -> Response.status(Response.Status.NOT_FOUND)
-                        .entity(Map.of("error", "Job not found: " + jobId))
-                        .build());
+                .orElseGet(() -> {
+                    Log.warnf("Requested backtest job not found: %s", jobId);
+                    return Response.status(Response.Status.NOT_FOUND)
+                            .entity(Map.of("error", "Job not found: " + jobId))
+                            .build();
+                });
     }
 
     /**

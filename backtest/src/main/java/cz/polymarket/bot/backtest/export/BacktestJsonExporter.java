@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import cz.polymarket.bot.backtest.engine.BacktestResult;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -41,6 +42,7 @@ public class BacktestJsonExporter {
             @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
             String defaultOutputDir) {
         if (objectMapper == null) {
+            Log.fatal("Fatal initialization error in BacktestJsonExporter: objectMapper cannot be null");
             throw new IllegalArgumentException("objectMapper cannot be null");
         }
         this.objectMapper = objectMapper.copy()
@@ -62,6 +64,7 @@ public class BacktestJsonExporter {
      */
     public Path export(BacktestResult result, String outputDirectory) throws IOException {
         if (result == null) {
+            Log.error("Cannot export backtest result: result cannot be null");
             throw new IllegalArgumentException("result cannot be null");
         }
 
@@ -76,13 +79,26 @@ public class BacktestJsonExporter {
         String filename = String.format("backtest_%s_%s.json", result.strategyName(), timestamp);
         Path targetFile = targetDir.resolve(filename);
 
-        // Serialize result to file
-        objectMapper.writerWithDefaultPrettyPrinter().writeValue(targetFile.toFile(), result);
+        try {
+            // Serialize result to file
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(targetFile.toFile(), result);
 
-        // Update latest.json
-        Path latestFile = targetDir.resolve("latest.json");
-        Files.copy(targetFile, latestFile, StandardCopyOption.REPLACE_EXISTING);
+            // Update latest.json
+            Path latestFile = targetDir.resolve("latest.json");
+            Files.copy(targetFile, latestFile, StandardCopyOption.REPLACE_EXISTING);
 
-        return targetFile;
+            if (Log.isInfoEnabled()) {
+                Log.infof("Exported backtest report for strategy %s to %s",
+                        result.strategyName(), targetFile.toAbsolutePath());
+            }
+            if (Log.isDebugEnabled()) {
+                Log.debugf("Updated latest backtest report copy at %s (trades=%d)",
+                        latestFile.toAbsolutePath(), result.trades() != null ? result.trades().size() : 0);
+            }
+            return targetFile;
+        } catch (IOException e) {
+            Log.errorf(e, "Failed to write backtest JSON report to %s: %s", targetFile.toAbsolutePath(), e.getMessage());
+            throw e;
+        }
     }
 }

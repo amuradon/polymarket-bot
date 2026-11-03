@@ -19,10 +19,10 @@ import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -47,8 +47,6 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @ApplicationScoped
 public class BacktestEngine {
-
-    private static final Logger LOG = Logger.getLogger(BacktestEngine.class);
 
     private final CollectorParquetDatasetService datasetService;
     private final StrategyRegistry strategyRegistry;
@@ -82,15 +80,19 @@ public class BacktestEngine {
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
             double defaultLatencyFactor) {
         if (datasetService == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: datasetService cannot be null");
             throw new IllegalArgumentException("datasetService cannot be null");
         }
         if (strategyRegistry == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: strategyRegistry cannot be null");
             throw new IllegalArgumentException("strategyRegistry cannot be null");
         }
         if (metricsCalculator == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: metricsCalculator cannot be null");
             throw new IllegalArgumentException("metricsCalculator cannot be null");
         }
         if (jsonExporter == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: jsonExporter cannot be null");
             throw new IllegalArgumentException("jsonExporter cannot be null");
         }
         this.datasetService = datasetService;
@@ -145,10 +147,17 @@ public class BacktestEngine {
             Double latencyFactor) {
 
         if (strategyName == null || strategyName.isBlank()) {
+            Log.error("Cannot start backtest: Strategy name is mandatory");
             throw new IllegalArgumentException("Strategy name is mandatory");
         }
 
-        TradingStrategy strategy = strategyRegistry.getStrategy(strategyName);
+        TradingStrategy strategy;
+        try {
+            strategy = strategyRegistry.getStrategy(strategyName);
+        } catch (IllegalArgumentException e) {
+            Log.errorf("Cannot start backtest: %s", e.getMessage());
+            throw e;
+        }
         strategy.reset();
 
         String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
@@ -156,9 +165,17 @@ public class BacktestEngine {
         String resolvedOutputDir = (outputDirectory != null && !outputDirectory.isBlank()) ? outputDirectory : defaultOutputDir;
         double resolvedLatencyFactor = (latencyFactor != null && latencyFactor >= 0.0) ? latencyFactor : defaultLatencyFactor;
 
+        if (Log.isInfoEnabled()) {
+            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f",
+                    strategy.getName(), sym, startDate != null ? startDate : "ALL", endDate != null ? endDate : "ALL",
+                    capital, resolvedLatencyFactor);
+        }
+
         List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, startDate, endDate);
         if (markets.isEmpty()) {
-            throw new IllegalArgumentException("No market rows available for backtest for symbol " + sym);
+            String msg = "No market rows available for backtest for symbol " + sym;
+            Log.error(msg);
+            throw new IllegalArgumentException(msg);
         }
 
         Set<IndicatorType> reqIndicatorsSet = strategy.getRequiredIndicators() != null
@@ -197,6 +214,11 @@ public class BacktestEngine {
             String dateStr = dayEntry.getKey();
             List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
             int dayMarketCount = dayMarkets.size();
+
+            if (Log.isInfoEnabled()) {
+                Log.infof("Processing UTC day %s (%d markets) for symbol %s",
+                        !dateStr.isBlank() ? dateStr : "UNKNOWN", dayMarketCount, sym);
+            }
 
             // 1. Load shared daily streams strictly ONCE for this UTC day
             BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
@@ -266,6 +288,7 @@ public class BacktestEngine {
             }
 
             // 4. Deterministic chronological reduction of trades, account balance, and Brier score
+            boolean traceEnabled = Log.isTraceEnabled();
             for (int i = 0; i < dayMarketCount; i++) {
                 MarketSimulationOutcome outcome = dayOutcomes[i];
                 if (outcome == null) {
@@ -273,7 +296,7 @@ public class BacktestEngine {
                 }
                 for (TradeRecord rawTrade : outcome.rawTrades()) {
                     currentBalance += rawTrade.netPnl();
-                    trades.add(new TradeRecord(
+                    TradeRecord finalizedTrade = new TradeRecord(
                             rawTrade.entryTimeUtc(),
                             rawTrade.intervalStartSec(),
                             rawTrade.side(),
@@ -289,7 +312,24 @@ public class BacktestEngine {
                             rawTrade.edge(),
                             rawTrade.isWin(),
                             currentBalance
-                    ));
+                    );
+                    trades.add(finalizedTrade);
+
+                    if (traceEnabled) {
+                        Log.tracef("Trade executed: marketStart=%d (%s), side=%s, entryPrice=%.4f, exitPrice=%.4f, shares=%.2f, sizeUsd=%.2f, feeUsd=%.4f, netPnl=%.2f, win=%s, reason=%s, balanceAfter=%.2f",
+                                finalizedTrade.intervalStartSec(),
+                                finalizedTrade.entryTimeUtc(),
+                                finalizedTrade.side(),
+                                finalizedTrade.entryPrice(),
+                                finalizedTrade.exitPrice(),
+                                finalizedTrade.shares(),
+                                finalizedTrade.sizeUsd(),
+                                finalizedTrade.feeUsd(),
+                                finalizedTrade.netPnl(),
+                                finalizedTrade.isWin(),
+                                finalizedTrade.exitReason(),
+                                finalizedTrade.balanceAfterTrade());
+                    }
                 }
                 if (outcome.evaluated()) {
                     brierSum += outcome.brierDiffSq();
@@ -313,8 +353,15 @@ public class BacktestEngine {
 
         try {
             Path exportedPath = jsonExporter.export(rawResult, resolvedOutputDir);
-            return rawResult.withJsonFilePath(exportedPath.toAbsolutePath().toString());
+            String absPath = exportedPath.toAbsolutePath().toString();
+            if (Log.isInfoEnabled()) {
+                Log.infof("Completed backtest for strategy=%s on %s: totalMarkets=%d, evaluatedMarkets=%d, totalTrades=%d, netPnl=%.2f, winRate=%.2f%%, report=%s",
+                        strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
+                        metrics.totalNetPnl(), metrics.winRatePct(), absPath);
+            }
+            return rawResult.withJsonFilePath(absPath);
         } catch (IOException e) {
+            Log.errorf(e, "Failed to export backtest results to JSON in %s: %s", resolvedOutputDir, e.getMessage());
             throw new RuntimeException("Failed to export backtest results to JSON: " + e.getMessage(), e);
         }
     }
@@ -357,10 +404,15 @@ public class BacktestEngine {
 
                 CollectorMarketMetadata market = dayMarkets.get(idx);
                 if (Double.isNaN(market.twapOpen()) || market.twapOpen() <= 0.0) {
-                    LOG.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream",
+                    Log.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream",
                             market.tStart(), market.datetimeUtc());
                     dayOutcomes[idx] = new MarketSimulationOutcome(List.of(), 0.0, false);
                     continue;
+                }
+
+                if (Log.isInfoEnabled()) {
+                    Log.infof("Processing market at %d (%s): twapOpen=%.2f, twapClose=%.2f, outcome=%s",
+                            market.tStart(), market.datetimeUtc(), market.twapOpen(), market.twapClose(), market.actualOutcome());
                 }
 
                 TradingStrategy activeStrategy = createFreshStrategyPerMarket
@@ -489,6 +541,21 @@ public class BacktestEngine {
                             }
                         }
                     }
+                }
+
+                if (Log.isDebugEnabled()) {
+                    double marketNetPnl = 0.0;
+                    int winningTrades = 0;
+                    for (int t = 0; t < marketTrades.size(); t++) {
+                        TradeRecord tr = marketTrades.get(t);
+                        marketNetPnl += tr.netPnl();
+                        if (tr.isWin()) {
+                            winningTrades++;
+                        }
+                    }
+                    Log.debugf("Market summary at %d (%s): outcome=%s, trades=%d, wins=%d, netPnl=%.2f, brierDiffSq=%.4f",
+                            market.tStart(), market.datetimeUtc(), actualOutcome,
+                            marketTrades.size(), winningTrades, marketNetPnl, brierDiffSq);
                 }
 
                 dayOutcomes[idx] = new MarketSimulationOutcome(marketTrades, brierDiffSq, evaluated);

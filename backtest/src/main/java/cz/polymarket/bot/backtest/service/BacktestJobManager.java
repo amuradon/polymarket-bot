@@ -5,13 +5,12 @@ import cz.polymarket.bot.backtest.data.BacktestJobStatus;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
 import cz.polymarket.bot.backtest.engine.BacktestResult;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -21,8 +20,6 @@ import java.util.concurrent.ExecutorService;
  */
 @ApplicationScoped
 public class BacktestJobManager {
-
-    private static final Logger LOG = Logger.getLogger(BacktestJobManager.class);
 
     private final BacktestEngine backtestEngine;
     private final ExecutorService executorService;
@@ -36,8 +33,16 @@ public class BacktestJobManager {
      */
     @Inject
     public BacktestJobManager(BacktestEngine backtestEngine, ExecutorService executorService) {
-        this.backtestEngine = Objects.requireNonNull(backtestEngine, "backtestEngine must not be null");
-        this.executorService = Objects.requireNonNull(executorService, "executorService must not be null");
+        if (backtestEngine == null) {
+            Log.fatal("Fatal initialization error in BacktestJobManager: backtestEngine must not be null");
+            throw new NullPointerException("backtestEngine must not be null");
+        }
+        if (executorService == null) {
+            Log.fatal("Fatal initialization error in BacktestJobManager: executorService must not be null");
+            throw new NullPointerException("executorService must not be null");
+        }
+        this.backtestEngine = backtestEngine;
+        this.executorService = executorService;
     }
 
     /**
@@ -49,6 +54,10 @@ public class BacktestJobManager {
     public BacktestJob submitJob(BacktestRunRequest request) {
         BacktestJob job = new BacktestJob(request);
         jobs.put(job.jobId(), job);
+        if (Log.isInfoEnabled()) {
+            Log.infof("Queued background backtest job %s for strategy=%s, symbol=%s",
+                    job.jobId(), request.strategyName(), request.symbol());
+        }
         executorService.submit(() -> executeJob(job));
         return job;
     }
@@ -66,8 +75,10 @@ public class BacktestJobManager {
     private void executeJob(BacktestJob job) {
         job.setStatus(BacktestJobStatus.IN_PROGRESS);
         BacktestRunRequest request = job.request();
-        LOG.infof("Starting background backtest job %s for strategy %s on %s",
-                job.jobId(), request.strategyName(), request.symbol());
+        if (Log.isInfoEnabled()) {
+            Log.infof("Starting background backtest job %s for strategy %s on %s",
+                    job.jobId(), request.strategyName(), request.symbol());
+        }
 
         try {
             BacktestResult result = backtestEngine.runBacktest(
@@ -82,11 +93,21 @@ public class BacktestJobManager {
             job.setResult(result);
             job.setCompletedAt(Instant.now());
             job.setStatus(BacktestJobStatus.COMPLETED);
-            LOG.infof("Completed background backtest job %s. Result JSON: %s",
-                    job.jobId(), result.jsonFilePath());
+            if (Log.isInfoEnabled()) {
+                Log.infof("Completed background backtest job %s: totalMarkets=%d, trades=%d, resultJson=%s",
+                        job.jobId(),
+                        result.totalMarkets(),
+                        result.trades() != null ? result.trades().size() : 0,
+                        result.jsonFilePath());
+            }
+        } catch (Error fatalErr) {
+            Log.fatalf(fatalErr, "Fatal error in backtesting engine during job %s: %s",
+                    job.jobId(), fatalErr.getMessage());
+            job.setError(fatalErr.getMessage() != null ? fatalErr.getMessage() : fatalErr.toString());
+            job.setCompletedAt(Instant.now());
+            job.setStatus(BacktestJobStatus.FAILED);
         } catch (Throwable t) {
-            String err = "Backtest job " + job.jobId() + " failed: " + t.getMessage();
-            LOG.error(err, t);
+            Log.errorf(t, "Backtest job %s failed: %s", job.jobId(), t.getMessage());
             job.setError(t.getMessage() != null ? t.getMessage() : t.toString());
             job.setCompletedAt(Instant.now());
             job.setStatus(BacktestJobStatus.FAILED);

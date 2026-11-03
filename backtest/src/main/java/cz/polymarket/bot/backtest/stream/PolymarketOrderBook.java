@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.domain.OrderBookQuote;
+import io.quarkus.logging.Log;
 
 import java.util.Arrays;
 import java.util.Locale;
@@ -861,14 +862,21 @@ public class PolymarketOrderBook {
     }
 
     private void parseBookLevelsSlice(String json, int start, int end, boolean isUp, boolean isBids) {
-        int i = start;
-        while (i < end) {
-            int itemStart = indexOfCharRange(json, '{', i, end);
+        int openBracket = indexOfCharRange(json, '[', start, end);
+        int closeBracket = openBracket >= 0 ? findMatchingBracket(json, openBracket, end) : -1;
+        if (openBracket < 0 || closeBracket < 0) {
+            Log.errorf("Invalid JSON array slice while parsing order book %s levels", isBids ? "bids" : "asks");
+            return;
+        }
+        int i = openBracket + 1;
+        while (i < closeBracket) {
+            int itemStart = indexOfCharRange(json, '{', i, closeBracket);
             if (itemStart < 0) {
                 break;
             }
-            int itemEnd = indexOfCharRange(json, '}', itemStart + 1, end);
+            int itemEnd = indexOfCharRange(json, '}', itemStart + 1, closeBracket);
             if (itemEnd < 0) {
+                Log.errorf("Malformed JSON object in order book %s levels", isBids ? "bids" : "asks");
                 break;
             }
 

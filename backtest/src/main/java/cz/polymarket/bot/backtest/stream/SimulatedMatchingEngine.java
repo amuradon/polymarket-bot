@@ -4,6 +4,7 @@ import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
+import io.quarkus.logging.Log;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -37,9 +38,11 @@ public class SimulatedMatchingEngine {
      */
     public SimulatedMatchingEngine(PolymarketOrderBook orderBook, double latencyFactor) {
         if (orderBook == null) {
+            Log.error("Invalid argument in SimulatedMatchingEngine: orderBook cannot be null");
             throw new IllegalArgumentException("orderBook cannot be null");
         }
         if (Double.isNaN(latencyFactor) || latencyFactor < 0.0) {
+            Log.error("Invalid argument in SimulatedMatchingEngine: latencyFactor must be non-negative");
             throw new IllegalArgumentException("latencyFactor must be non-negative");
         }
         this.orderBook = orderBook;
@@ -84,6 +87,12 @@ public class SimulatedMatchingEngine {
         long delayMs = Math.max(0L, Math.round(2.0 * observedOneWayMs * latencyFactor));
         long executionTimestampMs = submitTimestampMs + delayMs;
 
+        if (Log.isTraceEnabled()) {
+            Log.tracef("Order submitted: clientOrderId=%s, side=%s, token=%s, limitPrice=%s, size=%s, submitTsMs=%d, delayMs=%d, execTsMs=%d",
+                    command.clientOrderId(), command.side(), command.token(),
+                    command.price(), command.size(), submitTimestampMs, delayMs, executionTimestampMs);
+        }
+
         if (eventScheduler != null) {
             eventScheduler.accept(new BacktestEvent.PendingOrderExecutionEvent(
                     executionTimestampMs,
@@ -118,6 +127,11 @@ public class SimulatedMatchingEngine {
 
         PolymarketOrderBook.FillResult fill = orderBook.executeFill(isUpToken, isBuy, reqShares, limitPrice);
         if (fill.executedShares() <= 0.0) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Order rejected (no liquidity): clientOrderId=%s, side=%s, token=%s, limitPrice=%.4f, reqShares=%.2f, fillTsMs=%d, delayMs=%d",
+                        command.clientOrderId(), command.side(), command.token(),
+                        limitPrice, reqShares, fillTimestampMs, delayMs);
+            }
             return new ExecutionReport(
                     command.clientOrderId(),
                     "sim-reject-" + command.clientOrderId(),
@@ -147,6 +161,11 @@ public class SimulatedMatchingEngine {
                     entryPrice,
                     edge
             ));
+
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Order filled (BUY): clientOrderId=%s, direction=%s, shares=%.2f, avgPrice=%.4f, feeUsd=%.4f, fillTsMs=%d, delayMs=%d",
+                        command.clientOrderId(), tokenDirection, shares, entryPrice, entryFee, fillTimestampMs, delayMs);
+            }
 
             return new ExecutionReport(
                     command.clientOrderId(),
@@ -195,6 +214,11 @@ public class SimulatedMatchingEngine {
                 if (pos.remainingShares <= EPS) {
                     it.remove();
                 }
+            }
+
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Order filled (SELL): clientOrderId=%s, direction=%s, soldShares=%.2f, exitPrice=%.4f, exitFeeUsd=%.4f, reason=%s, fillTsMs=%d, delayMs=%d",
+                        command.clientOrderId(), tokenDirection, totalSoldShares, exitPrice, totalExitFee, exitReason, fillTimestampMs, delayMs);
             }
 
             return new ExecutionReport(

@@ -80,6 +80,8 @@ Navigate to `http://localhost:8082/btc-usd`.
 ```
 - Status: `http://localhost:8083/api/status`
 - Trigger asynchronous backtest simulation: `POST http://localhost:8083/api/backtest/run`
+- Query job progress & result JSON path: `GET http://localhost:8083/api/backtest/run/{jobId}`
+- Structured progress logging via native Quarkus `io.quarkus.logging.Log` (`FATAL`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` with strict level guards and `<datetime> <logLevel> <loggerName> <message>` console pattern; see [Quarkus Logging Guide](https://quarkus.io/guides/logging)).
 
 #### 4. Data Collector Application (`data` - Port 8084)
 ```bash

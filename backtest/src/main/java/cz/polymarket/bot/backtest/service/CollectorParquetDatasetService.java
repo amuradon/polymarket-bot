@@ -3,10 +3,10 @@ package cz.polymarket.bot.backtest.service;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.TradeDirection;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -39,7 +39,6 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class CollectorParquetDatasetService {
 
-    private static final Logger LOG = Logger.getLogger(CollectorParquetDatasetService.class);
     private static final long CANDLE_DURATION_SEC = 900L;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE.withZone(ZoneOffset.UTC);
 
@@ -47,7 +46,7 @@ public class CollectorParquetDatasetService {
         try {
             Class.forName("org.duckdb.DuckDBDriver");
         } catch (ClassNotFoundException e) {
-            LOG.warn("DuckDB JDBC driver not found on classpath", e);
+            Log.fatal("Fatal error: DuckDB JDBC driver not found on classpath; backtesting engine cannot run", e);
         }
     }
 
@@ -63,6 +62,7 @@ public class CollectorParquetDatasetService {
             @ConfigProperty(name = "polymarket.backtest.collector-dir", defaultValue = "D:/Crypto/data/Polymarket/collector")
             String collectorDir) {
         if (collectorDir == null || collectorDir.isBlank()) {
+            Log.error("Invalid configuration in CollectorParquetDatasetService: collectorDir cannot be null or blank");
             throw new IllegalArgumentException("collectorDir cannot be null or blank");
         }
         this.collectorRootDir = Path.of(collectorDir);
@@ -242,7 +242,13 @@ public class CollectorParquetDatasetService {
     public List<CollectorMarketMetadata> discoverMarkets(String symbol, String startDate, String endDate) {
         Path marketDir = getPolymarket15mDir(symbol);
         if (!Files.isDirectory(marketDir)) {
+            Log.warnf("Collector market directory does not exist for symbol %s: %s", symbol, marketDir);
             return List.of();
+        }
+
+        if (Log.isInfoEnabled()) {
+            Log.infof("Discovering markets for symbol=%s in %s (startDate=%s, endDate=%s)",
+                    symbol, marketDir, startDate != null ? startDate : "ALL", endDate != null ? endDate : "ALL");
         }
 
         String assetLower = extractBaseAsset(symbol).toLowerCase(Locale.ROOT);
@@ -269,16 +275,19 @@ public class CollectorParquetDatasetService {
                         if (tStart >= minStartEpoch && tStart <= maxStartEpoch) {
                             candidates.add(new CandidateFile(tStart, path));
                         }
-                    } catch (NumberFormatException ignored) {
+                    } catch (NumberFormatException e) {
+                        Log.warnf("Skipping market file with invalid epoch timestamp in filename: %s", path);
                     }
                 }
             });
         } catch (IOException e) {
-            LOG.warnf("Failed to list collector market directory %s: %s", marketDir, e.getMessage());
+            Log.warnf("Failed to list collector market directory %s: %s", marketDir, e.getMessage());
             return List.of();
         }
 
         if (candidates.isEmpty()) {
+            Log.warnf("No candidate market files found for symbol %s in date range [%s, %s]",
+                    symbol, startDate, endDate);
             return List.of();
         }
 
@@ -328,9 +337,12 @@ public class CollectorParquetDatasetService {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("DuckDB error while discovering market metadata: %s", e.getMessage());
+            Log.warnf("DuckDB error while discovering market metadata: %s", e.getMessage());
         }
 
+        if (Log.isInfoEnabled()) {
+            Log.infof("Discovered %d markets for symbol=%s", result.size(), symbol);
+        }
         return result;
     }
 
@@ -363,7 +375,7 @@ public class CollectorParquetDatasetService {
                 }
             }
         } catch (SQLException e) {
-            LOG.debugf("Could not read metadata rows from %s: %s", parquetFile, e.getMessage());
+            Log.warnf("Could not read metadata rows from %s: %s", parquetFile, e.getMessage());
         }
 
         return new ParsedMarketHeader(upToken, downToken, resolvedOutcome);
@@ -457,8 +469,14 @@ public class CollectorParquetDatasetService {
         if (Files.exists(twapFile)) {
             TimeSeriesIndex idx = queryTimeSeries(stmt, twapFile, "ts", "twap_price");
             if (!idx.isEmpty()) {
+                if (Log.isDebugEnabled()) {
+                    Log.debugf("Loaded daily 60s TWAP reference price index for %s on %s (%d samples)",
+                            symbol, dateStr, idx.timestamps().length);
+                }
                 return idx;
             }
+        } else {
+            Log.warnf("Daily 60s TWAP reference price file not found for %s on %s: %s", symbol, dateStr, twapFile);
         }
         return TimeSeriesIndex.EMPTY;
     }
@@ -483,7 +501,7 @@ public class CollectorParquetDatasetService {
                 size++;
             }
         } catch (SQLException e) {
-            LOG.debugf("Could not load reference price series from %s: %s", file, e.getMessage());
+            Log.warnf("Could not load reference price series from %s: %s", file, e.getMessage());
             return TimeSeriesIndex.EMPTY;
         }
 

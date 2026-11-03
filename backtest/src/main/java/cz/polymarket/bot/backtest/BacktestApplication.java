@@ -1,11 +1,11 @@
 package cz.polymarket.bot.backtest;
 
+import io.quarkus.logging.Log;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.runtime.annotations.QuarkusMain;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
-import org.jboss.logging.Logger;
 
 /**
  * Main application entry point for the backtest module.
@@ -15,10 +15,11 @@ import org.jboss.logging.Logger;
 @QuarkusMain
 @ApplicationScoped
 public class BacktestApplication {
-    private static final Logger LOG = Logger.getLogger(BacktestApplication.class);
 
     void onStart(@Observes StartupEvent event) {
-        LOG.info("Starting Polymarket Bot in BACKTEST mode on port 8083...");
+        if (Log.isInfoEnabled()) {
+            Log.info("Starting Polymarket Bot in BACKTEST mode on port 8083...");
+        }
     }
 
     public static void main(String... args) {

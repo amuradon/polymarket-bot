@@ -8,7 +8,7 @@ import cz.polymarket.bot.domain.TwapPoint;
 import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
-import org.jboss.logging.Logger;
+import io.quarkus.logging.Log;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -43,14 +43,13 @@ import java.util.function.BiConsumer;
  */
 public class ChronologicalEventStreamer implements AutoCloseable {
 
-    private static final Logger LOG = Logger.getLogger(ChronologicalEventStreamer.class);
     private static final BacktestEvent[] EMPTY_EVENTS = new BacktestEvent[0];
 
     static {
         try {
             Class.forName("org.duckdb.DuckDBDriver");
         } catch (ClassNotFoundException e) {
-            LOG.warn("DuckDB JDBC driver not found on classpath", e);
+            Log.fatal("Fatal error: DuckDB JDBC driver not found on classpath; event streamer cannot run", e);
         }
     }
 
@@ -173,6 +172,9 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
 
         if (tasks.isEmpty()) {
+            if (Log.isDebugEnabled()) {
+                Log.debugf("No daily stream Parquet files found for symbol=%s on date=%s", symbol, dateStr);
+            }
             return EMPTY_EVENTS;
         }
 
@@ -182,10 +184,14 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                  Statement stmt = conn.createStatement()) {
                 tasks.getFirst().loader().accept(stmt, singleList);
             } catch (SQLException e) {
-                LOG.warnf("Failed loading daily stream file %s: %s", tasks.getFirst().file(), e.getMessage());
+                Log.warnf("Failed loading daily stream file %s: %s", tasks.getFirst().file(), e.getMessage());
             }
             BacktestEvent[] arr = singleList.toArray(EMPTY_EVENTS);
             Arrays.parallelSort(arr);
+            if (Log.isDebugEnabled()) {
+                Log.debugf("Loaded %d shared daily stream events from 1 file for symbol=%s on date=%s",
+                        arr.length, symbol, dateStr);
+            }
             return arr;
         }
 
@@ -199,7 +205,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                      Statement stmt = conn.createStatement()) {
                     task.loader().accept(stmt, localEvents);
                 } catch (SQLException e) {
-                    LOG.warnf("Failed loading daily stream file %s: %s", task.file(), e.getMessage());
+                    Log.warnf("Failed loading daily stream file %s: %s", task.file(), e.getMessage());
                 }
                 return localEvents;
             });
@@ -221,6 +227,10 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             }
         }
         Arrays.parallelSort(combined);
+        if (Log.isDebugEnabled()) {
+            Log.debugf("Loaded %d shared daily stream events from %d files for symbol=%s on date=%s",
+                    combined.length, tasks.size(), symbol, dateStr);
+        }
         return combined;
     }
 
@@ -345,7 +355,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             Statement stmt = getOrCreateStatement();
             loadPolymarketClobEvents(stmt, metadata.marketParquetFile(), tEndMs);
         } catch (SQLException e) {
-            LOG.warnf("Failed to stream collector Parquet CLOB events for candle %d: %s", tStart, e.getMessage());
+            Log.warnf("Failed to stream collector Parquet CLOB events for candle %d: %s", tStart, e.getMessage());
         }
 
         if (sharedDailyStreamEvents != null && sharedDailyStreamEvents.length > 0) {
@@ -398,7 +408,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
             }
         } catch (SQLException e) {
-            LOG.warnf("Failed to stream collector Parquet events for candle %d: %s", tStart, e.getMessage());
+            Log.warnf("Failed to stream collector Parquet events for candle %d: %s", tStart, e.getMessage());
         }
     }
 
@@ -446,6 +456,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
     private void loadPolymarketClobEvents(Statement stmt, Path marketFile, long tEndMs) {
         if (marketFile == null || !Files.exists(marketFile)) {
+            Log.warnf("Polymarket CLOB market file does not exist: %s", marketFile);
             return;
         }
         String normPath = marketFile.toAbsolutePath().toString().replace('\\', '/');
@@ -473,7 +484,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
+            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
         }
     }
 
@@ -603,7 +614,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Polymarket price_crypto file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Polymarket price_crypto file %s: %s", file, e.getMessage());
         }
     }
 
@@ -627,7 +638,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Polymarket price_crypto_twap_60s file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Polymarket price_crypto_twap_60s file %s: %s", file, e.getMessage());
         }
     }
 
@@ -649,7 +660,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Binance Spot aggTrades file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Binance Spot aggTrades file %s: %s", file, e.getMessage());
         }
     }
 
@@ -671,7 +682,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Binance Futures aggTrades file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Binance Futures aggTrades file %s: %s", file, e.getMessage());
         }
     }
 
@@ -699,7 +710,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Binance Futures depth file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Binance Futures depth file %s: %s", file, e.getMessage());
         }
     }
 
@@ -723,7 +734,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Binance Futures forceOrder file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Binance Futures forceOrder file %s: %s", file, e.getMessage());
         }
     }
 
@@ -749,7 +760,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 ));
             }
         } catch (SQLException e) {
-            LOG.warnf("Could not load Deribit trades file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Deribit trades file %s: %s", file, e.getMessage());
         }
     }
 

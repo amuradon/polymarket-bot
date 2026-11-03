@@ -3,9 +3,9 @@ package cz.polymarket.bot.strategy;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.util.Set;
@@ -27,8 +27,6 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class UtterParameciumStrategy implements TradingStrategy {
-
-    private static final Logger LOG = Logger.getLogger(UtterParameciumStrategy.class);
 
     /**
      * Pre-computed remaining 60s TWAP standard deviation weights
@@ -415,7 +413,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         if (targetPriceCents <= 0L) {
             if (!missingTargetPriceWarned) {
                 missingTargetPriceWarned = true;
-                LOG.warnf("Skipping market [%d, %d]: target price is missing from PolyBolt 60s TWAP stream",
+                Log.warnf("Skipping market [%d, %d]: target price is missing from PolyBolt 60s TWAP stream",
                         activeCandleStartMs, activeCandleEndMs);
             }
             return;
