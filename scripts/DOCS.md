@@ -94,3 +94,17 @@ Měří jednosměrnou WebSocket síťovou latenci (`t_recv - t_exchange_event`) 
 # Měření vybraných burz pro ETH
 .\scripts\measure-exchange-ws-latency.ps1 -Symbol ETH -Exchanges cryptocom,lmax
 ```
+
+---
+
+## 4. Stažení historických obchodů z Kraken Spot (`download_kraken_trades.py`)
+
+Stahuje historické obchody z Kraken public REST API (`/0/public/Trades`), převádí je do schématu odpovídajícího Kraken Spot WebSocket v2 `trade` kanálu (`ts`, `trade_timestamp`, `symbol`, `trade_id`, `side`, `ord_type`, `price`, `qty`, `timestamp`) s přičtenou simulovanou latencí do AWS `eu-west-1` (`ts = trade_timestamp + 15 ms`) a ukládá je jako denní ZSTD-komprimované Parquet soubory.
+
+```powershell
+# Stažení výchozího období 2026-10-12 až 2026-11-03 pro USDT/USD
+.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py
+
+# Vlastní rozsah dat a přepsání existujících souborů
+.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py --pair USDTUSD --start-date 2026-10-12 --end-date 2026-11-03 --latency-ms 15 --overwrite
+```

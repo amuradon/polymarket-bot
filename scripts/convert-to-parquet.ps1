@@ -139,6 +139,9 @@ function Get-StreamType {
     if ($normalized -like "*/deribit/*" -or $normalized -like "*trades.btc-perpetual*") {
         return "deribit-trades"
     }
+    if ($normalized -like "*/kraken/spot/*/trades/*" -or $normalized -like "*kraken*trades*") {
+        return "kraken-spot-trades"
+    }
     if ($normalized -like "*price_crypto_twap*") {
         return "polymarket-price-twap"
     }
@@ -249,6 +252,26 @@ FROM (
     FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 )
 ORDER BY ts ASC
+"@
+        }
+        "kraken-spot-trades" {
+            return @"
+SELECT 
+    ts,
+    CAST(epoch_ms(CAST(t->>'timestamp' AS TIMESTAMPTZ)) AS UBIGINT) AS trade_timestamp,
+    t->>'symbol' AS symbol,
+    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
+    t->>'side' AS side,
+    t->>'ord_type' AS ord_type,
+    CAST(t->>'price' AS DOUBLE) AS price,
+    CAST(t->>'qty' AS DOUBLE) AS qty,
+    t->>'timestamp' AS timestamp
+FROM (
+    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
+    FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+    WHERE payload->>'channel' = 'trade' AND payload->>'type' IN ('update', 'snapshot')
+)
+ORDER BY ts ASC, trade_id ASC
 "@
         }
         "polymarket-price-crypto" {
