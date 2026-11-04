@@ -173,7 +173,7 @@ class UtterParameciumStrategyTest {
 
         assertThat(submittedOrders).isEmpty();
 
-        // Also verify outside tau window (tau = 65s > 61s and tau = 8s < 10s)
+        // Also verify outside tau window (tau = 65s > 61s and tau = 4s < 5s)
         long tau65Ms = CANDLE_END_MS - 65_000L;
         strategy.onPolymarketCryptoPrice(tau65Ms, "btcusd", "chainlink", 90_050.00, tau65Ms);
         strategy.onOrderBookQuote(new OrderBookQuote(
@@ -181,16 +181,16 @@ class UtterParameciumStrategyTest {
         ));
         assertThat(submittedOrders).isEmpty();
 
-        long tau8Ms = CANDLE_END_MS - 8_000L;
-        strategy.onPolymarketCryptoPrice(tau8Ms, "btcusd", "chainlink", 90_050.00, tau8Ms);
+        long tau4Ms = CANDLE_END_MS - 4_000L;
+        strategy.onPolymarketCryptoPrice(tau4Ms, "btcusd", "chainlink", 90_050.00, tau4Ms);
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.70, 0.68, 0.32, 0.30, 500.0, 500.0, 0.70, 0.32, tau8Ms
+                0.70, 0.68, 0.32, 0.30, 500.0, 500.0, 0.70, 0.32, tau4Ms
         ));
         assertThat(submittedOrders).isEmpty();
     }
 
     @Test
-    @DisplayName("Should emit initial burst of 15 shares at tau >= 55s, enforce 200ms cooldown, and scale subsequent orders")
+    @DisplayName("Should emit initial burst of 15 shares at tau >= 55s, enforce 250ms cooldown, and scale subsequent orders")
     void shouldEmitInitialBurstEnforceCooldownAndScaleSubsequentOrders() {
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
 
@@ -217,21 +217,21 @@ class UtterParameciumStrategyTest {
                 "Filled"
         ));
 
-        // 2. Quote 100ms later (< 200ms cooldown) must be blocked
+        // 2. Quote 100ms later (< 250ms cooldown) must be blocked
         long tTooSoon = t1 + 100L;
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.70, 0.68, 0.32, 0.30, 500.0, 500.0, 0.70, 0.32, tTooSoon
         ));
         assertThat(submittedOrders).hasSize(1);
 
-        // 3. Quote 220ms later (>= 200ms cooldown) must emit a scaled second order
-        long t2 = t1 + 220L;
+        // 3. Quote 260ms later (>= 250ms cooldown) must emit a scaled second order
+        long t2 = t1 + 260L;
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.70, 0.68, 0.32, 0.30, 500.0, 500.0, 0.70, 0.32, t2
         ));
         assertThat(submittedOrders).hasSize(2);
         OrderCommand secondOrder = submittedOrders.get(1);
-        assertThat(secondOrder.size().intValue()).isGreaterThan(5).isLessThanOrEqualTo(35);
+        assertThat(secondOrder.size().intValue()).isGreaterThan(5).isLessThanOrEqualTo(30);
     }
 
     @Test
@@ -311,5 +311,90 @@ class UtterParameciumStrategyTest {
         // 3. Resolution holds to expiration without emitting any SELL order
         strategy.onCandleResolution(TradeDirection.DOWN);
         assertThat(submittedOrders).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("Should block entry during early-window spot reversal when spot and projected TWAP disagree")
+    void shouldBlockEntryDuringEarlyWindowSpotReversalWhenSpotDisagreesWithProjectedTwap() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        // First 12 seconds of final minute (tau = 60s..49s): BTC is -$30 below strike ($89,970)
+        long windowStartMs = CANDLE_END_MS - 60_000L;
+        for (int s = 0; s < 12; s++) {
+            long ts = windowStartMs + (s * 1000L);
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_970.00, ts);
+        }
+
+        // At tau = 48s, BTC reverses sharply above strike to $90,004.00 (+$4 above strike),
+        // while projected TWAP still lags below strike at (12 * 89970 + 48 * 90004) / 60 = $89,997.20 (-$2.80).
+        // Neither UP (projected TWAP < strike) nor DOWN (spot > strike at tau = 48s > 25s) may be bought.
+        long tau48Ms = CANDLE_END_MS - 48_000L;
+        strategy.onPolymarketCryptoPrice(tau48Ms, "btcusd", "chainlink", 90_004.00, tau48Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.55, 0.53, 0.47, 0.45, 500.0, 500.0, 0.55, 0.47, tau48Ms
+        ));
+
+        assertThat(submittedOrders).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Should ignore prior-second TWAP packet and lock exact candle-start targetPriceCents")
+    void shouldIgnorePriorSecondTwapPacketAndLockExactCandleStartTargetPrice() {
+        // Packet received 70ms after candle start carrying prior-second twapTimestampMs = CANDLE_START_MS - 1000ms must be ignored
+        strategy.onPolymarketCryptoTwap60s(
+                CANDLE_START_MS + 70L,
+                "btcusd",
+                "chainlink",
+                89_998.00,
+                60,
+                CANDLE_START_MS - 1_000L
+        );
+        assertThat(strategy.getTargetPriceCents()).isZero();
+
+        // Exact candle-start TWAP packet arriving 1.1s after candle start locks targetPriceCents
+        strategy.onPolymarketCryptoTwap60s(
+                CANDLE_START_MS + 1_100L,
+                "btcusd",
+                "chainlink",
+                90_000.00,
+                60,
+                CANDLE_START_MS
+        );
+        assertThat(strategy.getTargetPriceCents()).isEqualTo(9_000_000L);
+
+        // Subsequent TWAP packets must not overwrite targetPriceCents
+        strategy.onPolymarketCryptoTwap60s(
+                CANDLE_START_MS + 2_100L,
+                "btcusd",
+                "chainlink",
+                90_005.00,
+                60,
+                CANDLE_START_MS + 1_000L
+        );
+        assertThat(strategy.getTargetPriceCents()).isEqualTo(9_000_000L);
+    }
+
+    @Test
+    @DisplayName("Should require z >= 2.50 sigma before buying high-priced contracts (askMc >= 800)")
+    void shouldRequireHighZScoreForHighPricedContracts() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        // At tau = 55s with defaultSigma1s = 150 cents ($1.50/s), sigmaRem = 150 * 4.1847 = 627 cents ($6.27).
+        // If BTC is only +$12.00 (+1200 cents) above strike, z = 1200 / 627 = 1.91 sigma (< 2.50 sigma):
+        // must reject askUp = $0.82 (820 mc >= 800 mc) even though normalCdfMc(191) = 972 > 820 + fee + 25.
+        long tau55Ms = CANDLE_END_MS - 55_000L;
+        strategy.onPolymarketCryptoPrice(tau55Ms, "btcusd", "chainlink", 90_012.00, tau55Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.82, 0.80, 0.20, 0.18, 500.0, 500.0, 0.82, 0.20, tau55Ms
+        ));
+        assertThat(submittedOrders).isEmpty();
+
+        // When BTC moves to +$30.00 (+3000 cents) above strike, z > 2.50 sigma -> order allowed
+        long tau54Ms = CANDLE_END_MS - 54_000L;
+        strategy.onPolymarketCryptoPrice(tau54Ms, "btcusd", "chainlink", 90_030.00, tau54Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.82, 0.80, 0.20, 0.18, 500.0, 500.0, 0.82, 0.20, tau54Ms
+        ));
+        assertThat(submittedOrders).hasSize(1);
     }
 }

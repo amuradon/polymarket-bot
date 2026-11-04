@@ -56,12 +56,20 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
     private static final int MAX_MC = 1_000;
     private static final int TICK_STEP_MC = 10;
-    private static final long MIN_SIGMA_REM_CENTS = 25L;
+    private static final long MIN_SIGMA_REM_CENTS = 40L;
     private static final long CANDLE_DURATION_MS = 900_000L;
     private static final long MAX_TARGET_PRICE_OFFSET_MS = 10_000L;
     private static final long TWAP_WINDOW_MS = 60_000L;
     private static final long BUFFER_RETENTION_MS = 65_000L;
     private static final long INITIAL_BURST_MIN_TAU_MS = 55_000L;
+    private static final long LATE_LOCKIN_MAX_TAU_MS = 25_000L;
+    private static final long LATE_LOCKIN_MIN_PROJ_DIST_CENTS = 1_200L;
+    private static final long LATE_LOCKIN_MIN_NET_DIST_CENTS = 600L;
+    private static final long MIN_EFFECTIVE_DIST_CENTS = 200L;
+    private static final int HIGH_PRICE_ASK_THRESHOLD_MC = 800;
+    private static final long HIGH_PRICE_MIN_Z_CENTI = 250L;
+    private static final int EXTREME_PRICE_ASK_THRESHOLD_MC = 900;
+    private static final long EXTREME_PRICE_MIN_Z_CENTI = 270L;
 
     private final UtterParameciumStrategyConfig config;
     private final ChainlinkTwapBuffer chainlinkTwapBuffer = new ChainlinkTwapBuffer();
@@ -105,7 +113,30 @@ public class UtterParameciumStrategy implements TradingStrategy {
         if (config == null) {
             throw new IllegalArgumentException("config cannot be null");
         }
-        this.config = config;
+        this.config = config.getClass() == UtterParameciumStrategyConfig.class
+                ? config
+                : new UtterParameciumStrategyConfig(
+                        config.minTauMs(),
+                        config.maxTauMs(),
+                        config.cooldownMs(),
+                        config.minEntryPriceMc(),
+                        config.maxEntryPriceMc(),
+                        config.maxSpreadMc(),
+                        config.minModelProbMc(),
+                        config.minEdgeMc(),
+                        config.minOrderShares(),
+                        config.maxOrderShares(),
+                        config.initialBurstShares(),
+                        config.edgeScalingFactor(),
+                        config.maxInventorySharesPerSide(),
+                        config.defaultSigma1sCents(),
+                        config.minSigma1sCents(),
+                        config.maxSigma1sCents(),
+                        config.warmupSecsBeforeExpiry(),
+                        config.takerFeeRateBps(),
+                        config.defaultMarketId(),
+                        config.upToken(),
+                        config.downToken());
     }
 
     /**
@@ -173,26 +204,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return 0;
         }
         return (int) (((long) feeRateBps * askMc * (MAX_MC - askMc) + 5_000_000L) / 10_000_000L);
-    }
-
-    /**
-     * Computes the exact floor integer square root {@code floor(sqrt(x))} for non-negative {@code long}.
-     *
-     * @param x non-negative value
-     * @return integer square root
-     */
-    static long isqrt(long x) {
-        if (x <= 0L) {
-            return 0L;
-        }
-        long r = (long) Math.sqrt((double) x);
-        while ((r + 1L) > 0L && (r + 1L) <= x / (r + 1L)) {
-            r++;
-        }
-        while (r > x / r) {
-            r--;
-        }
-        return r;
     }
 
     @Override
@@ -265,6 +276,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
         long alignedStartMs = (timestampMs / CANDLE_DURATION_MS) * CANDLE_DURATION_MS;
+        if (activeCandleStartMs > 0L && alignedStartMs < activeCandleStartMs) {
+            return;
+        }
         long alignedEndMs = alignedStartMs + CANDLE_DURATION_MS;
         if (alignedStartMs != activeCandleStartMs) {
             if (lastChainlinkTickMs > 0L && (alignedStartMs < lastChainlinkTickMs || alignedStartMs - lastChainlinkTickMs > 120_000L)) {
@@ -333,8 +347,10 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
 
-        ensureActiveCandle(effectiveTsMs);
-        if (targetPriceCents <= 0L && Math.abs(effectiveTsMs - activeCandleStartMs) <= MAX_TARGET_PRICE_OFFSET_MS) {
+        ensureActiveCandle(timestampMs);
+        long offsetFromStartMs = effectiveTsMs - activeCandleStartMs;
+        if (offsetFromStartMs == 0L
+                || (targetPriceCents <= 0L && offsetFromStartMs > 0L && offsetFromStartMs <= MAX_TARGET_PRICE_OFFSET_MS)) {
             targetPriceCents = priceCents;
         }
     }
@@ -477,11 +493,22 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
         long zCenti = (100L * (projectedTwapCents - targetPriceCents)) / sigmaRemCents;
         int pUpMc = normalCdfMc(zCenti);
-        int pDownMc = MAX_MC - pUpMc;
         this.lastModelProbUpMc = pUpMc;
 
-        int edgeUpMc = evaluateCandidateSideEdge(askUpMc, pUpMc);
-        int edgeDownMc = evaluateCandidateSideEdge(askDownMc, pDownMc);
+        int edgeUpMc = evaluateCandidateSideEdge(
+                askUpMc,
+                projectedTwapCents - targetPriceCents,
+                spotCents - targetPriceCents,
+                tauMs,
+                sigmaRemCents
+        );
+        int edgeDownMc = evaluateCandidateSideEdge(
+                askDownMc,
+                targetPriceCents - projectedTwapCents,
+                targetPriceCents - spotCents,
+                tauMs,
+                sigmaRemCents
+        );
 
         TradeDirection chosenDirection = TradeDirection.NO_TRADE;
         int chosenAskMc = 0;
@@ -520,18 +547,45 @@ public class UtterParameciumStrategy implements TradingStrategy {
         submitBatchOrder(nowMs, chosenDirection, chosenAskMc, qFinal);
     }
 
-    private int evaluateCandidateSideEdge(int askMc, int pModelMc) {
+    private int evaluateCandidateSideEdge(
+            int askMc,
+            long distProjCents,
+            long distSpotCents,
+            long tauMs,
+            long sigmaRemCents) {
         if (askMc < config.minEntryPriceMc() || askMc > config.maxEntryPriceMc()) {
             return Integer.MIN_VALUE;
         }
-        int feeMc = takerFeeMc(askMc, config.takerFeeRateBps());
-        int netEdgeMc = pModelMc - askMc - feeMc;
-        boolean favoriteOk = pModelMc >= config.minModelProbMc();
-        boolean underdogOk = askMc <= 400 && pModelMc >= 480 && netEdgeMc >= 80;
-        if (!favoriteOk && !underdogOk) {
+        if (distProjCents <= 0L) {
             return Integer.MIN_VALUE;
         }
-        return netEdgeMc;
+        long effectiveDistCents;
+        if (distSpotCents > 0L) {
+            effectiveDistCents = Math.min(distProjCents, distSpotCents);
+        } else {
+            if (tauMs > LATE_LOCKIN_MAX_TAU_MS
+                    || distProjCents < LATE_LOCKIN_MIN_PROJ_DIST_CENTS
+                    || (distProjCents + distSpotCents) <= LATE_LOCKIN_MIN_NET_DIST_CENTS) {
+                return Integer.MIN_VALUE;
+            }
+            effectiveDistCents = distProjCents + distSpotCents;
+        }
+        if (effectiveDistCents < MIN_EFFECTIVE_DIST_CENTS) {
+            return Integer.MIN_VALUE;
+        }
+        long zSideCenti = (100L * effectiveDistCents) / sigmaRemCents;
+        if (askMc >= EXTREME_PRICE_ASK_THRESHOLD_MC && zSideCenti < EXTREME_PRICE_MIN_Z_CENTI) {
+            return Integer.MIN_VALUE;
+        }
+        if (askMc >= HIGH_PRICE_ASK_THRESHOLD_MC && zSideCenti < HIGH_PRICE_MIN_Z_CENTI) {
+            return Integer.MIN_VALUE;
+        }
+        int pModelMc = normalCdfMc(zSideCenti);
+        if (pModelMc < config.minModelProbMc()) {
+            return Integer.MIN_VALUE;
+        }
+        int feeMc = takerFeeMc(askMc, config.takerFeeRateBps());
+        return pModelMc - askMc - feeMc;
     }
 
     private void submitBatchOrder(long nowMs, TradeDirection direction, int askMc, int shares) {
@@ -699,24 +753,27 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     /**
-     * Pre-allocated circular buffer tracking 1-second squared BTC price differences
-     * {@code (Delta S_cents)^2} to estimate {@code sigma_1s_cents} without heap allocations.
+     * Pre-allocated circular buffer tracking 1-second absolute BTC price differences
+     * {@code |Delta S_cents|} to estimate {@code sigma_1s_cents} via Gaussian-consistent
+     * Mean Absolute Deviation ({@code MAD * 1.253}) without heap allocations.
      */
     static final class SpotVolatilityBuffer {
         private static final int CAPACITY = 64;
         private static final int MASK = CAPACITY - 1;
+        private static final long MAD_TO_SIGMA_NUM = 1_253L;
+        private static final long MAD_TO_SIGMA_DEN = 1_000L;
 
-        private final long[] sqDiffsCents2 = new long[CAPACITY];
+        private final long[] absDiffsCents = new long[CAPACITY];
         private int head = 0;
         private int len = 0;
-        private long runningSumSqCents2 = 0L;
+        private long runningSumAbsCents = 0L;
         private long lastSamplePriceCents = 0L;
         private long lastSampleMs = 0L;
 
         void clear() {
             head = 0;
             len = 0;
-            runningSumSqCents2 = 0L;
+            runningSumAbsCents = 0L;
             lastSamplePriceCents = 0L;
             lastSampleMs = 0L;
         }
@@ -732,16 +789,15 @@ public class UtterParameciumStrategy implements TradingStrategy {
                 return;
             }
             if (dtMs <= 2_500L) {
-                long diff = priceCents - lastSamplePriceCents;
-                long sq = diff * diff;
+                long absDiff = Math.abs(priceCents - lastSamplePriceCents);
                 if (len == CAPACITY) {
-                    runningSumSqCents2 -= sqDiffsCents2[head];
+                    runningSumAbsCents -= absDiffsCents[head];
                     head = (head + 1) & MASK;
                     len--;
                 }
                 int tail = (head + len) & MASK;
-                sqDiffsCents2[tail] = sq;
-                runningSumSqCents2 += sq;
+                absDiffsCents[tail] = absDiff;
+                runningSumAbsCents += absDiff;
                 len++;
             }
             lastSamplePriceCents = priceCents;
@@ -752,8 +808,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
             if (len < 5) {
                 return cfg.defaultSigma1sCents();
             }
-            long meanSq = runningSumSqCents2 / len;
-            long rawSigma = isqrt(meanSq);
+            long rawSigma = (runningSumAbsCents * MAD_TO_SIGMA_NUM) / (len * MAD_TO_SIGMA_DEN);
             return Math.clamp(rawSigma, cfg.minSigma1sCents(), cfg.maxSigma1sCents());
         }
     }

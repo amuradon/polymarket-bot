@@ -39,21 +39,21 @@ public class UtterParameciumStrategyConfig {
     /**
      * Constructs the Model V1 strategy configuration with injected MicroProfile properties.
      *
-     * @param minTauMs minimum remaining time to candle expiry in milliseconds (default {@code 10000} = 10s)
+     * @param minTauMs minimum remaining time to candle expiry in milliseconds (default {@code 5000} = 5s)
      * @param maxTauMs maximum remaining time to candle expiry in milliseconds (default {@code 61000} = 61s)
-     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 200})
-     * @param minEntryPriceMc minimum acceptable best-ask price in millicents (default {@code 300} = $0.30)
+     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 250})
+     * @param minEntryPriceMc minimum acceptable best-ask price in millicents (default {@code 380} = $0.38)
      * @param maxEntryPriceMc maximum acceptable best-ask price in millicents (default {@code 970} = $0.97)
      * @param maxSpreadMc maximum allowed BBO spread in millicents (default {@code 80} = $0.08)
-     * @param minModelProbMc minimum model probability for favorite entries in millicents (default {@code 540} = 54.0%)
-     * @param minEdgeMc minimum net price edge after taker fee in millicents (default {@code 15} = $0.015)
+     * @param minModelProbMc minimum model probability for favorite entries in millicents (default {@code 650} = 65.0%)
+     * @param minEdgeMc minimum net price edge after taker fee in millicents (default {@code 25} = $0.025)
      * @param minOrderShares minimum order size in integer shares (default {@code 5})
-     * @param maxOrderShares maximum single-order size in integer shares (default {@code 35})
+     * @param maxOrderShares maximum single-order size in integer shares (default {@code 30})
      * @param initialBurstShares first-order burst size in shares when {@code tau >= 55s} (default {@code 15})
-     * @param edgeScalingFactor scaling factor mapping net edge to additional shares (default {@code 70})
+     * @param edgeScalingFactor scaling factor mapping net edge to additional shares (default {@code 65})
      * @param maxInventorySharesPerSide maximum cumulative shares per direction in one 15m market (default {@code 600})
-     * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents when {@code M < 5} (default {@code 1000} = $10.00)
-     * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 500} = $5.00)
+     * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents when {@code M < 5} (default {@code 150} = $1.50)
+     * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 80} = $0.80)
      * @param maxSigma1sCents upper clamp for 1-second BTC volatility in USD cents (default {@code 3500} = $35.00)
      * @param warmupSecsBeforeExpiry warm-up window before expiry in seconds (default {@code 120})
      * @param takerFeeRateBps Polymarket parabolic taker fee multiplier in basis points (default {@code 700} = 7.00%)
@@ -63,21 +63,21 @@ public class UtterParameciumStrategyConfig {
      */
     @Inject
     public UtterParameciumStrategyConfig(
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-tau-ms", defaultValue = "10000") long minTauMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-tau-ms", defaultValue = "5000") long minTauMs,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-tau-ms", defaultValue = "61000") long maxTauMs,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "200") long cooldownMs,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-entry-price-mc", defaultValue = "300") int minEntryPriceMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "250") long cooldownMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-entry-price-mc", defaultValue = "380") int minEntryPriceMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-entry-price-mc", defaultValue = "970") int maxEntryPriceMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-spread-mc", defaultValue = "80") int maxSpreadMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-model-prob-mc", defaultValue = "540") int minModelProbMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-edge-mc", defaultValue = "15") int minEdgeMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-model-prob-mc", defaultValue = "650") int minModelProbMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-edge-mc", defaultValue = "25") int minEdgeMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-order-shares", defaultValue = "5") int minOrderShares,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-order-shares", defaultValue = "35") int maxOrderShares,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-order-shares", defaultValue = "30") int maxOrderShares,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.initial-burst-shares", defaultValue = "15") int initialBurstShares,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.edge-scaling-factor", defaultValue = "70") int edgeScalingFactor,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.edge-scaling-factor", defaultValue = "65") int edgeScalingFactor,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-inventory-shares-per-side", defaultValue = "600") int maxInventorySharesPerSide,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "1000") long defaultSigma1sCents,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "500") long minSigma1sCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "150") long defaultSigma1sCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "80") long minSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-sigma-1s-cents", defaultValue = "3500") long maxSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.warmup-secs-before-expiry", defaultValue = "120") long warmupSecsBeforeExpiry,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.taker-fee-rate-bps", defaultValue = "700") int takerFeeRateBps,
@@ -128,21 +128,21 @@ public class UtterParameciumStrategyConfig {
      */
     public static UtterParameciumStrategyConfig defaultModelV1() {
         return new UtterParameciumStrategyConfig(
-                10_000L,
+                5_000L,
                 61_000L,
-                200L,
-                300,
+                250L,
+                380,
                 970,
                 80,
-                540,
-                15,
+                650,
+                25,
                 5,
-                35,
+                30,
                 15,
-                70,
+                65,
                 600,
-                1_000L,
-                500L,
+                150L,
+                80L,
                 3_500L,
                 120L,
                 700,
@@ -153,7 +153,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Minimum remaining time to candle expiry in milliseconds (default 10,000 ms).
+     * Minimum remaining time to candle expiry in milliseconds (default 5,000 ms).
      */
     public long minTauMs() {
         return minTauMs;
@@ -174,7 +174,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Minimum acceptable ask price in millicents (default 300 mc = $0.30).
+     * Minimum acceptable ask price in millicents (default 380 mc = $0.38).
      */
     public int minEntryPriceMc() {
         return minEntryPriceMc;
@@ -195,14 +195,14 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Minimum model probability in millicents (default 540 mc = 54.0%).
+     * Minimum model probability in millicents (default 650 mc = 65.0%).
      */
     public int minModelProbMc() {
         return minModelProbMc;
     }
 
     /**
-     * Minimum net price edge after taker fee in millicents (default 15 mc = $0.015).
+     * Minimum net price edge after taker fee in millicents (default 25 mc = $0.025).
      */
     public int minEdgeMc() {
         return minEdgeMc;
@@ -244,14 +244,14 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Default 1-second BTC volatility in USD cents when fewer than 5 samples exist (default 1,000 = $10.00).
+     * Default 1-second BTC volatility in USD cents when fewer than 5 samples exist (default 150 = $1.50).
      */
     public long defaultSigma1sCents() {
         return defaultSigma1sCents;
     }
 
     /**
-     * Minimum clamp for 1-second BTC volatility in USD cents (default 500 = $5.00).
+     * Minimum clamp for 1-second BTC volatility in USD cents (default 80 = $0.80).
      */
     public long minSigma1sCents() {
         return minSigma1sCents;
