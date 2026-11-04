@@ -42,6 +42,7 @@ class BacktestEngineTest {
     private BacktestEngine backtestEngine;
     private final AtomicInteger polymarketCryptoPriceCount = new AtomicInteger();
     private final AtomicInteger polymarketTwap60sCount = new AtomicInteger();
+    private final AtomicInteger calculatedSpotTwapCount = new AtomicInteger();
     private final AtomicInteger externalSpotTradeCount = new AtomicInteger();
 
     private static final long BASE_START = 1785542400L; // 2026-08-01 00:00:00 UTC
@@ -189,6 +190,12 @@ class BacktestEngineTest {
             }
 
             @Override
+            public void onCalculatedSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
+                calculatedSpotTwapCount.incrementAndGet();
+                assertThat(ctx.getIndicatorValue(IndicatorType.VWAP)).isNaN();
+            }
+
+            @Override
             public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
                 externalSpotTradeCount.incrementAndGet();
             }
@@ -270,6 +277,7 @@ class BacktestEngineTest {
     void shouldSkipExternalFilesForPolymarketOnlyStrategy(@TempDir Path tempDir) {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);
+        calculatedSpotTwapCount.set(0);
         externalSpotTradeCount.set(0);
 
         BacktestResult result = backtestEngine.runBacktest(
@@ -287,6 +295,7 @@ class BacktestEngineTest {
         assertThat(result.trades()).hasSize(6);
         assertThat(polymarketCryptoPriceCount.get()).isEqualTo(3);
         assertThat(polymarketTwap60sCount.get()).isGreaterThanOrEqualTo(3);
+        assertThat(calculatedSpotTwapCount.get()).isEqualTo(6);
         assertThat(externalSpotTradeCount.get()).isZero();
     }
 
@@ -298,11 +307,13 @@ class BacktestEngineTest {
 
         long c1Start = BASE_START;
         Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
-        Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
+        Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", "2026-08-01");
+        Path krakenFile = datasetService.getKrakenSpotUsdtUsdTradesFile("2026-08-01");
         Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
         Files.createDirectories(pmDir);
-        Files.createDirectories(cryptoPriceFile.getParent());
+        Files.createDirectories(spotFile.getParent());
+        Files.createDirectories(krakenFile.getParent());
         Files.createDirectories(twap60sFile.getParent());
 
         Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
@@ -319,23 +330,27 @@ class BacktestEngineTest {
                     "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60050.0::DOUBLE, '60050.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
                     ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
 
-            // 2. Polymarket price_crypto in the final minute [c1Start + 840s .. c1Start + 885s]
-            String normCrypto = cryptoPriceFile.toAbsolutePath().toString().replace('\\', '/');
-            StringBuilder cryptoValues = new StringBuilder();
+            // 2. Kraken Spot USDTUSD trades (peg = 1.0000) and Binance Spot BTCUSDT aggTrades in the final minute [c1Start + 835s .. c1Start + 885s]
+            String normKraken = krakenFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (c1Start * 1000L) + "::UBIGINT, 1.0000::DOUBLE)" +
+                    ") AS t(ts, price)) TO '" + normKraken + "' (FORMAT PARQUET)");
+
+            String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
+            StringBuilder spotValues = new StringBuilder();
             for (int sec = 835; sec <= 885; sec++) {
-                if (cryptoValues.length() > 0) {
-                    cryptoValues.append(", ");
+                if (spotValues.length() > 0) {
+                    spotValues.append(", ");
                 }
                 long tsMs = (c1Start + sec) * 1000L;
                 double price = 60050.0 + (sec % 2 == 0 ? 1.0 : -1.0);
-                cryptoValues.append("(")
+                spotValues.append("(")
                         .append(tsMs).append("::UBIGINT, ")
-                        .append(sec).append("::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, ")
-                        .append(price).append("::DOUBLE, '").append(price).append("'::VARCHAR, ")
-                        .append(tsMs).append("::UBIGINT)");
+                        .append(sec).append("::BIGINT, ")
+                        .append(price).append("::DOUBLE, 1.0::DOUBLE, false::BOOLEAN)");
             }
-            stmt.execute("COPY (SELECT * FROM (VALUES " + cryptoValues +
-                    ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
+            stmt.execute("COPY (SELECT * FROM (VALUES " + spotValues +
+                    ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
             // 3. Polymarket 15m CLOB market file with stale ask at 0.55 during final minute
             String normPm1 = pmFile1.toAbsolutePath().toString().replace('\\', '/');

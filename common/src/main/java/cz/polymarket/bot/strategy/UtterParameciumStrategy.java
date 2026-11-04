@@ -13,9 +13,10 @@ import java.util.Set;
 /**
  * Reconstructed {@code Utter-Paramecium} (Model V1) final-minute Chainlink 60s TWAP lock-in strategy.
  * <p>
- * Operates exclusively in the final 60-second settlement window ({@code tau in [10s, 61s]}) of
- * 15-minute binary prediction markets using strictly Polymarket PolyBolt streams
- * ({@code price.crypto} and {@code price.crypto.twap}) and Polymarket CLOB order book quotes.
+ * Operates exclusively in the final 60-second settlement window ({@code tau in [5s, 61s]}) of
+ * 15-minute binary prediction markets using calculated USD spot &amp; 60s TWAP
+ * ({@link #onCalculatedSpotTwap}), the PolyBolt 60s TWAP stream ({@code price.crypto.twap})
+ * for candle-open target price discovery, and Polymarket CLOB order book quotes.
  * <p>
  * The target price ({@code targetPriceCents}) must be explicitly determined from the PolyBolt
  * 60-second TWAP stream at market start. If the target price is missing in any mode
@@ -85,8 +86,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private long nextCandleTargetPriceCents = 0L;
     private boolean missingTargetPriceWarned = false;
 
-    // Real-time PolyBolt price.crypto feed tracking in USD cents
+    // Real-time calculated USD spot & 60s TWAP tracking in USD cents
     private long lastChainlinkPriceCents = 0L;
+    private long lastCalculatedTwap60sCents = 0L;
     private long lastChainlinkTickMs = 0L;
 
     // Order book & per-market execution state
@@ -250,6 +252,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         nextCandleTargetPriceCents = 0L;
         missingTargetPriceWarned = false;
         lastChainlinkPriceCents = 0L;
+        lastCalculatedTwap60sCents = 0L;
         lastChainlinkTickMs = 0L;
         resetMarketExecutionState();
     }
@@ -285,6 +288,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
                 chainlinkTwapBuffer.clear();
                 spotVolatilityBuffer.clear();
                 lastChainlinkPriceCents = 0L;
+                lastCalculatedTwap60sCents = 0L;
                 lastChainlinkTickMs = 0L;
             }
             activeCandleStartMs = alignedStartMs;
@@ -300,30 +304,33 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     @Override
-    public void onPolymarketCryptoPrice(
+    public void onCalculatedSpotTwap(
             long timestampMs,
             String symbol,
-            String source,
-            double price,
-            long priceTimestampMs) {
-        if (price <= 0.0 || timestampMs <= 0L) {
+            double spotPrice,
+            double twap60sPrice) {
+        if (spotPrice <= 0.0 || timestampMs <= 0L) {
             return;
         }
         ensureActiveCandle(timestampMs);
-        long priceCents = Math.round(price * 100.0);
-        recordChainlinkSample(timestampMs, priceCents);
+        long spotCents = Math.round(spotPrice * 100.0);
+        long twap60sCents = (!Double.isNaN(twap60sPrice) && twap60sPrice > 0.0)
+                ? Math.round(twap60sPrice * 100.0)
+                : spotCents;
+        recordCalculatedSpotSample(timestampMs, spotCents, twap60sCents);
 
         if (latestValidQuote != null) {
             evaluateEntry(timestampMs, latestValidQuote);
         }
     }
 
-    private void recordChainlinkSample(long timestampMs, long priceCents) {
+    private void recordCalculatedSpotSample(long timestampMs, long spotCents, long twap60sCents) {
         long minRetainMs = Math.max(0L, timestampMs - BUFFER_RETENTION_MS);
-        chainlinkTwapBuffer.pushAndEvict(timestampMs, priceCents, minRetainMs);
-        spotVolatilityBuffer.onTick(timestampMs, priceCents);
+        chainlinkTwapBuffer.pushAndEvict(timestampMs, spotCents, minRetainMs);
+        spotVolatilityBuffer.onTick(timestampMs, spotCents);
 
-        lastChainlinkPriceCents = priceCents;
+        lastChainlinkPriceCents = spotCents;
+        lastCalculatedTwap60sCents = twap60sCents;
         lastChainlinkTickMs = timestampMs;
     }
 
@@ -471,12 +478,15 @@ public class UtterParameciumStrategy implements TradingStrategy {
             askDownMc = MAX_MC - bidUpMc;
         }
 
-        // Compute projected final 60s TWAP and remaining uncertainty sigma_rem(tau) strictly from PolyBolt price.crypto
+        // Compute projected final 60s TWAP and remaining uncertainty sigma_rem(tau) from calculated USD spot & 60s TWAP
         long spotCents = lastChainlinkPriceCents;
         long settlementWindowStartMs = activeCandleEndMs - TWAP_WINDOW_MS;
         long lockedMeanCents = (tauMs <= TWAP_WINDOW_MS)
                 ? chainlinkTwapBuffer.meanCentsInWindow(settlementWindowStartMs, nowMs)
                 : 0L;
+        if (lockedMeanCents <= 0L && lastCalculatedTwap60sCents > 0L) {
+            lockedMeanCents = lastCalculatedTwap60sCents;
+        }
 
         long projectedTwapCents;
         if (tauMs >= TWAP_WINDOW_MS || lockedMeanCents <= 0L) {
@@ -685,12 +695,13 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     /**
-     * Pre-allocated circular buffer storing {@code (timestampMs, priceCents)} Chainlink samples
-     * for the 60-second settlement window without heap allocations.
+     * Pre-allocated circular buffer storing {@code (timestampMs, priceCents)} calculated USD spot samples
+     * (coalesced to 100 ms buckets) for the 60-second settlement window without heap allocations.
      */
     static final class ChainlinkTwapBuffer {
-        private static final int CAPACITY = 128;
+        private static final int CAPACITY = 1_024;
         private static final int MASK = CAPACITY - 1;
+        private static final long MIN_BUCKET_STEP_MS = 100L;
 
         private final long[] timestampsMs = new long[CAPACITY];
         private final long[] pricesCents = new long[CAPACITY];
@@ -714,6 +725,14 @@ public class UtterParameciumStrategy implements TradingStrategy {
 
         void pushAndEvict(long timestampMs, long priceCents, long minTimestampMs) {
             evictOlderThan(minTimestampMs);
+            if (len > 0) {
+                int lastIdx = (head + len - 1) & MASK;
+                if (timestampMs - timestampsMs[lastIdx] < MIN_BUCKET_STEP_MS) {
+                    runningSumCents += (priceCents - pricesCents[lastIdx]);
+                    pricesCents[lastIdx] = priceCents;
+                    return;
+                }
+            }
             if (len == CAPACITY) {
                 runningSumCents -= pricesCents[head];
                 head = (head + 1) & MASK;

@@ -54,12 +54,14 @@ class ChronologicalEventStreamerTest {
         Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", dateStr);
         Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
         Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
+        Path krakenFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
         Path futFile = datasetService.getBinanceFuturesAggTradesFile("BTCUSDT", dateStr);
 
         Files.createDirectories(pmDir);
         Files.createDirectories(cryptoPriceFile.getParent());
         Files.createDirectories(twap60sFile.getParent());
         Files.createDirectories(spotFile.getParent());
+        Files.createDirectories(krakenFile.getParent());
         Files.createDirectories(futFile.getParent());
 
         Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
@@ -89,6 +91,11 @@ class ChronologicalEventStreamerTest {
                     "(" + (tStart * 1000L + 1000L) + "::UBIGINT, 1::BIGINT, 60000.0::DOUBLE, 0.5::DOUBLE, false::BOOLEAN)" +
                     ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
+            String normKraken = krakenFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (tStart * 1000L + 900L) + "::UBIGINT, 0.9990::DOUBLE)" +
+                    ") AS t(ts, price)) TO '" + normKraken + "' (FORMAT PARQUET)");
+
             String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(" + (tStart * 1000L + 1500L) + "::UBIGINT, 1::BIGINT, 60010.0::DOUBLE, 1.0::DOUBLE, false::BOOLEAN)" +
@@ -100,11 +107,13 @@ class ChronologicalEventStreamerTest {
                 "1001", "1002", 60000.0, 60120.0, TradeDirection.UP
         );
 
-        // Case 1: Strategy requires NO external streams -> Binance Spot/Futures must NOT be loaded
+        // Case 1: Strategy requires NO external streams -> CalculatedSpotTwapEvent IS always streamed,
+        // while raw Binance Spot/Futures events must NOT be loaded
         try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
             streamer.loadCandleEvents(metadata, datasetService, "BTCUSDT", Set.of());
 
             int clobCount = 0;
+            int calcSpotTwapCount = 0;
             int cryptoPriceCount = 0;
             int twap60sCount = 0;
             int spotCount = 0;
@@ -113,6 +122,11 @@ class ChronologicalEventStreamerTest {
             while (streamer.hasNext()) {
                 BacktestEvent event = streamer.next();
                 if (event instanceof BacktestEvent.PolymarketClobEvent) clobCount++;
+                if (event instanceof BacktestEvent.CalculatedSpotTwapEvent calcEv) {
+                    calcSpotTwapCount++;
+                    assertThat(calcEv.symbol()).isEqualTo("btcusd");
+                    assertThat(calcEv.spotPrice()).isCloseTo(60000.0 * 0.9990, org.assertj.core.api.Assertions.within(1e-4));
+                }
                 if (event instanceof BacktestEvent.PolymarketCryptoPriceEvent) cryptoPriceCount++;
                 if (event instanceof BacktestEvent.PolymarketCryptoTwap60sEvent) twap60sCount++;
                 if (event instanceof BacktestEvent.BinanceSpotTradeEvent) spotCount++;
@@ -120,6 +134,7 @@ class ChronologicalEventStreamerTest {
             }
 
             assertThat(clobCount).isEqualTo(1);
+            assertThat(calcSpotTwapCount).isEqualTo(1);
             assertThat(cryptoPriceCount).isEqualTo(1);
             assertThat(twap60sCount).isEqualTo(1);
             assertThat(spotCount).isZero();

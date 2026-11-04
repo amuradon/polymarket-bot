@@ -120,6 +120,24 @@ public interface TradingStrategy {
             long twapTimestampMs) {}
 
     /**
+     * Optional callback triggered when a synthetic USD spot price and 60-second rolling TWAP
+     * are calculated for the asset from Binance Spot ({@code <ASSET>USDT}) and Kraken Spot
+     * ({@code USDT/USD} smoothed with a 5-second time-weighted EMA).
+     * <p>
+     * Delivered automatically to all strategies without requiring explicit stream declaration.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol lowercase USD asset symbol (e.g. {@code "btcusd"})
+     * @param spotPrice calculated USD spot price ({@code priceUsdt * usdtUsdEma5s})
+     * @param twap60sPrice calculated 60-second time-weighted average USD price
+     */
+    default void onCalculatedSpotTwap(
+            long timestampMs,
+            String symbol,
+            double spotPrice,
+            double twap60sPrice) {}
+
+    /**
      * Callback triggered upon execution feedback (fills, rejections, cancellations).
      *
      * @param report the execution report

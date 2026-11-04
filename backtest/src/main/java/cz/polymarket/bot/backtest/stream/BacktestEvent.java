@@ -101,6 +101,29 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     }
 
     /**
+     * Real-time calculated USD spot price and 60-second rolling TWAP derived from Binance Spot
+     * ({@code <ASSET>USDT}) and Kraken Spot ({@code USDT/USD} 5s EMA).
+     *
+     * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC
+     * @param sequenceNumber capture sequence number
+     * @param symbol lowercase USD crypto symbol (e.g. {@code "btcusd"})
+     * @param spotPrice calculated USD spot price
+     * @param twap60sPrice calculated 60-second time-weighted average USD price
+     */
+    record CalculatedSpotTwapEvent(
+            long timestampMs,
+            long sequenceNumber,
+            String symbol,
+            double spotPrice,
+            double twap60sPrice
+    ) implements BacktestEvent {
+        @Override
+        public int priority() {
+            return 7;
+        }
+    }
+
+    /**
      * Real-time crypto spot/oracle price event from {@code polymarket/price_crypto}.
      *
      * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC

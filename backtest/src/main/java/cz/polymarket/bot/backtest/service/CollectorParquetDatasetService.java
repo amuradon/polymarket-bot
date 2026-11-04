@@ -166,6 +166,17 @@ public class CollectorParquetDatasetService {
     }
 
     /**
+     * Resolves the daily Kraken Spot {@code USDTUSD} {@code trades} Parquet file for the given UTC date.
+     *
+     * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @return Parquet file path
+     */
+    public Path getKrakenSpotUsdtUsdTradesFile(String dateStr) {
+        return collectorRootDir.resolve("kraken").resolve("spot").resolve("USDTUSD")
+                .resolve("trades").resolve("USDTUSD-trades-" + dateStr + ".parquet");
+    }
+
+    /**
      * Resolves the daily Binance Futures {@code aggTrades} Parquet file for the given symbol and UTC date.
      *
      * @param symbol trading symbol

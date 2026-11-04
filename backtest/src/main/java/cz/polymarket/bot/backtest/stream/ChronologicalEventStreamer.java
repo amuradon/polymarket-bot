@@ -2,6 +2,7 @@ package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TwapPoint;
@@ -19,9 +20,11 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.PriorityQueue;
 import java.util.Properties;
 import java.util.Set;
@@ -46,6 +49,8 @@ import java.util.function.BiConsumer;
 public class ChronologicalEventStreamer implements AutoCloseable {
 
     private static final BacktestEvent[] EMPTY_EVENTS = new BacktestEvent[0];
+    private static final long SPOT_TWAP_WARMUP_MS = 65_000L;
+    private static final long KRAKEN_USDT_WARMUP_MS = 1_800_000L;
 
     static {
         try {
@@ -56,12 +61,26 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(4096);
+    private final CalculatedSpotTwapEngine calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
     private Connection sharedConnection;
     private Statement clobStatement;
     private ResultSet clobResultSet;
     private Path activeClobFile;
     private long clobSeq;
     private BacktestEvent.PolymarketClobEvent nextClobEvent;
+
+    private Connection calcBinanceConnection;
+    private Statement calcBinanceStatement;
+    private ResultSet calcBinanceResultSet;
+    private Connection calcKrakenConnection;
+    private Statement calcKrakenStatement;
+    private ResultSet calcKrakenResultSet;
+    private boolean hasNextKrakenRow;
+    private long nextKrakenTsMs;
+    private double nextKrakenPrice;
+    private String calcCryptoSymbol;
+    private long calcSpotSeq;
+    private BacktestEvent.CalculatedSpotTwapEvent nextCalculatedSpotTwapEvent;
 
     // Rolling single-day cache for daily Parquet streams to avoid re-scanning 96 times per UTC day
     private String cachedDateStr;
@@ -88,28 +107,42 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Checks if there are pending events in the active CLOB stream or priority queue.
+     * Checks if there are pending events in the active CLOB stream, calculated Spot/TWAP stream, or priority queue.
      *
      * @return true if more events exist
      */
     public boolean hasNext() {
-        return nextClobEvent != null || !queue.isEmpty();
+        return nextClobEvent != null || nextCalculatedSpotTwapEvent != null || !queue.isEmpty();
     }
 
     /**
-     * Retrieves and removes the next chronological event by merge-streaming the head of the
-     * active CLOB {@link ResultSet} cursor with the priority queue of daily/lifecycle/order events.
+     * Retrieves and removes the next chronological event by merge-streaming the heads of the
+     * active CLOB cursor, the calculated Spot/TWAP cursor, and the priority queue of daily/lifecycle/order events.
      *
      * @return next event, or null if no events remain
      */
     public BacktestEvent next() {
         BacktestEvent queuedHead = queue.peek();
-        if (nextClobEvent == null) {
-            return queue.poll();
+        BacktestEvent best = queuedHead;
+        int source = 0; // 0 = queue, 1 = clob, 2 = calculatedSpotTwap
+
+        if (nextClobEvent != null && (best == null || nextClobEvent.compareTo(best) <= 0)) {
+            best = nextClobEvent;
+            source = 1;
         }
-        if (queuedHead == null || nextClobEvent.compareTo(queuedHead) <= 0) {
+        if (nextCalculatedSpotTwapEvent != null && (best == null || nextCalculatedSpotTwapEvent.compareTo(best) < 0)) {
+            best = nextCalculatedSpotTwapEvent;
+            source = 2;
+        }
+
+        if (source == 1) {
             BacktestEvent.PolymarketClobEvent current = nextClobEvent;
             advanceClobCursor();
+            return current;
+        }
+        if (source == 2) {
+            BacktestEvent.CalculatedSpotTwapEvent current = nextCalculatedSpotTwapEvent;
+            advanceCalculatedSpotTwapCursor();
             return current;
         }
         return queue.poll();
@@ -127,10 +160,11 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Clears all pending events and closes any active CLOB streaming cursor for the current candle.
+     * Clears all pending events and closes any active streaming cursors for the current candle.
      */
     public void clear() {
         closeClobStream();
+        closeCalculatedSpotTwapStream();
         queue.clear();
     }
 
@@ -374,6 +408,24 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     public void loadCandleEvents(
             CollectorMarketMetadata metadata,
             BacktestEvent[] sharedDailyStreamEvents) {
+        loadCandleEvents(metadata, sharedDailyStreamEvents, null, null);
+    }
+
+    /**
+     * Loads all chronological events for a specific 15-minute market interval using pre-loaded
+     * shared daily stream events for the UTC day and lazily streaming the Polymarket CLOB file
+     * plus the calculated USD Spot &amp; 60s TWAP from Binance Spot and Kraken Spot Parquet files.
+     *
+     * @param metadata market metadata descriptor
+     * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
+     * @param datasetService optional collector Parquet dataset service for streaming Binance/Kraken files
+     * @param symbol optional trading asset symbol
+     */
+    public void loadCandleEvents(
+            CollectorMarketMetadata metadata,
+            BacktestEvent[] sharedDailyStreamEvents,
+            CollectorParquetDatasetService datasetService,
+            String symbol) {
 
         if (metadata == null) {
             return;
@@ -392,6 +444,9 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
 
         openPolymarketClobStream(metadata.marketParquetFile(), tEndMs);
+        if (datasetService != null && metadata.dateStr() != null && !metadata.dateStr().isBlank()) {
+            openCalculatedSpotTwapStream(datasetService, symbol, metadata.dateStr(), tStartMs, tEndMs);
+        }
     }
 
     /**
@@ -431,6 +486,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (dateStr != null && !dateStr.isBlank()) {
             ensureDailyStreamsLoaded(datasetService, symbol, dateStr, extStreams);
             scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
+            openCalculatedSpotTwapStream(datasetService, symbol, dateStr, tStartMs, tEndMs);
         }
 
         // Lazily stream 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
@@ -529,6 +585,166 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             Log.warnf("Could not stream Polymarket CLOB events from %s: %s", activeClobFile, e.getMessage());
         }
         closeClobStream();
+    }
+
+    private void openCalculatedSpotTwapStream(
+            CollectorParquetDatasetService datasetService,
+            String symbol,
+            String dateStr,
+            long tStartMs,
+            long tEndMs) {
+        closeCalculatedSpotTwapStream();
+        if (datasetService == null || dateStr == null || dateStr.isBlank()) {
+            return;
+        }
+
+        Path curBinanceFile = datasetService.getBinanceSpotAggTradesFile(symbol, dateStr);
+        if (curBinanceFile == null || !Files.exists(curBinanceFile)) {
+            return;
+        }
+
+        String prevDateStr = null;
+        try {
+            prevDateStr = LocalDate.parse(dateStr.trim()).minusDays(1).toString();
+        } catch (Exception ignored) {
+        }
+
+        long spotWarmupStartMs = Math.max(0L, tStartMs - SPOT_TWAP_WARMUP_MS);
+        long krakenWarmupStartMs = Math.max(0L, tStartMs - KRAKEN_USDT_WARMUP_MS);
+
+        Path prevBinanceFile = prevDateStr != null ? datasetService.getBinanceSpotAggTradesFile(symbol, prevDateStr) : null;
+        String binanceReadExpr = buildParquetReadExpression(prevBinanceFile, curBinanceFile);
+
+        Path curKrakenFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
+        Path prevKrakenFile = prevDateStr != null ? datasetService.getKrakenSpotUsdtUsdTradesFile(prevDateStr) : null;
+        String krakenReadExpr = buildParquetReadExpression(prevKrakenFile, curKrakenFile);
+
+        this.calculatedSpotTwapEngine.reset();
+        this.calcCryptoSymbol = CollectorParquetDatasetService.extractBaseAsset(symbol).toLowerCase(Locale.ROOT) + "usd";
+        this.calcSpotSeq = 0L;
+
+        try {
+            if (krakenReadExpr != null) {
+                String krakenSql = "SELECT ts, price FROM " + krakenReadExpr +
+                        " WHERE ts >= " + krakenWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+                this.calcKrakenStatement = getOrCreateCalcKrakenStatement();
+                this.calcKrakenResultSet = this.calcKrakenStatement.executeQuery(krakenSql);
+                advanceKrakenRow();
+            }
+
+            String binanceSql = "SELECT ts, price FROM " + binanceReadExpr +
+                    " WHERE ts >= " + spotWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+            this.calcBinanceStatement = getOrCreateCalcBinanceStatement();
+            this.calcBinanceResultSet = this.calcBinanceStatement.executeQuery(binanceSql);
+
+            // Advance through the pre-candle warm-up window [spotWarmupStartMs, tStartMs) and stop at first event >= tStartMs
+            while (calcBinanceResultSet != null && calcBinanceResultSet.next()) {
+                long bTs = calcBinanceResultSet.getLong(1);
+                double bPrice = calcBinanceResultSet.getDouble(2);
+                consumeKrakenUpTo(bTs);
+                double twap60s = calculatedSpotTwapEngine.onAssetUsdtTrade(bTs, bPrice);
+                if (bTs >= tStartMs) {
+                    double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+                    nextCalculatedSpotTwapEvent = new BacktestEvent.CalculatedSpotTwapEvent(
+                            bTs, ++calcSpotSeq, calcCryptoSymbol, spotUsd, twap60s
+                    );
+                    return;
+                }
+            }
+            closeCalculatedSpotTwapStream();
+        } catch (SQLException e) {
+            Log.warnf("Could not stream Binance/Kraken spot TWAP events for %s on %s: %s", symbol, dateStr, e.getMessage());
+            closeCalculatedSpotTwapStream();
+        }
+    }
+
+    private void advanceCalculatedSpotTwapCursor() {
+        if (calcBinanceResultSet == null) {
+            nextCalculatedSpotTwapEvent = null;
+            return;
+        }
+        try {
+            if (calcBinanceResultSet.next()) {
+                long bTs = calcBinanceResultSet.getLong(1);
+                double bPrice = calcBinanceResultSet.getDouble(2);
+                consumeKrakenUpTo(bTs);
+                double twap60s = calculatedSpotTwapEngine.onAssetUsdtTrade(bTs, bPrice);
+                double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+                nextCalculatedSpotTwapEvent = new BacktestEvent.CalculatedSpotTwapEvent(
+                        bTs, ++calcSpotSeq, calcCryptoSymbol, spotUsd, twap60s
+                );
+                return;
+            }
+        } catch (SQLException e) {
+            Log.warnf("Error advancing Binance spot TWAP stream: %s", e.getMessage());
+        }
+        closeCalculatedSpotTwapStream();
+    }
+
+    private void consumeKrakenUpTo(long targetTimestampMs) throws SQLException {
+        while (hasNextKrakenRow && nextKrakenTsMs <= targetTimestampMs) {
+            calculatedSpotTwapEngine.onUsdtUsdTrade(nextKrakenTsMs, nextKrakenPrice);
+            advanceKrakenRow();
+        }
+    }
+
+    private void advanceKrakenRow() throws SQLException {
+        if (calcKrakenResultSet != null && calcKrakenResultSet.next()) {
+            nextKrakenTsMs = calcKrakenResultSet.getLong(1);
+            nextKrakenPrice = calcKrakenResultSet.getDouble(2);
+            hasNextKrakenRow = true;
+        } else {
+            hasNextKrakenRow = false;
+        }
+    }
+
+    private static String buildParquetReadExpression(Path prevFile, Path curFile) {
+        boolean hasPrev = prevFile != null && Files.exists(prevFile);
+        boolean hasCur = curFile != null && Files.exists(curFile);
+        if (!hasPrev && !hasCur) {
+            return null;
+        }
+        if (hasPrev && hasCur) {
+            String p1 = prevFile.toAbsolutePath().toString().replace('\\', '/');
+            String p2 = curFile.toAbsolutePath().toString().replace('\\', '/');
+            return "read_parquet(['" + p1 + "', '" + p2 + "'])";
+        }
+        Path single = hasCur ? curFile : prevFile;
+        String norm = single.toAbsolutePath().toString().replace('\\', '/');
+        return "read_parquet('" + norm + "')";
+    }
+
+    private void closeCalculatedSpotTwapStream() {
+        nextCalculatedSpotTwapEvent = null;
+        hasNextKrakenRow = false;
+        if (calcBinanceResultSet != null) {
+            try {
+                calcBinanceResultSet.close();
+            } catch (SQLException ignored) {
+            }
+            calcBinanceResultSet = null;
+        }
+        if (calcBinanceStatement != null) {
+            try {
+                calcBinanceStatement.close();
+            } catch (SQLException ignored) {
+            }
+            calcBinanceStatement = null;
+        }
+        if (calcKrakenResultSet != null) {
+            try {
+                calcKrakenResultSet.close();
+            } catch (SQLException ignored) {
+            }
+            calcKrakenResultSet = null;
+        }
+        if (calcKrakenStatement != null) {
+            try {
+                calcKrakenStatement.close();
+            } catch (SQLException ignored) {
+            }
+            calcKrakenStatement = null;
+        }
     }
 
     private void closeClobStream() {
@@ -833,9 +1049,24 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         return sharedConnection.createStatement();
     }
 
+    private Statement getOrCreateCalcBinanceStatement() throws SQLException {
+        if (calcBinanceConnection == null || calcBinanceConnection.isClosed()) {
+            calcBinanceConnection = openStreamingConnection();
+        }
+        return calcBinanceConnection.createStatement();
+    }
+
+    private Statement getOrCreateCalcKrakenStatement() throws SQLException {
+        if (calcKrakenConnection == null || calcKrakenConnection.isClosed()) {
+            calcKrakenConnection = openStreamingConnection();
+        }
+        return calcKrakenConnection.createStatement();
+    }
+
     @Override
     public void close() {
         closeClobStream();
+        closeCalculatedSpotTwapStream();
         queue.clear();
         cachedDailyStreamEvents = EMPTY_EVENTS;
         cachedDateStr = null;
@@ -845,6 +1076,20 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             } catch (SQLException ignored) {
             }
             sharedConnection = null;
+        }
+        if (calcBinanceConnection != null) {
+            try {
+                calcBinanceConnection.close();
+            } catch (SQLException ignored) {
+            }
+            calcBinanceConnection = null;
+        }
+        if (calcKrakenConnection != null) {
+            try {
+                calcKrakenConnection.close();
+            } catch (SQLException ignored) {
+            }
+            calcKrakenConnection = null;
         }
     }
 }

@@ -261,7 +261,8 @@ public class BacktestEngine {
                         needBasis,
                         needObi,
                         needMicroPrice,
-                        resolvedLatencyFactor
+                        resolvedLatencyFactor,
+                        sym
                 );
             } else {
                 AtomicInteger cursor = new AtomicInteger(0);
@@ -281,7 +282,8 @@ public class BacktestEngine {
                             needBasis,
                             needObi,
                             needMicroPrice,
-                            resolvedLatencyFactor
+                            resolvedLatencyFactor,
+                            sym
                     ), ForkJoinPool.commonPool());
                 }
                 CompletableFuture.allOf(workers).join();
@@ -380,7 +382,8 @@ public class BacktestEngine {
             boolean needBasis,
             boolean needObi,
             boolean needMicroPrice,
-            double resolvedLatencyFactor) {
+            double resolvedLatencyFactor,
+            String symbol) {
 
         int total = dayMarkets.size();
         PolymarketOrderBook orderBook = new PolymarketOrderBook();
@@ -440,7 +443,7 @@ public class BacktestEngine {
                 }
 
                 streamer.clear();
-                streamer.loadCandleEvents(market, sharedDailyEvents);
+                streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol);
 
                 List<TradeRecord> marketTrades = List.of();
                 double brierDiffSq = 0.0;
@@ -458,6 +461,10 @@ public class BacktestEngine {
                                 OrderBookQuote quote = orderBook.toOrderBookQuote(evTs);
                                 activeStrategy.onOrderBookQuote(quote);
                             }
+                        }
+                        case BacktestEvent.CalculatedSpotTwapEvent e -> {
+                            context.setLastReferencePrice(e.spotPrice());
+                            activeStrategy.onCalculatedSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
                         }
                         case BacktestEvent.PolymarketCryptoPriceEvent e -> {
                             context.setLastReferencePrice(e.price());
