@@ -5,8 +5,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import org.jboss.logging.Logger;
 
+/**
+ * Lifecycle startup observer for the standalone Live Trading Quarkus application.
+ */
 @ApplicationScoped
 public class LiveTradingApplication {
+
     private static final Logger LOG = Logger.getLogger(LiveTradingApplication.class);
 
     void onStart(@Observes StartupEvent event) {

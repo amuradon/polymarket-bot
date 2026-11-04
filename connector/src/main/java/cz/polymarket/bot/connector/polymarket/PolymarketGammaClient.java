@@ -50,8 +50,9 @@ public class PolymarketGammaClient {
     }
 
     /**
-     * Queries the Gamma API for a specific market by its slug, extracting only the token IDs
-     * and closed status needed for stream management while preserving the raw JSON response.
+     * Queries the Gamma API ({@code GET /markets/slug/{slug}}) for a specific market by its slug,
+     * extracting the condition ID, token IDs, and closed status needed for stream and order management
+     * while preserving the raw JSON response.
      *
      * @param slug            market slug (e.g. btc-updown-15m-1789041600)
      * @param durationSeconds market interval duration in seconds (e.g. 900 for 15m)
@@ -61,8 +62,8 @@ public class PolymarketGammaClient {
         if (slug == null || slug.isBlank()) {
             return Optional.empty();
         }
-        String encodedSlug = URLEncoder.encode(slug, StandardCharsets.UTF_8);
-        String url = baseUrl + "/markets?slug=" + encodedSlug;
+        String encodedSlug = URLEncoder.encode(slug.trim(), StandardCharsets.UTF_8);
+        String url = baseUrl + "/markets/slug/" + encodedSlug;
 
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -79,8 +80,8 @@ public class PolymarketGammaClient {
             }
 
             JsonNode root = objectMapper.readTree(response.body());
-            if (root.isArray() && !root.isEmpty()) {
-                return parseMarketNode(root.get(0), durationSeconds);
+            if (root != null && root.isObject()) {
+                return parseMarketNode(root, durationSeconds);
             }
         } catch (Exception e) {
             LOG.debugf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
@@ -94,6 +95,7 @@ public class PolymarketGammaClient {
         }
         try {
             String slug = item.path("slug").asText("");
+            String conditionId = item.path("conditionId").asText("");
             long startSec = extractStartSecFromSlug(slug);
             long endSec = startSec > 0 ? startSec + durationSeconds : 0L;
             List<String> clobTokens = parseStringListField(item.get("clobTokenIds"));
@@ -103,6 +105,7 @@ public class PolymarketGammaClient {
             boolean closed = item.path("closed").asBoolean(false);
             return Optional.of(new PolymarketMarketInfo(
                     slug,
+                    conditionId,
                     startSec,
                     endSec,
                     List.copyOf(clobTokens),

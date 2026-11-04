@@ -4,24 +4,64 @@ import java.util.List;
 
 /**
  * Minimal immutable metadata record representing a Polymarket market discovered via the Gamma API.
- * Only extracts the fields strictly necessary for stream subscription and lifecycle management,
+ * Only extracts the fields strictly necessary for stream subscription, order routing, and lifecycle management,
  * preserving the entire unmodified Gamma JSON payload in {@code rawJson}.
  *
  * @param slug         market URL slug (e.g. btc-updown-15m-1789041600)
+ * @param conditionId  Polymarket CTF condition ID (e.g. 0xf9ceae0be10beb7ee63716f66a3a501519dc156fa5a5c120c8478bded2541107)
  * @param startSec     market interval opening timestamp in epoch seconds
  * @param endSec       market interval closing/resolution timestamp in epoch seconds
- * @param clobTokenIds CLOB asset token IDs to subscribe on the market WebSocket stream
+ * @param clobTokenIds CLOB asset token IDs to subscribe on the market WebSocket stream (index 0 = Up/YES, index 1 = Down/NO)
  * @param closed       whether the market is marked closed/resolved on Gamma API
  * @param rawJson      unmodified JSON object string returned by the Gamma API
  */
 public record PolymarketMarketInfo(
         String slug,
+        String conditionId,
         long startSec,
         long endSec,
         List<String> clobTokenIds,
         boolean closed,
         String rawJson
 ) {
+
+    /**
+     * Convenience constructor when {@code conditionId} is omitted.
+     *
+     * @param slug         market URL slug
+     * @param startSec     market interval opening timestamp in epoch seconds
+     * @param endSec       market interval closing/resolution timestamp in epoch seconds
+     * @param clobTokenIds CLOB asset token IDs
+     * @param closed       whether the market is marked closed/resolved on Gamma API
+     * @param rawJson      unmodified JSON object string returned by the Gamma API
+     */
+    public PolymarketMarketInfo(
+            String slug,
+            long startSec,
+            long endSec,
+            List<String> clobTokenIds,
+            boolean closed,
+            String rawJson) {
+        this(slug, "", startSec, endSec, clobTokenIds, closed, rawJson);
+    }
+
+    /**
+     * Returns the primary ("Up" / YES) conditional token ID (index 0 of {@code clobTokenIds}), or empty string if absent.
+     *
+     * @return Up/YES token ID
+     */
+    public String yesTokenId() {
+        return clobTokenIds != null && !clobTokenIds.isEmpty() ? clobTokenIds.get(0) : "";
+    }
+
+    /**
+     * Returns the complementary ("Down" / NO) conditional token ID (index 1 of {@code clobTokenIds}), or empty string if absent.
+     *
+     * @return Down/NO token ID
+     */
+    public String noTokenId() {
+        return clobTokenIds != null && clobTokenIds.size() > 1 ? clobTokenIds.get(1) : "";
+    }
 
     /**
      * Extracts the lowercase base asset prefix used in Polymarket market slugs (e.g. "BTCUSDT" -> "btc").

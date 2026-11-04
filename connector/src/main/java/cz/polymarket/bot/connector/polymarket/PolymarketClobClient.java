@@ -126,6 +126,6 @@ public class PolymarketClobClient {
                 .filter(id -> id != null && !id.isBlank())
                 .map(id -> "\"" + id.trim() + "\"")
                 .collect(Collectors.joining(","));
-        return "{\"type\":\"market\",\"assets_ids\":[" + quotedTokens + "]}";
+        return "{\"assets_ids\":[" + quotedTokens + "],\"type\":\"market\",\"custom_feature_enabled\":true}";
     }
 }

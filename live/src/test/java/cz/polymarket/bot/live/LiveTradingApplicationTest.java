@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class LiveTradingApplicationTest {
@@ -18,5 +19,18 @@ class LiveTradingApplicationTest {
                 .statusCode(200)
                 .contentType(ContentType.HTML)
                 .body(containsString("BTC-USD TWAP Console"));
+    }
+
+    @Test
+    void shouldExposeLiveTradingEngineDefaultStatus() {
+        given()
+                .when().get("/api/live/status")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("strategyName", equalTo("UtterParameciumStrategy"))
+                .body("status", equalTo("DRY_RUN"))
+                .body("dryRun", equalTo(true))
+                .body("orderType", equalTo("FAK"));
     }
 }
