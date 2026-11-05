@@ -48,6 +48,16 @@ Parameters:
     Default: subnet-0b1537e6f83a86b05
     Description: Public subnet ID in eu-west-1a for the Live Trading EC2 instance.
 
+  TelegramSecretId:
+    Type: String
+    Default: polymarket-sniper/telegram-credentials
+    Description: AWS Secrets Manager secret ID storing Telegram Bot authentication credentials (bot_token and chat_id).
+
+  TelegramAlertImageTag:
+    Type: String
+    Default: latest
+    Description: Container image tag for the Java 25 Telegram Alert Lambda function in Amazon ECR.
+
 Resources:
   LiveTradingEcrRepository:
     Type: AWS::ECR::Repository
@@ -318,8 +328,8 @@ Resources:
           cat << 'EOF' > /usr/local/bin/start-polymarket-live.sh
           #!/bin/bash
           set -euo pipefail
-          IMAGE_URI="${1:-polymarket-bot/live:latest}"
-          DRY_RUN="${2:-false}"
+          IMAGE_URI="${!1:-polymarket-bot/live:latest}"
+          DRY_RUN="${!2:-false}"
           docker rm -f polymarket-live || true
           docker run -d \
             --name polymarket-live \
@@ -343,6 +353,106 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
 
+  TelegramAlertEcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Docker container images for the Java 25 Telegram Alert Lambda function.
+        must: Keep image scanning enabled and retain repository across stack updates.
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-telegram-alert-repo"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 3 alert lambda images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 3
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  TelegramAlertRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Grants least-privilege execution permissions for the Java 25 Telegram alerting Lambda function and access to Secrets Manager.
+        must: Scope Secrets Manager access strictly to the TelegramSecretId prefix.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-telegram-secret-access"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TelegramSecretId}*"
+
+  TelegramAlertFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Decodes CloudWatch Logs error, warning, fatal, and exception events and dispatches formatted alerts to Telegram.
+        must: Run Java 25 container image from TelegramAlertEcrRepository with TELEGRAM_SECRET_ID configured.
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-telegram-alert"
+      PackageType: Image
+      Code:
+        ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${TelegramAlertEcrRepository}:${TelegramAlertImageTag}"
+      Timeout: 30
+      MemorySize: 512
+      Role: !GetAtt TelegramAlertRole.Arn
+      Environment:
+        Variables:
+          TELEGRAM_SECRET_ID: !Ref TelegramSecretId
+
+  TelegramAlertPermission:
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Authorizes CloudWatch Logs service to invoke the Telegram alert Lambda function upon pattern match.
+        must: Restrict invocation strictly to LiveTradingLogGroup.
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt TelegramAlertFunction.Arn
+      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceArn: !GetAtt LiveTradingLogGroup.Arn
+
+  TelegramAlertSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: TelegramAlertPermission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Filters Live Trading logs for WARN, ERROR, FATAL, and Java exceptions or errors, routing matching events to the alerting Lambda.
+    Properties:
+      LogGroupName: !Ref LiveTradingLogGroup
+      FilterPattern: "?WARN ?warn ?ERROR ?error ?FATAL ?fatal ?Exception ?Error"
+      DestinationArn: !GetAtt TelegramAlertFunction.Arn
+
 Outputs:
   InstanceId:
     Description: EC2 Instance ID of the Live Trading host
@@ -359,3 +469,9 @@ Outputs:
   LogGroupName:
     Description: CloudWatch Logs log group receiving Live Trading container and host logs
     Value: !Ref LiveTradingLogGroup
+  TelegramAlertEcrRepositoryUri:
+    Description: Amazon ECR Repository URI for pushing the Java 25 Telegram Alert Lambda Docker image
+    Value: !GetAtt TelegramAlertEcrRepository.RepositoryUri
+  TelegramAlertFunctionArn:
+    Description: AWS Lambda Function ARN dispatching Telegram alerts for live trading errors and warnings
+    Value: !GetAtt TelegramAlertFunction.Arn
