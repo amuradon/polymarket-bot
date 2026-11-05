@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link PolymarketSecretsResolver} and {@code quarkus-amazon-secretsmanager} JSON flattening
@@ -47,9 +48,7 @@ class PolymarketSecretsResolverTest {
                 Optional.ofNullable(flattened.get("polymarket.secrets.api_key")),
                 Optional.ofNullable(flattened.get("polymarket.secrets.passphrase")),
                 Optional.ofNullable(flattened.get("polymarket.secrets.secret")),
-                Optional.ofNullable(flattened.get("polymarket.secrets.address")),
-                Optional.empty(),
-                Optional.empty()
+                Optional.ofNullable(flattened.get("polymarket.secrets.address"))
         );
 
         PolymarketCredentials creds = resolver.resolveCredentials();
@@ -70,9 +69,7 @@ class PolymarketSecretsResolverTest {
                 Optional.of("direct-api-key"),
                 Optional.of("direct-passphrase"),
                 Optional.of("c2VjcmV0X2tleV9mb3JfdGVzdGluZ19wb2x5bWFya2V0X2htYWM="),
-                Optional.of(TEST_DEPOSIT_WALLET),
-                Optional.empty(),
-                Optional.empty()
+                Optional.of(TEST_DEPOSIT_WALLET)
         );
 
         PolymarketCredentials creds = resolver.resolveCredentials();
@@ -83,10 +80,8 @@ class PolymarketSecretsResolverTest {
     }
 
     @Test
-    void shouldHandleEmptyCredentialsWhenNotConfiguredInDryRunMode() {
+    void shouldFailImmediatelyWhenMandatoryCredentialsAreMissing() {
         PolymarketSecretsResolver resolver = new PolymarketSecretsResolver(
-                Optional.empty(),
-                Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
@@ -94,8 +89,8 @@ class PolymarketSecretsResolverTest {
                 Optional.empty()
         );
 
-        PolymarketCredentials creds = resolver.resolveCredentials();
-        assertThat(creds.hasL2Credentials()).isFalse();
-        assertThat(creds.isCompleteForTrading()).isFalse();
+        assertThatThrownBy(resolver::resolveCredentials)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("polymarket.connector.signer-key");
     }
 }

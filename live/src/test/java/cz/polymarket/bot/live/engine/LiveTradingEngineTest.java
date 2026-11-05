@@ -224,9 +224,7 @@ class LiveTradingEngineTest {
                 Optional.of("api-key-live"),
                 Optional.of("passphrase-live"),
                 Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
-                Optional.of(TEST_MAKER_ADDRESS),
-                Optional.of(TEST_MAKER_ADDRESS),
-                Optional.of(TEST_EOA_ADDRESS)
+                Optional.of(TEST_MAKER_ADDRESS)
         );
 
         HttpClient httpClient = HttpClient.newHttpClient();
@@ -239,8 +237,7 @@ class LiveTradingEngineTest {
                 Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                 Optional.of("passphrase-live"),
                 1000L,
-                10000L,
-                secretsResolver
+                10000L
         );
         PolymarketClobClient clobClient = new PolymarketClobClient(
                 vertx,

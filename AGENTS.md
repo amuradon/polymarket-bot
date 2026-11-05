@@ -52,6 +52,7 @@ When working on any Java and Quarkus code in this repository, agents **MUST ALWA
 - **Skills Usage**: Load extension skills with `quarkus_skills` prior to writing code or tests.
 - **Testing & Dev MCP Tools**: Use Quarkus Dev MCP tools (`quarkus_callTool`, `devui-testing_runTests`, etc.) rather than running ad-hoc Maven commands.
 - **No `mvn clean` in Dev Mode**: Never run `mvn clean` or `gradle clean` while dev mode is running.
+- **Always use Quarkus native logging**: Always use `io.quarkus.logging.Log` for logging
 
 ---
 

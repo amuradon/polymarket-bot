@@ -1,7 +1,5 @@
 package cz.polymarket.bot.connector.polymarket;
 
-import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
-import cz.polymarket.bot.connector.polymarket.auth.PolymarketSecretsResolver;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
@@ -27,7 +25,6 @@ public class PolymarketPolyBoltClient {
 
     private final Vertx vertx;
     private final String wsUrl;
-    private final PolymarketSecretsResolver secretsResolver;
     private volatile String apiKey;
     private volatile String secret;
     private volatile String passphrase;
@@ -47,7 +44,6 @@ public class PolymarketPolyBoltClient {
      * @param passphrase       Polymarket CLOB API passphrase required for gated PolyBolt channels
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
-     * @param secretsResolver  optional secrets resolver
      */
     @Inject
     public PolymarketPolyBoltClient(
@@ -63,38 +59,14 @@ public class PolymarketPolyBoltClient {
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
-            long pingIntervalMs,
-            PolymarketSecretsResolver secretsResolver) {
+            long pingIntervalMs) {
         this.vertx = vertx;
         this.wsUrl = wsUrl;
-        this.secretsResolver = secretsResolver;
         this.apiKey = apiKey.map(String::trim).orElse("");
         this.secret = secret.map(String::trim).orElse("");
         this.passphrase = passphrase.map(String::trim).orElse("");
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
-    }
-
-    /**
-     * Convenience constructor without {@link PolymarketSecretsResolver} for standalone unit tests.
-     *
-     * @param vertx            Vert.x runtime instance
-     * @param wsUrl            Polymarket PolyBolt v2 WebSocket endpoint URL
-     * @param apiKey           Polymarket CLOB API key
-     * @param secret           Polymarket CLOB API secret
-     * @param passphrase       Polymarket CLOB API passphrase
-     * @param reconnectDelayMs delay in milliseconds before attempting reconnection
-     * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
-     */
-    public PolymarketPolyBoltClient(
-            Vertx vertx,
-            String wsUrl,
-            Optional<String> apiKey,
-            Optional<String> secret,
-            Optional<String> passphrase,
-            long reconnectDelayMs,
-            long pingIntervalMs) {
-        this(vertx, wsUrl, apiKey, secret, passphrase, reconnectDelayMs, pingIntervalMs, null);
     }
 
     /**
@@ -211,22 +183,7 @@ public class PolymarketPolyBoltClient {
      * @return true if all three credentials are present
      */
     public boolean hasCredentials() {
-        ensureCredentialsResolved();
         return !apiKey.isEmpty() && !secret.isEmpty() && !passphrase.isEmpty();
-    }
-
-    private synchronized void ensureCredentialsResolved() {
-        if (secretsResolver == null) {
-            return;
-        }
-        if (apiKey.isEmpty() || secret.isEmpty() || passphrase.isEmpty()) {
-            PolymarketCredentials resolved = secretsResolver.resolveCredentials();
-            if (resolved.hasL2Credentials()) {
-                this.apiKey = resolved.apiKey();
-                this.secret = resolved.secret();
-                this.passphrase = resolved.passphrase();
-            }
-        }
     }
 
     private ReconnectingWebSocketStream createAuthenticatedStream(
