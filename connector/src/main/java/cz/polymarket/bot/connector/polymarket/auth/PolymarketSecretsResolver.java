@@ -19,8 +19,9 @@ import java.util.Optional;
  *       ({@code quarkus.secretsmanager.config.enabled=false}) and credentials are read from JVM arguments
  *       ({@code -Dpolymarket.connector.*=...}) or environment variables ({@code POLYMARKET_CONNECTOR_*=...}).</li>
  * </ul>
- * All 5 credentials ({@code signer-key}, {@code api-key}, {@code passphrase}, {@code secret}, {@code address})
- * are strictly mandatory; if any is missing or invalid, resolution fails immediately with an exception.
+ * All 6 credentials ({@code signer-key}, {@code api-key}, {@code passphrase}, {@code secret}, {@code address},
+ * {@code signer-address}) are strictly mandatory; if any is missing or invalid, resolution fails immediately
+ * with an exception.
  */
 @ApplicationScoped
 public class PolymarketSecretsResolver {
@@ -30,15 +31,17 @@ public class PolymarketSecretsResolver {
     private final String passphrase;
     private final String secret;
     private final String address;
+    private final String signerAddress;
 
     /**
      * CDI constructor injecting Polymarket credentials from Quarkus configuration.
      *
-     * @param signerKey  hexadecimal secp256k1 private key ({@code polymarket.connector.signer-key})
-     * @param apiKey     Polymarket CLOB L2 API key ({@code polymarket.connector.api-key})
-     * @param passphrase Polymarket CLOB L2 passphrase ({@code polymarket.connector.passphrase})
-     * @param secret     Base64-encoded Polymarket CLOB L2 HMAC secret ({@code polymarket.connector.secret})
-     * @param address    Polymarket Deposit / Maker wallet address ({@code polymarket.connector.address})
+     * @param signerKey     hexadecimal secp256k1 private key ({@code polymarket.connector.signer-key})
+     * @param apiKey        Polymarket CLOB L2 API key ({@code polymarket.connector.api-key})
+     * @param passphrase    Polymarket CLOB L2 passphrase ({@code polymarket.connector.passphrase})
+     * @param secret        Base64-encoded Polymarket CLOB L2 HMAC secret ({@code polymarket.connector.secret})
+     * @param address       Polymarket Deposit / Maker wallet address ({@code polymarket.connector.address})
+     * @param signerAddress Polymarket EOA signer address ({@code polymarket.connector.signer-address})
      */
     @Inject
     public PolymarketSecretsResolver(
@@ -51,18 +54,21 @@ public class PolymarketSecretsResolver {
             @ConfigProperty(name = "polymarket.connector.secret")
             Optional<String> secret,
             @ConfigProperty(name = "polymarket.connector.address")
-            Optional<String> address) {
+            Optional<String> address,
+            @ConfigProperty(name = "polymarket.connector.signer-address")
+            Optional<String> signerAddress) {
         this.signerKey = sanitize(signerKey);
         this.apiKey = sanitize(apiKey);
         this.passphrase = sanitize(passphrase);
         this.secret = sanitize(secret);
         this.address = sanitize(address);
+        this.signerAddress = sanitize(signerAddress);
     }
 
     /**
-     * Resolves and strictly validates the Polymarket credentials, deriving the EIP-55 EOA {@code signerAddress}
-     * from {@code signerKey}. Throws {@link IllegalStateException} or {@link IllegalArgumentException}
-     * if any credential is missing or malformed.
+     * Resolves and strictly validates all 6 Polymarket credentials from configuration without deriving
+     * {@code signerAddress} from {@code signerKey}. Throws {@link IllegalStateException} or
+     * {@link IllegalArgumentException} if any credential is missing or malformed.
      *
      * @return validated {@link PolymarketCredentials}
      */
@@ -72,10 +78,10 @@ public class PolymarketSecretsResolver {
         requireNonBlank(this.passphrase, "polymarket.connector.passphrase");
         requireNonBlank(this.secret, "polymarket.connector.secret");
         requireNonBlank(this.address, "polymarket.connector.address");
+        requireNonBlank(this.signerAddress, "polymarket.connector.signer-address");
 
-        PolymarketEip712Signer signer = new PolymarketEip712Signer(this.signerKey);
-        String derivedSignerAddress = signer.getSignerEoaAddress();
         String normalizedAddress = PolymarketEip712Signer.toEip55ChecksumAddress(this.address);
+        String normalizedSignerAddress = PolymarketEip712Signer.toEip55ChecksumAddress(this.signerAddress);
 
         return new PolymarketCredentials(
                 this.signerKey,
@@ -84,7 +90,7 @@ public class PolymarketSecretsResolver {
                 this.secret,
                 normalizedAddress,
                 normalizedAddress,
-                derivedSignerAddress
+                normalizedSignerAddress
         );
     }
 

@@ -213,7 +213,8 @@ class PolymarketClobRestClientContractTest {
                 Optional.of(TEST_API_KEY),
                 Optional.of(TEST_PASSPHRASE),
                 Optional.of(TEST_SECRET),
-                Optional.of(TEST_MAKER_ADDR)
+                Optional.of(TEST_MAKER_ADDR),
+                Optional.of(TEST_SIGNER_ADDR)
         );
         return new PolymarketClobRestClient(
                 "http://localhost:" + port,

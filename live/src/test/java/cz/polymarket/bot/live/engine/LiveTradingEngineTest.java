@@ -224,7 +224,8 @@ class LiveTradingEngineTest {
                 Optional.of("api-key-live"),
                 Optional.of("passphrase-live"),
                 Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
-                Optional.of(TEST_MAKER_ADDRESS)
+                Optional.of(TEST_MAKER_ADDRESS),
+                Optional.of(TEST_EOA_ADDRESS)
         );
 
         HttpClient httpClient = HttpClient.newHttpClient();
