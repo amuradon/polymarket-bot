@@ -209,17 +209,13 @@ class PolymarketClobRestClientContractTest {
 
     private PolymarketClobRestClient createClient(int port) {
         PolymarketSecretsResolver resolver = new PolymarketSecretsResolver(
-                new ObjectMapper(),
-                (id, stage) -> "",
-                Optional.empty(),
                 Optional.of(TEST_PRIVATE_KEY_HEX),
                 Optional.of(TEST_API_KEY),
                 Optional.of(TEST_PASSPHRASE),
                 Optional.of(TEST_SECRET),
                 Optional.of(TEST_MAKER_ADDR),
                 Optional.of(TEST_MAKER_ADDR),
-                Optional.of(TEST_SIGNER_ADDR),
-                Map.of()
+                Optional.of(TEST_SIGNER_ADDR)
         );
         return new PolymarketClobRestClient(
                 "http://localhost:" + port,

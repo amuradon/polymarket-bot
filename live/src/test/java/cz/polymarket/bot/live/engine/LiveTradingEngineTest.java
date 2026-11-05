@@ -220,9 +220,6 @@ class LiveTradingEngineTest {
     @Test
     void shouldConnectStreamsAuthenticatePolyBoltSubmitLiveFakOrdersAndSettlePositions() throws Exception {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
-                objectMapper,
-                (secretId, stage) -> "{}",
-                Optional.empty(),
                 Optional.of(TEST_PRIVATE_KEY),
                 Optional.of("api-key-live"),
                 Optional.of("passphrase-live"),

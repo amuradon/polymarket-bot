@@ -1,12 +1,12 @@
 package cz.polymarket.bot.exchange;
 
 import cz.polymarket.bot.domain.Exchange;
+import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketConnectOptions;
-import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.net.URI;
@@ -18,7 +18,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public abstract class AbstractExchangeWebSocketClient {
 
-    private static final Logger LOG = Logger.getLogger(AbstractExchangeWebSocketClient.class);
     private static final long RECONNECT_DELAY_MS = 3000L;
 
     private final Vertx vertx;
@@ -118,7 +117,7 @@ public abstract class AbstractExchangeWebSocketClient {
 
             httpClient.webSocket(options)
                     .onSuccess(ws -> {
-                        LOG.infof("[%s] WebSocket connected to %s", exchange, wsUrl);
+                        Log.infof("[%s] WebSocket connected to %s", exchange, wsUrl);
                         this.currentWebSocket = ws;
 
                         if (subscribePayload != null && !subscribePayload.isBlank()) {
@@ -128,16 +127,16 @@ public abstract class AbstractExchangeWebSocketClient {
                         ws.textMessageHandler(this::handleMessage);
                         ws.closeHandler(v -> onConnectionClosed());
                         ws.exceptionHandler(err -> {
-                            LOG.warnf("[%s] WebSocket error: %s", exchange, err.getMessage());
+                            Log.warnf("[%s] WebSocket error: %s", exchange, err.getMessage());
                             onConnectionClosed();
                         });
                     })
                     .onFailure(err -> {
-                        LOG.warnf("[%s] WebSocket connection failed: %s", exchange, err.getMessage());
+                        Log.warnf("[%s] WebSocket connection failed: %s", exchange, err.getMessage());
                         scheduleReconnect();
                     });
         } catch (Exception e) {
-            LOG.warnf("[%s] Error initiating WebSocket connection: %s", exchange, e.getMessage());
+            Log.warnf("[%s] Error initiating WebSocket connection: %s", exchange, e.getMessage());
             scheduleReconnect();
         }
     }

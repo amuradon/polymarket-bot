@@ -2,9 +2,9 @@ package cz.polymarket.bot.connector.polymarket.stream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,8 +17,6 @@ import java.util.Optional;
  */
 @ApplicationScoped
 public class PolymarketStreamParser {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketStreamParser.class);
 
     private final ObjectMapper objectMapper;
 
@@ -121,7 +119,7 @@ public class PolymarketStreamParser {
                     windowSeconds
             ));
         } catch (Exception e) {
-            LOG.debugf("Failed to parse PolyBolt frame: %s", e.getMessage());
+            Log.debugf("Failed to parse PolyBolt frame: %s", e.getMessage());
             return Collections.emptyList();
         }
     }
@@ -159,7 +157,7 @@ public class PolymarketStreamParser {
             }
             return updated ? localBook.snapshotQuote(recvTimestampMs) : Optional.empty();
         } catch (Exception e) {
-            LOG.debugf("Failed to parse CLOB WS frame: %s", e.getMessage());
+            Log.debugf("Failed to parse CLOB WS frame: %s", e.getMessage());
             return Optional.empty();
         }
     }

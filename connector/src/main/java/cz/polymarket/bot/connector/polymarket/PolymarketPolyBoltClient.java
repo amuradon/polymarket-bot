@@ -5,11 +5,11 @@ import cz.polymarket.bot.connector.polymarket.auth.PolymarketSecretsResolver;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Optional;
@@ -25,8 +25,6 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class PolymarketPolyBoltClient {
 
-    private static final Logger LOG = Logger.getLogger(PolymarketPolyBoltClient.class);
-
     private final Vertx vertx;
     private final String wsUrl;
     private final PolymarketSecretsResolver secretsResolver;
@@ -40,7 +38,7 @@ public class PolymarketPolyBoltClient {
     private volatile ReconnectingWebSocketStream cryptoPriceStream;
 
     /**
-     * CDI constructor for the Polymarket PolyBolt WebSocket client with AWS Secrets Manager fallback resolution.
+     * CDI constructor for the Polymarket PolyBolt WebSocket client.
      *
      * @param vertx            Vert.x runtime instance
      * @param wsUrl            Polymarket PolyBolt v2 WebSocket endpoint URL
@@ -49,7 +47,7 @@ public class PolymarketPolyBoltClient {
      * @param passphrase       Polymarket CLOB API passphrase required for gated PolyBolt channels
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
-     * @param secretsResolver  optional secrets resolver for AWS Secrets Manager / dynamic references
+     * @param secretsResolver  optional secrets resolver
      */
     @Inject
     public PolymarketPolyBoltClient(
@@ -208,7 +206,7 @@ public class PolymarketPolyBoltClient {
 
     /**
      * Checks whether all required Polymarket CLOB API credentials ({@code apiKey}, {@code secret}, {@code passphrase})
-     * are configured and non-blank (resolving dynamic references or AWS Secrets Manager bundle if available).
+     * are configured and non-blank.
      *
      * @return true if all three credentials are present
      */
@@ -221,11 +219,7 @@ public class PolymarketPolyBoltClient {
         if (secretsResolver == null) {
             return;
         }
-        boolean needsResolve = apiKey.isEmpty() || secret.isEmpty() || passphrase.isEmpty()
-                || apiKey.startsWith("{{resolve:")
-                || secret.startsWith("{{resolve:")
-                || passphrase.startsWith("{{resolve:");
-        if (needsResolve) {
+        if (apiKey.isEmpty() || secret.isEmpty() || passphrase.isEmpty()) {
             PolymarketCredentials resolved = secretsResolver.resolveCredentials();
             if (resolved.hasL2Credentials()) {
                 this.apiKey = resolved.apiKey();
@@ -245,7 +239,7 @@ public class PolymarketPolyBoltClient {
                     "[%s] Missing required Polymarket CLOB API credentials (POLYMARKET_API_KEY, POLYMARKET_SECRET, POLYMARKET_PASSPHRASE). All streams must be recorded; aborting startup.",
                     streamName
             );
-            LOG.error(errorMsg);
+            Log.error(errorMsg);
             throw new IllegalStateException(errorMsg);
         }
         String initialMessage = buildAuthMessage();
@@ -270,7 +264,7 @@ public class PolymarketPolyBoltClient {
                         return;
                     }
                     if (isErrorFrame(rawJson)) {
-                        LOG.warnf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
+                        Log.warnf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
                         if (isAuthRequiredError(rawJson)) {
                             ReconnectingWebSocketStream current = streamRef.get();
                             if (current != null) {

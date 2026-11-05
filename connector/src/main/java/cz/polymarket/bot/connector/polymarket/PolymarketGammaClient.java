@@ -2,10 +2,10 @@ package cz.polymarket.bot.connector.polymarket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -24,8 +24,6 @@ import java.util.Optional;
  */
 @ApplicationScoped
 public class PolymarketGammaClient {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketGammaClient.class);
 
     private final String baseUrl;
     private final HttpClient httpClient;
@@ -84,7 +82,7 @@ public class PolymarketGammaClient {
                 return parseMarketNode(root, durationSeconds);
             }
         } catch (Exception e) {
-            LOG.debugf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
+            Log.debugf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
         }
         return Optional.empty();
     }
@@ -113,7 +111,7 @@ public class PolymarketGammaClient {
                     objectMapper.writeValueAsString(item)
             ));
         } catch (Exception e) {
-            LOG.warnf("Failed to parse Gamma market node: %s", e.getMessage());
+            Log.warnf("Failed to parse Gamma market node: %s", e.getMessage());
             return Optional.empty();
         }
     }

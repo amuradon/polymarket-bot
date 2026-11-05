@@ -4,10 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketSecretsResolver;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -31,8 +31,6 @@ import java.util.Map;
  */
 @ApplicationScoped
 public class PolymarketClobRestClient {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketClobRestClient.class);
 
     private final String baseUrl;
     private final HttpClient httpClient;
@@ -71,7 +69,7 @@ public class PolymarketClobRestClient {
             byte[] bodyBytes = objectMapper.writeValueAsBytes(envelope);
             return submitRawOrderJson(bodyBytes);
         } catch (Exception e) {
-            LOG.errorf("Failed to submit CLOB order: %s", e.getMessage());
+            Log.errorf("Failed to submit CLOB order: %s", e.getMessage());
             return new ClobOrderResponse(e.getMessage(), "", "0", "0", "error", List.of(), false);
         }
     }
@@ -105,7 +103,7 @@ public class PolymarketClobRestClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                LOG.warnf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), response.body());
+                Log.warnf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), response.body());
                 return new ClobOrderResponse(
                         "HTTP " + response.statusCode() + ": " + response.body(),
                         "",
@@ -229,7 +227,7 @@ public class PolymarketClobRestClient {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             return response.statusCode() == 200;
         } catch (Exception e) {
-            LOG.debugf("CLOB GET /time keepalive failed: %s", e.getMessage());
+            Log.debugf("CLOB GET /time keepalive failed: %s", e.getMessage());
             return false;
         }
     }

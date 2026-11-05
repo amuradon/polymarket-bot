@@ -4,10 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.TradeRecord;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -27,7 +27,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @ApplicationScoped
 public class LiveTradeRepository {
 
-    private static final Logger LOG = Logger.getLogger(LiveTradeRepository.class);
     private static final String TRADES_FILENAME = "trades.jsonl";
     private static final String METRICS_FILENAME = "metrics.json";
 
@@ -89,7 +88,7 @@ public class LiveTradeRepository {
     private synchronized void initialize() {
         try {
             Files.createDirectories(dataDirectory);
-            LOG.infof("Initializing live trade storage in directory: %s", dataDirectory.toAbsolutePath());
+            Log.infof("Initializing live trade storage in directory: %s", dataDirectory.toAbsolutePath());
 
             Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
             if (Files.exists(tradesFile)) {
@@ -105,14 +104,14 @@ public class LiveTradeRepository {
                             TradeRecord record = objectMapper.readValue(line, TradeRecord.class);
                             loaded.add(record);
                         } catch (Exception e) {
-                            LOG.warnf("Skipping malformed live trade line during replay: %s (%s)", line, e.getMessage());
+                            Log.warnf("Skipping malformed live trade line during replay: %s (%s)", line, e.getMessage());
                         }
                     }
                 }
                 trades.addAll(loaded);
-                LOG.infof("Restored %d live trades from %s", trades.size(), tradesFile.toAbsolutePath());
+                Log.infof("Restored %d live trades from %s", trades.size(), tradesFile.toAbsolutePath());
             } else {
-                LOG.infof("No live trades file found at %s - starting with initial capital $%.2f",
+                Log.infof("No live trades file found at %s - starting with initial capital $%.2f",
                         tradesFile.toAbsolutePath(), initialCapital);
             }
 
@@ -124,7 +123,7 @@ public class LiveTradeRepository {
                 this.currentMetrics = metricsCalculator.calculate(trades, initialCapital);
             }
         } catch (IOException e) {
-            LOG.errorf("Failed to initialize live trade storage in %s: %s", dataDirectory, e.getMessage());
+            Log.errorf("Failed to initialize live trade storage in %s: %s", dataDirectory, e.getMessage());
             throw new RuntimeException("Could not initialize LiveTradeRepository", e);
         }
     }
@@ -151,7 +150,7 @@ public class LiveTradeRepository {
                     StandardOpenOption.APPEND,
                     StandardOpenOption.WRITE);
         } catch (IOException e) {
-            LOG.errorf("Failed to append live trade to %s: %s", tradesFile, e.getMessage());
+            Log.errorf("Failed to append live trade to %s: %s", tradesFile, e.getMessage());
             throw new RuntimeException("Failed to persist live trade to " + tradesFile, e);
         }
 
@@ -172,7 +171,7 @@ public class LiveTradeRepository {
                         StandardOpenOption.TRUNCATE_EXISTING,
                         StandardOpenOption.WRITE);
             } catch (IOException ex) {
-                LOG.warnf("Failed to write live metrics snapshot: %s", ex.getMessage());
+                Log.warnf("Failed to write live metrics snapshot: %s", ex.getMessage());
             }
         }
     }
@@ -189,7 +188,7 @@ public class LiveTradeRepository {
         try {
             Files.deleteIfExists(tradesFile);
         } catch (IOException e) {
-            LOG.warnf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
+            Log.warnf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
         }
 
         Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
@@ -200,9 +199,9 @@ public class LiveTradeRepository {
                     StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE);
         } catch (IOException e) {
-            LOG.warnf("Failed to write metrics.json during reset: %s", e.getMessage());
+            Log.warnf("Failed to write metrics.json during reset: %s", e.getMessage());
         }
-        LOG.infof("Reset live trade storage to initial capital: $%.2f", initialCapital);
+        Log.infof("Reset live trade storage to initial capital: $%.2f", initialCapital);
     }
 
     /**

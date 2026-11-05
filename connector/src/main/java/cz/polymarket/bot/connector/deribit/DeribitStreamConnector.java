@@ -3,12 +3,12 @@ package cz.polymarket.bot.connector.deribit;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import io.quarkus.logging.Log;
 import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Optional;
@@ -23,7 +23,6 @@ import java.util.function.Consumer;
 @ApplicationScoped
 public class DeribitStreamConnector {
 
-    private static final Logger LOG = Logger.getLogger(DeribitStreamConnector.class);
     private static final int AUTH_REQUEST_ID = 1;
     private static final int SUBSCRIBE_REQUEST_ID = 2;
     private static final int HEARTBEAT_REPLY_ID = 999;
@@ -128,11 +127,11 @@ public class DeribitStreamConnector {
                     "[%s] Missing required Deribit API credentials (DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET). Deribit raw trade streams require authentication; aborting startup.",
                     streamName
             );
-            LOG.error(errorMsg);
+            Log.error(errorMsg);
             throw new IllegalStateException(errorMsg);
         }
 
-        LOG.infof("[%s] Initializing authenticated Deribit raw stream (trades.%s.raw) with clientId=%s...",
+        Log.infof("[%s] Initializing authenticated Deribit raw stream (trades.%s.raw) with clientId=%s...",
                 streamName, instrument, maskKey(clientId));
 
         this.stream = new ReconnectingWebSocketStream(
@@ -155,10 +154,10 @@ public class DeribitStreamConnector {
                     // Handle authentication response
                     if (isAuthResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            LOG.errorf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
+                            Log.errorf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
                             triggerFatalError(rawJson);
                         } else {
-                            LOG.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
+                            Log.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
                             ReconnectingWebSocketStream current = this.stream;
                             if (current != null) {
                                 current.sendText(buildSubscribeMessage(instrument));
@@ -169,16 +168,16 @@ public class DeribitStreamConnector {
                     // Handle subscription response
                     if (isSubscriptionResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            LOG.errorf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
+                            Log.errorf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
                             triggerFatalError(rawJson);
                         } else {
-                            LOG.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
+                            Log.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
                         }
                         return;
                     }
                     // Handle any unexpected error response
                     if (isErrorResponse(rawJson)) {
-                        LOG.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
+                        Log.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
                         return;
                     }
                     // Forward real trade notification events ({"jsonrpc":"2.0","method":"subscription",...})
@@ -266,7 +265,7 @@ public class DeribitStreamConnector {
             try {
                 Quarkus.asyncExit(1);
             } catch (Throwable t) {
-                LOG.errorf("Error triggering Quarkus exit: %s", t.getMessage());
+                Log.errorf("Error triggering Quarkus exit: %s", t.getMessage());
             }
         }
     }

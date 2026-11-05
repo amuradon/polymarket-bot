@@ -1,12 +1,12 @@
 package cz.polymarket.bot.connector.ws;
 
+import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketConnectOptions;
-import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.List;
@@ -21,7 +21,6 @@ import java.util.function.Supplier;
  */
 public class ReconnectingWebSocketStream {
 
-    private static final Logger LOG = Logger.getLogger(ReconnectingWebSocketStream.class);
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
 
     private final Vertx vertx;
@@ -174,7 +173,7 @@ public class ReconnectingWebSocketStream {
                         }
                         this.currentWebSocket = ws;
                         this.state.set(ConnectionState.CONNECTED);
-                        LOG.infof("[%s] WebSocket connected to %s", streamName, wsUrl);
+                        Log.infof("[%s] WebSocket connected to %s", streamName, wsUrl);
 
                         ws.textMessageHandler(rawText -> {
                             long recvTs = System.currentTimeMillis();
@@ -187,12 +186,12 @@ public class ReconnectingWebSocketStream {
                         ws.pongHandler(buf -> lastMessageTimestampMs.set(System.currentTimeMillis()));
 
                         ws.closeHandler(v -> {
-                            LOG.warnf("[%s] WebSocket connection closed", streamName);
+                            Log.warnf("[%s] WebSocket connection closed", streamName);
                             onConnectionClosed(ws);
                         });
 
                         ws.exceptionHandler(err -> {
-                            LOG.warnf("[%s] WebSocket error: %s", streamName, err.getMessage());
+                            Log.warnf("[%s] WebSocket error: %s", streamName, err.getMessage());
                             onConnectionClosed(ws);
                         });
 
@@ -210,11 +209,11 @@ public class ReconnectingWebSocketStream {
                         startPingTimer();
                     })
                     .onFailure(err -> {
-                        LOG.warnf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
+                        Log.warnf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
                         scheduleReconnect();
                     });
         } catch (Exception e) {
-            LOG.warnf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
+            Log.warnf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
             scheduleReconnect();
         }
     }

@@ -29,6 +29,7 @@ import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import io.quarkus.logging.Log;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.scheduler.Scheduled;
@@ -36,7 +37,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -59,7 +59,6 @@ import java.util.concurrent.atomic.AtomicReference;
 @ApplicationScoped
 public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
-    private static final Logger LOG = Logger.getLogger(LiveTradingEngine.class);
     private static final double TAKER_FEE_RATE = 0.07;
 
     private final HourlyPriceCache priceCache;
@@ -187,7 +186,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     void onStart(@Observes StartupEvent event) {
-        LOG.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, dryRun=%s, orderType=%s)",
+        Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, dryRun=%s, orderType=%s)",
                 activeStrategy.getName(), symbol, timeframe, dryRun, orderType);
         activeStrategy.init(this);
 
@@ -198,7 +197,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 if (!dryRun) {
                     throw new IllegalStateException("Failed to resolve Polymarket credentials for live trading", e);
                 }
-                LOG.warnf("Running in dry-run mode without full Polymarket credentials: %s", e.getMessage());
+                Log.warnf("Running in dry-run mode without full Polymarket credentials: %s", e.getMessage());
             }
         }
 
@@ -208,7 +207,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     void onStop(@Observes ShutdownEvent event) {
-        LOG.info("Stopping LiveTradingEngine streams...");
+        Log.info("Stopping LiveTradingEngine streams...");
         clobWsClient.stopAll();
         polyBoltClient.stop();
     }
@@ -280,7 +279,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
         Optional<PolymarketMarketInfo> discovered = gammaClient.fetchMarketBySlug(expectedSlug, durationSeconds);
         if (discovered.isEmpty()) {
-            LOG.debugf("Market %s not yet available on Gamma API", expectedSlug);
+            Log.debugf("Market %s not yet available on Gamma API", expectedSlug);
             return Optional.empty();
         }
 
@@ -293,7 +292,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
         clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
 
-        LOG.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
+        Log.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
                 nextMarket.slug(), nextMarket.conditionId(), nextMarket.yesTokenId(), nextMarket.noTokenId());
         return Optional.of(nextMarket);
     }
@@ -395,10 +394,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             try {
                 ClobCancelResponse resp = clobRestClient.cancelOrder(clobOrderId);
                 if (!resp.isCanceled(clobOrderId)) {
-                    LOG.warnf("CLOB order %s was not canceled: %s", clobOrderId, resp.notCanceled());
+                    Log.warnf("CLOB order %s was not canceled: %s", clobOrderId, resp.notCanceled());
                 }
             } catch (Exception e) {
-                LOG.warnf("Failed to cancel CLOB order %s: %s", clobOrderId, e.getMessage());
+                Log.warnf("Failed to cancel CLOB order %s: %s", clobOrderId, e.getMessage());
             }
         }
 
@@ -423,7 +422,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
         double estimatedCostUsd = requestedPrice * requestedShares;
         if (repository.getCurrentBalance() < estimatedCostUsd) {
-            LOG.warnf("Insufficient live balance ($%.2f) for order notional $%.2f",
+            Log.warnf("Insufficient live balance ($%.2f) for order notional $%.2f",
                     repository.getCurrentBalance(), estimatedCostUsd);
             activeStrategy.onExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
@@ -443,7 +442,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
         if (!dryRun) {
             if (clobTokenId.isBlank()) {
-                LOG.warnf("Cannot submit live BUY order %s: active market token ID is not resolved", command.clientOrderId());
+                Log.warnf("Cannot submit live BUY order %s: active market token ID is not resolved", command.clientOrderId());
                 activeStrategy.onExecutionReport(new ExecutionReport(
                         command.clientOrderId(),
                         "",
@@ -473,7 +472,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     String err = (response.errorMsg() != null && !response.errorMsg().isBlank())
                             ? response.errorMsg()
                             : ("Order status: " + response.status());
-                    LOG.warnf("Live CLOB BUY order %s rejected/unfilled: %s", command.clientOrderId(), err);
+                    Log.warnf("Live CLOB BUY order %s rejected/unfilled: %s", command.clientOrderId(), err);
                     activeStrategy.onExecutionReport(new ExecutionReport(
                             command.clientOrderId(),
                             response.orderID() != null ? response.orderID() : "",
@@ -490,7 +489,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 fillPrice = avgMc > 0 ? (avgMc / 1000.0) : requestedPrice;
                 clobOrderId = response.orderID() != null ? response.orderID() : "";
             } catch (Exception e) {
-                LOG.errorf("Live CLOB BUY order %s failed: %s", command.clientOrderId(), e.getMessage());
+                Log.errorf("Live CLOB BUY order %s failed: %s", command.clientOrderId(), e.getMessage());
                 activeStrategy.onExecutionReport(new ExecutionReport(
                         command.clientOrderId(),
                         "",
@@ -546,14 +545,14 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 dryRun ? "Dry-run simulated fill" : "Matched on Polymarket CLOB"
         );
         activeStrategy.onExecutionReport(report);
-        LOG.infof("Opened live position: %s (clobOrderId=%s) %s %.2f shares @ %.4f ($%.2f, fee: $%.4f)",
+        Log.infof("Opened live position: %s (clobOrderId=%s) %s %.2f shares @ %.4f ($%.2f, fee: $%.4f)",
                 command.clientOrderId(), clobOrderId, side, filledShares, fillPrice, sizeUsd, entryFee);
     }
 
     private void executeSellOrder(OrderCommand command) {
         LivePosition pos = activePosition.get();
         if (pos == null) {
-            LOG.warnf("Ignoring SELL order %s because no active position exists", command.clientOrderId());
+            Log.warnf("Ignoring SELL order %s because no active position exists", command.clientOrderId());
             return;
         }
 
@@ -584,7 +583,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     String err = (response.errorMsg() != null && !response.errorMsg().isBlank())
                             ? response.errorMsg()
                             : ("Exit order status: " + response.status());
-                    LOG.warnf("Live CLOB SELL order %s rejected/unfilled: %s", command.clientOrderId(), err);
+                    Log.warnf("Live CLOB SELL order %s rejected/unfilled: %s", command.clientOrderId(), err);
                     activeStrategy.onExecutionReport(new ExecutionReport(
                             command.clientOrderId(),
                             response.orderID() != null ? response.orderID() : "",
@@ -600,7 +599,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 fillPrice = avgMc > 0 ? (avgMc / 1000.0) : requestedPrice;
                 clobOrderId = response.orderID() != null ? response.orderID() : "";
             } catch (Exception e) {
-                LOG.errorf("Live CLOB SELL order %s failed: %s", command.clientOrderId(), e.getMessage());
+                Log.errorf("Live CLOB SELL order %s failed: %s", command.clientOrderId(), e.getMessage());
                 activeStrategy.onExecutionReport(new ExecutionReport(
                         command.clientOrderId(),
                         "",
@@ -725,7 +724,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         repository.recordTrade(trade);
         openPositions.remove(pos);
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
-        LOG.infof("Closed live trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
+        Log.infof("Closed live trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, newBalance);
     }
 
@@ -874,7 +873,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         candleLow = 0.0;
         currentTimestampSec = 0L;
         latestQuote = null;
-        LOG.info("Reset LiveTradingEngine internal state");
+        Log.info("Reset LiveTradingEngine internal state");
     }
 
     /**
