@@ -83,7 +83,15 @@ ignore_all_files_in_gitignore: true
 # Maps the language key to the options.
 # The settings are considered only if the project is trusted (see global configuration to define trusted projects).
 # See https://oraios.github.io/serena/02-usage/050_configuration.html#language-server-specific-settings
-ls_specific_settings: {}
+ls_specific_settings:
+  java:
+    use_system_java_home: true
+    custom_jre_path: "C:/Program Files/Java/jdk-25.0.1/bin/java.exe"
+    gradle_import_enabled: false
+    runtimes:
+      - name: "JavaSE-25"
+        path: "C:/Program Files/Java/jdk-25.0.1"
+        default: true
 
 # list of workspace folder paths (LSP backend only).
 # These folders will be used to build up Serena's symbol index.
@@ -118,7 +126,8 @@ ls_additional_workspace_folders: []
 #     - "**/bin/**"
 #     - "**/obj/**"
 # Note: global ignored_paths from serena_config.yml are also applied additively.
-ignored_paths: []
+ignored_paths:
+  - "**/target/**"
 
 # whether the project is in read-only mode
 # If set to true, all editing tools will be disabled and attempts to use them will result in an error
