@@ -172,7 +172,6 @@ Resources:
                 --log-opt awslogs-region="${AWS::Region}" \
                 --log-opt awslogs-group="${LogGroupName}" \
                 --log-opt awslogs-stream="polymarket-live" \
-                --log-opt awslogs-create-stream="true" \
                 -p 443:8080 \
                 -p 8080:8080 \
                 -v /mnt/ebs/polymarket-data:/mnt/ebs/polymarket-data \
