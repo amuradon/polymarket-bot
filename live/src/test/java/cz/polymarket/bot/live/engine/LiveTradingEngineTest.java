@@ -492,6 +492,66 @@ class LiveTradingEngineTest {
                             && r.getMessage().contains("btc-updown-15m-1792743300")
                             && r.getMessage().contains("polyBoltMessages=1")
                             && r.getMessage().contains("clobWsMessages=1"));
+
+            capturedLogs.clear();
+
+            // Market 4: receives messages, then rolls over first via onPolymarketCryptoTwap60s and then via discoverAndRotateMarket
+            // Must NOT log a duplicate zero-message ERROR on the second call
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "key": "btcusd",
+                      "timestamp": 1792744200000,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "timestamp": 1792744200000,
+                        "value": 90100.0
+                      }
+                    }
+                    """, market4StartSec * 1000L);
+            engine.onRawClobFrame("""
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "timestamp": "1792744210000",
+                        "bids": [{"price": "0.54", "size": "250"}],
+                        "asks": [{"price": "0.55", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP), (market4StartSec + 10L) * 1000L);
+            // Deep-book price_change that does not alter BBO should still increment clobMarketMessageCount
+            engine.onRawClobFrame("""
+                    {
+                      "event_type": "price_change",
+                      "price_changes": [
+                        {"asset_id": "%s", "price": "0.10", "size": "500", "side": "BUY", "best_bid": "0.54", "best_ask": "0.55"}
+                      ]
+                    }
+                    """.formatted(TEST_TOKEN_UP), (market4StartSec + 11L) * 1000L);
+            assertThat(engine.getClobMarketMessageCount()).isEqualTo(2L);
+
+            capturedLogs.clear();
+
+            long market5StartSec = 1792745100L;
+            // 1. Candle boundary reached on PolyBolt 60s TWAP stream first
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "key": "btcusd",
+                      "timestamp": 1792745100000,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "timestamp": 1792745100000,
+                        "value": 90200.0
+                      }
+                    }
+                    """, market5StartSec * 1000L);
+            // 2. Scheduled market discovery rotates market 1 second later
+            engine.discoverAndRotateMarket(market5StartSec + 1L);
+
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
         } finally {
             if (engine != null) {
                 engine.onStop(null);

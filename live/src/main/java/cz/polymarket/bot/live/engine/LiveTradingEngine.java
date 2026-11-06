@@ -279,7 +279,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * @param nowEpochSec current epoch timestamp in seconds
      * @return discovered {@link PolymarketMarketInfo} if found
      */
-    public synchronized Optional<PolymarketMarketInfo> discoverAndRotateMarket(long nowEpochSec) {
+    public Optional<PolymarketMarketInfo> discoverAndRotateMarket(long nowEpochSec) {
         long cycleStartSec = PolymarketMarketInfo.alignCycleStart(nowEpochSec, durationSeconds);
         String expectedSlug = PolymarketMarketInfo.buildMarketSlug(symbol, timeframe, cycleStartSec);
 
@@ -297,16 +297,21 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         }
 
         PolymarketMarketInfo nextMarket = discovered.get();
-        if (current != null && !current.slug().equals(nextMarket.slug())) {
-            evaluateCompletedMarketStreamActivity(current.slug(), current.startSec());
-            clobWsClient.closeMarketStream(current.slug());
-        }
+        synchronized (this) {
+            PolymarketMarketInfo latestCurrent = activeMarketInfo.get();
+            if (latestCurrent != null && nextMarket.slug().equals(latestCurrent.slug())) {
+                return Optional.of(latestCurrent);
+            }
+            if (latestCurrent != null && !latestCurrent.slug().equals(nextMarket.slug())) {
+                evaluateCompletedMarketStreamActivity(latestCurrent.slug(), latestCurrent.startSec());
+                clobWsClient.closeMarketStream(latestCurrent.slug());
+            }
 
-        activeMarketInfo.set(nextMarket);
-        activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
-        polyBoltMarketMsgCount.set(0L);
-        clobMarketMsgCount.set(0L);
-        clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
+            activeMarketInfo.set(nextMarket);
+            activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
+            this.latestQuote = null;
+            clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
+        }
 
         Log.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
                 nextMarket.slug(), nextMarket.conditionId(), nextMarket.yesTokenId(), nextMarket.noTokenId());
@@ -314,7 +319,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private void evaluateCompletedMarketStreamActivity(String marketLabel, long marketStartSec) {
-        if (marketStartSec > 0L && !lastEvaluatedMarketCycleStart.compareAndSet(lastEvaluatedMarketCycleStart.get(), marketStartSec)) {
+        if (marketStartSec > 0L && lastEvaluatedMarketCycleStart.getAndSet(marketStartSec) == marketStartSec) {
             return;
         }
         long polyBoltCount = polyBoltMarketMsgCount.getAndSet(0L);
@@ -398,18 +403,30 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                             debugCount, marketTotal, bbo.bestBidUp(), bbo.bestAskUp(), bbo.bestBidDown(), bbo.bestAskDown());
                 }
             }
-            onOrderBookQuote(new OrderBookQuote(
-                    bbo.bestAskUp(),
-                    bbo.bestBidUp(),
-                    bbo.bestAskDown(),
-                    bbo.bestBidDown(),
-                    bbo.askSizeUp(),
-                    bbo.askSizeDown(),
-                    bbo.midUp(),
-                    bbo.midDown(),
-                    bbo.timestampMs()
-            ));
+            OrderBookQuote prevQuote = this.latestQuote;
+            if (prevQuote == null || !isSameBbo(prevQuote, bbo)) {
+                onOrderBookQuote(new OrderBookQuote(
+                        bbo.bestAskUp(),
+                        bbo.bestBidUp(),
+                        bbo.bestAskDown(),
+                        bbo.bestBidDown(),
+                        bbo.askSizeUp(),
+                        bbo.askSizeDown(),
+                        bbo.midUp(),
+                        bbo.midDown(),
+                        bbo.timestampMs()
+                ));
+            }
         }
+    }
+
+    private static boolean isSameBbo(OrderBookQuote prev, PolymarketBboQuote next) {
+        return Double.compare(prev.bestAskUp(), next.bestAskUp()) == 0
+                && Double.compare(prev.bestBidUp(), next.bestBidUp()) == 0
+                && Double.compare(prev.bestAskDown(), next.bestAskDown()) == 0
+                && Double.compare(prev.bestBidDown(), next.bestBidDown()) == 0
+                && Double.compare(prev.depth1cUp(), next.askSizeUp()) == 0
+                && Double.compare(prev.depth1cDown(), next.askSizeDown()) == 0;
     }
 
     @Override

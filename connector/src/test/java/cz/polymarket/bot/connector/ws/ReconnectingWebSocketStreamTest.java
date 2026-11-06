@@ -142,4 +142,61 @@ class ReconnectingWebSocketStreamTest {
         stream.stop();
         assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
     }
+
+    @Test
+    void shouldDeliverBurstOfMessagesInOrderOffEventLoopEvenWithSlowConsumerListener() throws Exception {
+        int burstSize = 500;
+        List<Integer> deliveredIndices = new CopyOnWriteArrayList<>();
+        AtomicBoolean ranOnEventLoop = new AtomicBoolean(false);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    for (int i = 0; i < burstSize; i++) {
+                        ws.writeTextMessage("{\"seq\":" + i + ",\"padding\":\"" + "x".repeat(256) + "\"}");
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/burst-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "BURST-TEST-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> {
+                    if (io.vertx.core.Context.isOnEventLoopThread()) {
+                        ranOnEventLoop.set(true);
+                    }
+                    int startIdx = rawJson.indexOf("\"seq\":") + 6;
+                    int endIdx = rawJson.indexOf(',', startIdx);
+                    int seq = Integer.parseInt(rawJson.substring(startIdx, endIdx));
+                    if (seq == 0) {
+                        try {
+                            Thread.sleep(25L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    deliveredIndices.add(seq);
+                },
+                1000L,
+                0L
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(deliveredIndices).hasSize(burstSize));
+
+        assertThat(ranOnEventLoop.get()).isFalse();
+        for (int i = 0; i < burstSize; i++) {
+            assertThat(deliveredIndices.get(i)).isEqualTo(i);
+        }
+        assertThat(stream.getReconnectCount()).isZero();
+
+        stream.stop();
+        assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
+    }
 }

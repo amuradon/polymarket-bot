@@ -1,25 +1,32 @@
 package cz.polymarket.bot.connector.polymarket.stream;
 
-import java.util.NavigableMap;
+import java.util.Arrays;
 import java.util.Optional;
-import java.util.TreeMap;
 
 /**
  * Stateful in-memory L2 orderbook tracker for a binary Polymarket market (Up / YES token and Down / NO token).
  * <p>
  * Processes full {@code book} snapshots, incremental {@code price_change} level updates, and
- * {@code best_bid_ask} top-of-book updates, producing normalized {@link PolymarketBboQuote} snapshots.
+ * {@code best_bid_ask} top-of-book updates using zero-allocation primitive millicent arrays ({@code 1..999}),
+ * producing normalized {@link PolymarketBboQuote} snapshots without boxing or {@code TreeMap} churn.
  */
 public class PolymarketLocalBook {
+
+    private static final int BOOK_LEVELS = 1000;
 
     private final String yesTokenId;
     private final String noTokenId;
 
-    // Keyed by price in millicents (1..999, where 540 = $0.540), value = size in shares
-    private final NavigableMap<Integer, Double> yesBids = new TreeMap<>();
-    private final NavigableMap<Integer, Double> yesAsks = new TreeMap<>();
-    private final NavigableMap<Integer, Double> noBids = new TreeMap<>();
-    private final NavigableMap<Integer, Double> noAsks = new TreeMap<>();
+    // Indexed by price in millicents (1..999, where 540 = $0.540), value = size in shares
+    private final double[] yesBids = new double[BOOK_LEVELS];
+    private final double[] yesAsks = new double[BOOK_LEVELS];
+    private final double[] noBids = new double[BOOK_LEVELS];
+    private final double[] noAsks = new double[BOOK_LEVELS];
+
+    private int bestYesBidMc = 0;
+    private int bestYesAskMc = BOOK_LEVELS;
+    private int bestNoBidMc = 0;
+    private int bestNoAskMc = BOOK_LEVELS;
 
     /**
      * Constructs a local orderbook tracker for the given Up ({@code yesTokenId}) and Down ({@code noTokenId}) tokens.
@@ -57,11 +64,15 @@ public class PolymarketLocalBook {
      */
     public synchronized void clearAssetBook(String assetId) {
         if (isNoAsset(assetId)) {
-            noBids.clear();
-            noAsks.clear();
+            Arrays.fill(noBids, 0.0);
+            Arrays.fill(noAsks, 0.0);
+            bestNoBidMc = 0;
+            bestNoAskMc = BOOK_LEVELS;
         } else if (isYesAsset(assetId)) {
-            yesBids.clear();
-            yesAsks.clear();
+            Arrays.fill(yesBids, 0.0);
+            Arrays.fill(yesAsks, 0.0);
+            bestYesBidMc = 0;
+            bestYesAskMc = BOOK_LEVELS;
         }
     }
 
@@ -76,17 +87,21 @@ public class PolymarketLocalBook {
      */
     public synchronized void updateLevel(String assetId, boolean isBid, double price, double size) {
         int priceMc = toPriceMc(price);
-        if (priceMc <= 0 || priceMc >= 1000) {
+        if (priceMc <= 0 || priceMc >= BOOK_LEVELS) {
             return;
         }
-        NavigableMap<Integer, Double> targetMap = selectMap(assetId, isBid);
-        if (targetMap == null) {
-            return;
-        }
-        if (size <= 1e-9 || !Double.isFinite(size)) {
-            targetMap.remove(priceMc);
-        } else {
-            targetMap.put(priceMc, size);
+        if (isNoAsset(assetId)) {
+            if (isBid) {
+                bestNoBidMc = applyBidLevel(noBids, bestNoBidMc, priceMc, size);
+            } else {
+                bestNoAskMc = applyAskLevel(noAsks, bestNoAskMc, priceMc, size);
+            }
+        } else if (isYesAsset(assetId)) {
+            if (isBid) {
+                bestYesBidMc = applyBidLevel(yesBids, bestYesBidMc, priceMc, size);
+            } else {
+                bestYesAskMc = applyAskLevel(yesAsks, bestYesAskMc, priceMc, size);
+            }
         }
     }
 
@@ -98,20 +113,22 @@ public class PolymarketLocalBook {
      * @param bestAsk best ask price in {@code (0.0, 1.0)}
      */
     public synchronized void applyBestBidAsk(String assetId, double bestBid, double bestAsk) {
-        NavigableMap<Integer, Double> bids = selectMap(assetId, true);
-        NavigableMap<Integer, Double> asks = selectMap(assetId, false);
-        if (bids == null || asks == null) {
-            return;
-        }
         int bidMc = toPriceMc(bestBid);
         int askMc = toPriceMc(bestAsk);
-        if (bidMc > 0 && bidMc < 1000) {
-            bids.tailMap(bidMc, false).clear();
-            bids.putIfAbsent(bidMc, 100.0);
-        }
-        if (askMc > 0 && askMc < 1000) {
-            asks.headMap(askMc, false).clear();
-            asks.putIfAbsent(askMc, 100.0);
+        if (isNoAsset(assetId)) {
+            if (bidMc > 0 && bidMc < BOOK_LEVELS) {
+                bestNoBidMc = pruneAndSetBestBid(noBids, bestNoBidMc, bidMc);
+            }
+            if (askMc > 0 && askMc < BOOK_LEVELS) {
+                bestNoAskMc = pruneAndSetBestAsk(noAsks, bestNoAskMc, askMc);
+            }
+        } else if (isYesAsset(assetId)) {
+            if (bidMc > 0 && bidMc < BOOK_LEVELS) {
+                bestYesBidMc = pruneAndSetBestBid(yesBids, bestYesBidMc, bidMc);
+            }
+            if (askMc > 0 && askMc < BOOK_LEVELS) {
+                bestYesAskMc = pruneAndSetBestAsk(yesAsks, bestYesAskMc, askMc);
+            }
         }
     }
 
@@ -124,13 +141,8 @@ public class PolymarketLocalBook {
      * @return current {@link PolymarketBboQuote} if available
      */
     public synchronized Optional<PolymarketBboQuote> snapshotQuote(long timestampMs) {
-        var bestYesBidEntry = yesBids.lastEntry();
-        var bestYesAskEntry = yesAsks.firstEntry();
-        var bestNoBidEntry = noBids.lastEntry();
-        var bestNoAskEntry = noAsks.firstEntry();
-
-        boolean hasYes = bestYesBidEntry != null && bestYesAskEntry != null;
-        boolean hasNo = bestNoBidEntry != null && bestNoAskEntry != null;
+        boolean hasYes = bestYesBidMc > 0 && bestYesAskMc < BOOK_LEVELS;
+        boolean hasNo = bestNoBidMc > 0 && bestNoAskMc < BOOK_LEVELS;
         if (!hasYes && !hasNo) {
             return Optional.empty();
         }
@@ -143,23 +155,23 @@ public class PolymarketLocalBook {
         double askSizeDown;
 
         if (hasYes) {
-            bestBidUp = bestYesBidEntry.getKey() / 1000.0;
-            bestAskUp = bestYesAskEntry.getKey() / 1000.0;
-            askSizeUp = bestYesAskEntry.getValue();
+            bestBidUp = bestYesBidMc / 1000.0;
+            bestAskUp = bestYesAskMc / 1000.0;
+            askSizeUp = yesAsks[bestYesAskMc];
         } else {
-            bestBidUp = Math.max(0.001, (1000 - bestNoAskEntry.getKey()) / 1000.0);
-            bestAskUp = Math.min(0.999, (1000 - bestNoBidEntry.getKey()) / 1000.0);
-            askSizeUp = bestNoBidEntry.getValue();
+            bestBidUp = Math.max(0.001, (BOOK_LEVELS - bestNoAskMc) / 1000.0);
+            bestAskUp = Math.min(0.999, (BOOK_LEVELS - bestNoBidMc) / 1000.0);
+            askSizeUp = noBids[bestNoBidMc];
         }
 
         if (hasNo) {
-            bestBidDown = bestNoBidEntry.getKey() / 1000.0;
-            bestAskDown = bestNoAskEntry.getKey() / 1000.0;
-            askSizeDown = bestNoAskEntry.getValue();
+            bestBidDown = bestNoBidMc / 1000.0;
+            bestAskDown = bestNoAskMc / 1000.0;
+            askSizeDown = noAsks[bestNoAskMc];
         } else {
-            bestBidDown = Math.max(0.001, (1000 - bestYesAskEntry.getKey()) / 1000.0);
-            bestAskDown = Math.min(0.999, (1000 - bestYesBidEntry.getKey()) / 1000.0);
-            askSizeDown = bestYesBidEntry.getValue();
+            bestBidDown = Math.max(0.001, (BOOK_LEVELS - bestYesAskMc) / 1000.0);
+            bestAskDown = Math.min(0.999, (BOOK_LEVELS - bestYesBidMc) / 1000.0);
+            askSizeDown = yesBids[bestYesBidMc];
         }
 
         double midUp = (bestBidUp + bestAskUp) * 0.5;
@@ -178,14 +190,60 @@ public class PolymarketLocalBook {
         ));
     }
 
-    private NavigableMap<Integer, Double> selectMap(String assetId, boolean isBid) {
-        if (isNoAsset(assetId)) {
-            return isBid ? noBids : noAsks;
+    private static int applyBidLevel(double[] bids, int currentBestBidMc, int priceMc, double size) {
+        if (size <= 1e-9 || !Double.isFinite(size)) {
+            bids[priceMc] = 0.0;
+            if (priceMc == currentBestBidMc) {
+                for (int p = priceMc - 1; p >= 1; p--) {
+                    if (bids[p] > 0.0) {
+                        return p;
+                    }
+                }
+                return 0;
+            }
+            return currentBestBidMc;
         }
-        if (isYesAsset(assetId)) {
-            return isBid ? yesBids : yesAsks;
+        bids[priceMc] = size;
+        return Math.max(currentBestBidMc, priceMc);
+    }
+
+    private static int applyAskLevel(double[] asks, int currentBestAskMc, int priceMc, double size) {
+        if (size <= 1e-9 || !Double.isFinite(size)) {
+            asks[priceMc] = 0.0;
+            if (priceMc == currentBestAskMc) {
+                for (int p = priceMc + 1; p < BOOK_LEVELS; p++) {
+                    if (asks[p] > 0.0) {
+                        return p;
+                    }
+                }
+                return BOOK_LEVELS;
+            }
+            return currentBestAskMc;
         }
-        return null;
+        asks[priceMc] = size;
+        return Math.min(currentBestAskMc, priceMc);
+    }
+
+    private static int pruneAndSetBestBid(double[] bids, int currentBestBidMc, int bidMc) {
+        int upper = Math.min(BOOK_LEVELS - 1, Math.max(currentBestBidMc, bidMc));
+        for (int p = bidMc + 1; p <= upper; p++) {
+            bids[p] = 0.0;
+        }
+        if (bids[bidMc] <= 0.0) {
+            bids[bidMc] = 100.0;
+        }
+        return bidMc;
+    }
+
+    private static int pruneAndSetBestAsk(double[] asks, int currentBestAskMc, int askMc) {
+        int lower = Math.max(1, Math.min(currentBestAskMc, askMc));
+        for (int p = lower; p < askMc; p++) {
+            asks[p] = 0.0;
+        }
+        if (asks[askMc] <= 0.0) {
+            asks[askMc] = 100.0;
+        }
+        return askMc;
     }
 
     private boolean isYesAsset(String assetId) {

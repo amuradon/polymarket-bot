@@ -10,6 +10,7 @@ import io.vertx.core.http.WebSocketConnectOptions;
 
 import java.net.URI;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -17,12 +18,18 @@ import java.util.function.Supplier;
 
 /**
  * Resilient, non-blocking Vert.x WebSocket stream client with connection state monitoring,
- * periodic ping frames, automatic reconnection on disconnect or failure, and immediate local timestamping.
+ * periodic ping frames, automatic reconnection on disconnect or failure, immediate local timestamping,
+ * and lock-free asynchronous message draining off the Netty I/O event loop.
  */
 public class ReconnectingWebSocketStream {
 
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
+    private static final int SOCKET_RECEIVE_BUFFER_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_HEARTBEAT_FRAME_LENGTH = 64;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 500L;
+
+    private record QueuedFrame(String rawText, long recvTs) {
+    }
 
     private final Vertx vertx;
     private final String streamName;
@@ -34,6 +41,8 @@ public class ReconnectingWebSocketStream {
     private final String textPingPayload;
     private final HttpClient httpClient;
 
+    private final ConcurrentLinkedQueue<QueuedFrame> inboundQueue = new ConcurrentLinkedQueue<>();
+    private final AtomicBoolean draining = new AtomicBoolean(false);
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
@@ -98,6 +107,7 @@ public class ReconnectingWebSocketStream {
                 .setSsl(wsUrl.toLowerCase().startsWith("wss"))
                 .setTcpNoDelay(true)
                 .setKeepAlive(true)
+                .setReceiveBufferSize(SOCKET_RECEIVE_BUFFER_BYTES)
                 .setMaxWebSocketFrameSize(MAX_FRAME_SIZE_BYTES)
                 .setMaxWebSocketMessageSize(MAX_FRAME_SIZE_BYTES * 4);
         this.httpClient = vertx.createHttpClient(options);
@@ -118,6 +128,7 @@ public class ReconnectingWebSocketStream {
      */
     public void stop() {
         running.set(false);
+        inboundQueue.clear();
         cancelPingTimer();
         state.set(ConnectionState.DISCONNECTED);
         WebSocket ws = this.currentWebSocket;
@@ -198,8 +209,10 @@ public class ReconnectingWebSocketStream {
 
             httpClient.webSocket(connectOptions)
                     .onSuccess(ws -> {
-                        if (!running.get()) {
-                            ws.close();
+                        if (!running.get() || ws.isClosed()) {
+                            if (!ws.isClosed()) {
+                                ws.close();
+                            }
                             return;
                         }
                         this.currentWebSocket = ws;
@@ -210,15 +223,11 @@ public class ReconnectingWebSocketStream {
                         ws.textMessageHandler(rawText -> {
                             long recvTs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(recvTs);
-                            if (rawText != null) {
-                                String trimmed = rawText.trim();
-                                if ("PONG".equalsIgnoreCase(trimmed) || "PING".equalsIgnoreCase(trimmed)
-                                        || trimmed.contains("\"op\":\"pong\"") || trimmed.contains("\"op\": \"pong\"")) {
-                                    if (Log.isTraceEnabled()) {
-                                        Log.tracef("[%s] Received WebSocket text heartbeat: %s", streamName, trimmed);
-                                    }
-                                    return;
+                            if (isHeartbeatFrame(rawText)) {
+                                if (Log.isTraceEnabled()) {
+                                    Log.tracef("[%s] Received WebSocket text heartbeat: %s", streamName, rawText.trim());
                                 }
+                                return;
                             }
                             if (Log.isTraceEnabled()) {
                                 Log.tracef("[%s] Received WebSocket text frame at %d ms: %s", streamName, recvTs, rawText);
@@ -230,8 +239,9 @@ public class ReconnectingWebSocketStream {
                                             streamName, count, recvTs);
                                 }
                             }
-                            if (messageListener != null) {
-                                messageListener.onMessage(rawText, recvTs);
+                            if (messageListener != null && rawText != null) {
+                                inboundQueue.offer(new QueuedFrame(rawText, recvTs));
+                                scheduleDrainIfNeeded();
                             }
                         });
 
@@ -335,5 +345,50 @@ public class ReconnectingWebSocketStream {
                 connect();
             }
         });
+    }
+
+    private void scheduleDrainIfNeeded() {
+        if (draining.compareAndSet(false, true)) {
+            Thread.ofVirtual()
+                    .name("ws-drain-" + streamName)
+                    .start(this::drainInboundQueue);
+        }
+    }
+
+    private void drainInboundQueue() {
+        try {
+            while (running.get()) {
+                QueuedFrame frame;
+                while ((frame = inboundQueue.poll()) != null) {
+                    if (!running.get()) {
+                        inboundQueue.clear();
+                        return;
+                    }
+                    try {
+                        messageListener.onMessage(frame.rawText(), frame.recvTs());
+                    } catch (Exception e) {
+                        Log.errorf("[%s] Unhandled exception in WebSocket message listener: %s",
+                                streamName, e.getMessage());
+                    }
+                }
+                draining.set(false);
+                if (inboundQueue.isEmpty() || !draining.compareAndSet(false, true)) {
+                    return;
+                }
+            }
+        } finally {
+            draining.set(false);
+        }
+    }
+
+    static boolean isHeartbeatFrame(String rawText) {
+        if (rawText == null || rawText.length() > MAX_HEARTBEAT_FRAME_LENGTH) {
+            return false;
+        }
+        String trimmed = rawText.trim();
+        return "PONG".equalsIgnoreCase(trimmed)
+                || "PING".equalsIgnoreCase(trimmed)
+                || trimmed.contains("\"op\":\"pong\"")
+                || trimmed.contains("\"op\": \"pong\"");
     }
 }

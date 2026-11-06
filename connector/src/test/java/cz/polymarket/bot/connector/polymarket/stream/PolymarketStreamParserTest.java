@@ -119,5 +119,65 @@ class PolymarketStreamParserTest {
         assertThat(quote2).isPresent();
         assertThat(quote2.get().bestAskUp()).isCloseTo(0.55, within(1e-6));
         assertThat(quote2.get().askSizeUp()).isCloseTo(150.0, within(1e-6));
+
+        // Apply price_change with embedded best_bid and best_ask fields and best_bid_ask event
+        String priceChangeWithBboFrame = """
+                {
+                  "market": "0xcond1",
+                  "price_changes": [
+                    {
+                      "asset_id": "token_up_1",
+                      "price": "0.10",
+                      "size": "500",
+                      "side": "BUY",
+                      "hash": "0xhash1",
+                      "best_bid": "0.54",
+                      "best_ask": "0.55"
+                    },
+                    {
+                      "asset_id": "token_down_1",
+                      "price": "0.45",
+                      "size": "180",
+                      "side": "BUY",
+                      "hash": "0xhash2",
+                      "best_bid": "0.45",
+                      "best_ask": "0.46"
+                    }
+                  ],
+                  "timestamp": "1792741507000",
+                  "event_type": "price_change"
+                }
+                """;
+        Optional<PolymarketBboQuote> quote3 = parser.applyClobFrame(priceChangeWithBboFrame, 1792741507000L, localBook);
+        assertThat(quote3).isPresent();
+        assertThat(quote3.get().bestBidUp()).isCloseTo(0.54, within(1e-6));
+        assertThat(quote3.get().bestAskUp()).isCloseTo(0.55, within(1e-6));
+        assertThat(quote3.get().bestBidDown()).isCloseTo(0.45, within(1e-6));
+        assertThat(quote3.get().bestAskDown()).isCloseTo(0.46, within(1e-6));
+
+        String bestBidAskFrame = """
+                {
+                  "event_type": "best_bid_ask",
+                  "asset_id": "token_up_1",
+                  "best_bid": "0.55",
+                  "best_ask": "0.56",
+                  "timestamp": "1792741508000"
+                }
+                """;
+        Optional<PolymarketBboQuote> quote4 = parser.applyClobFrame(bestBidAskFrame, 1792741508000L, localBook);
+        assertThat(quote4).isPresent();
+        assertThat(quote4.get().bestBidUp()).isCloseTo(0.55, within(1e-6));
+        assertThat(quote4.get().bestAskUp()).isCloseTo(0.56, within(1e-6));
+
+        // Ignored event_type (last_trade_price) returns Optional.empty() quickly
+        String tradeFrame = """
+                {
+                  "event_type": "last_trade_price",
+                  "asset_id": "token_up_1",
+                  "price": "0.56",
+                  "size": "25"
+                }
+                """;
+        assertThat(parser.applyClobFrame(tradeFrame, 1792741509000L, localBook)).isEmpty();
     }
 }
