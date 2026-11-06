@@ -15,14 +15,14 @@ flowchart TD
     subgraph LiveTrading["Live Trading Application"]
         LT_Base["1. infra/live-trading-base.yaml<br/>(ECR Repo, LogGroup, IAM Role, EBS, SG: 443 from 178.17.13.13/32)"]
         LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8g.large EC2 Host, Nitro EBS Mount, Docker awslogs)"]
-        LT_Script["3. scripts/deploy-live.ps1 / .sh<br/>(Maven Release, Buildx ARM64, ECR Push, SSM Deploy)"]
+        LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Maven Release, Buildx ARM64, ECR Push, SSM Deploy)"]
         LT_Base --> LT_EC2
         LT_EC2 --> LT_Script
     end
 
     subgraph TelegramAlert["Telegram Alert Lambda"]
         TA_Base["1. infra/telegram-alert-base.yaml<br/>(ECR Repo, Lambda IAM Role)"]
-        TA_Script["2. infra/telegram_alert/deploy-telegram-alert.ps1 / .sh<br/>(Maven Release, Docker Build, ECR Push)"]
+        TA_Script["2. infra/deploy-telegram-alert.ps1 / .sh<br/>(Maven Release, Docker Build, ECR Push)"]
         TA_Lambda["3. infra/telegram-alert-lambda.yaml<br/>(Lambda Function, Permission, CloudWatch Filter)"]
         TA_Base --> TA_Script
         TA_Script --> TA_Lambda
@@ -102,25 +102,25 @@ Executes Maven release, builds multi-arch `linux/arm64` container image via Dock
 #### Windows 11 (PowerShell) - Primary:
 ```powershell
 # Option A: Automatic patch version increment (e.g. 1.0.0-SNAPSHOT -> 1.0.0 -> 1.0.1-SNAPSHOT):
-.\scripts\deploy-live.ps1
+.\infra\deploy-live.ps1
 
 # Option B: Explicit SemVer release version:
-.\scripts\deploy-live.ps1 -Version "1.1.0"
+.\infra\deploy-live.ps1 -Version "1.1.0"
 
 # Option C: Deploy in dry-run mode (virtual order execution against real Polymarket CLOB):
-.\scripts\deploy-live.ps1 -DryRun
+.\infra\deploy-live.ps1 -DryRun
 ```
 
 #### Linux / macOS (Bash) - Alternative:
 ```bash
 # Option A: Automatic patch version increment:
-./scripts/deploy-live.sh
+./infra/deploy-live.sh
 
 # Option B: Explicit SemVer release version:
-./scripts/deploy-live.sh -v 1.1.0
+./infra/deploy-live.sh -v 1.1.0
 
 # Option C: Deploy in dry-run mode:
-./scripts/deploy-live.sh --dry-run
+./infra/deploy-live.sh --dry-run
 ```
 
 ---
@@ -156,19 +156,19 @@ Executes Maven release in `infra/telegram_alert`, packages the Java 25 shaded ja
 #### Windows 11 (PowerShell) - Primary:
 ```powershell
 # Option A: Automatic patch version increment:
-.\infra\telegram_alert\deploy-telegram-alert.ps1
+.\infra\deploy-telegram-alert.ps1
 
 # Option B: Explicit SemVer release version:
-.\infra\telegram_alert\deploy-telegram-alert.ps1 -Version "1.0.1"
+.\infra\deploy-telegram-alert.ps1 -Version "1.0.1"
 ```
 
 #### Linux / macOS (Bash) - Alternative:
 ```bash
 # Option A: Automatic patch version increment:
-./infra/telegram_alert/deploy-telegram-alert.sh
+./infra/deploy-telegram-alert.sh
 
 # Option B: Explicit SemVer release version:
-./infra/telegram_alert/deploy-telegram-alert.sh -v 1.0.1
+./infra/deploy-telegram-alert.sh -v 1.0.1
 ```
 
 ---
@@ -210,10 +210,10 @@ Once base infrastructure is provisioned, you **never** need to recreate EC2 inst
 Simply run the deployment script:
 ```powershell
 # Windows 11:
-.\scripts\deploy-live.ps1 -Version "1.1.1"
+.\infra\deploy-live.ps1 -Version "1.1.1"
 
 # Linux:
-./scripts/deploy-live.sh -v 1.1.1
+./infra/deploy-live.sh -v 1.1.1
 ```
 The script performs the Maven release, builds and pushes the new `linux/arm64` image to ECR, and instructs the running EC2 instance via AWS SSM to pull the new image and restart the container within seconds—without downtime of the underlying server.
 
@@ -221,10 +221,10 @@ The script performs the Maven release, builds and pushes the new `linux/arm64` i
 Simply run the alert deployment script:
 ```powershell
 # Windows 11:
-.\infra\telegram_alert\deploy-telegram-alert.ps1 -Version "1.0.2"
+.\infra\deploy-telegram-alert.ps1 -Version "1.0.2"
 
 # Linux:
-./infra/telegram_alert/deploy-telegram-alert.sh -v 1.0.2
+./infra/deploy-telegram-alert.sh -v 1.0.2
 ```
 If the Lambda function is already deployed, the script automatically updates the function code via `aws lambda update-function-code`.
 

@@ -9,6 +9,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ALERT_MODULE_DIR="${SCRIPT_DIR}/telegram_alert"
+if [ ! -d "${ALERT_MODULE_DIR}" ]; then
+    ALERT_MODULE_DIR="${SCRIPT_DIR}"
+fi
 REGION="eu-west-1"
 BASE_STACK_NAME="polymarket-bot-alert-base"
 FUNCTION_NAME="polymarket-bot-alert-lambda-function"
@@ -83,7 +87,7 @@ echo "=========================================================="
 RELEASE_VERSION=""
 if [ "$SKIP_RELEASE" = false ]; then
     echo "[1/5] Executing Maven release..."
-    pushd "$SCRIPT_DIR" > /dev/null
+    pushd "$ALERT_MODULE_DIR" > /dev/null
     if [ -n "$VERSION" ]; then
         if ! [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
             echo "Error: Version must be in format x.y.z (SemVer), e.g. 1.0.1" >&2
@@ -116,7 +120,7 @@ else
     if [ -n "$VERSION" ]; then
         RELEASE_VERSION="$VERSION"
     else
-        RAW_VER=$(grep -m1 '<version>' "${SCRIPT_DIR}/pom.xml" | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
+        RAW_VER=$(grep -m1 '<version>' "${ALERT_MODULE_DIR}/pom.xml" | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
         RELEASE_VERSION="${RAW_VER%-SNAPSHOT}"
     fi
     echo "      Target image version tag: ${RELEASE_VERSION}"
@@ -125,7 +129,7 @@ fi
 # 2. Package shaded jar via Maven
 if [ "$SKIP_BUILD" = false ]; then
     echo "[2/5] Packaging shaded uber-jar via Maven..."
-    pushd "$SCRIPT_DIR" > /dev/null
+    pushd "$ALERT_MODULE_DIR" > /dev/null
     mvn clean package -DskipTests
     popd > /dev/null
 else
@@ -158,7 +162,7 @@ echo "[5/5] Building and pushing Docker container image..."
 VERSIONED_URI="${REPOSITORY_URI}:${RELEASE_VERSION}"
 LATEST_URI="${REPOSITORY_URI}:latest"
 
-docker build -t "${VERSIONED_URI}" -t "${LATEST_URI}" "${SCRIPT_DIR}"
+docker build -t "${VERSIONED_URI}" -t "${LATEST_URI}" "${ALERT_MODULE_DIR}"
 docker push "${VERSIONED_URI}"
 docker push "${LATEST_URI}"
 

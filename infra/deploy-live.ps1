@@ -41,13 +41,13 @@
 
 .EXAMPLE
     # Auto-increment patch version and deploy:
-    .\scripts\deploy-live.ps1
+    .\infra\deploy-live.ps1
 
     # Specify exact SemVer release version:
-    .\scripts\deploy-live.ps1 -Version "1.1.0"
+    .\infra\deploy-live.ps1 -Version "1.1.0"
 
     # Deploy in dry-run mode without Maven release:
-    .\scripts\deploy-live.ps1 -SkipRelease -DryRun
+    .\infra\deploy-live.ps1 -SkipRelease -DryRun
 #>
 
 [CmdletBinding()]

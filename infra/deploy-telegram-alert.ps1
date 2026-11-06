@@ -35,10 +35,10 @@
 
 .EXAMPLE
     # Auto-increment patch version:
-    .\deploy-telegram-alert.ps1
+    .\infra\deploy-telegram-alert.ps1
 
     # Specify exact SemVer release version:
-    .\deploy-telegram-alert.ps1 -Version "1.0.1"
+    .\infra\deploy-telegram-alert.ps1 -Version "1.0.1"
 #>
 
 [CmdletBinding()]
@@ -68,6 +68,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AlertModuleDir = Join-Path $ScriptDir "telegram_alert"
+if (-not (Test-Path $AlertModuleDir)) {
+    $AlertModuleDir = $ScriptDir
+}
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Polymarket Bot: Release & Upload Alert Lambda Container  " -ForegroundColor Cyan
@@ -78,7 +82,7 @@ Write-Host "==========================================================" -Foregro
 $ReleaseVersion = ""
 if (-not $SkipRelease) {
     Write-Host "[1/5] Executing Maven release..." -ForegroundColor Yellow
-    Push-Location $ScriptDir
+    Push-Location $AlertModuleDir
     try {
         if ($Version) {
             if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
@@ -99,7 +103,7 @@ if (-not $SkipRelease) {
                 "-DdevelopmentVersion=$devVersion" `
                 "-Dtag=telegram-alert-$ReleaseVersion"
         } else {
-            [xml]$pomXml = Get-Content (Join-Path $ScriptDir "pom.xml")
+            [xml]$pomXml = Get-Content (Join-Path $AlertModuleDir "pom.xml")
             $rawVer = $pomXml.project.version
             $ReleaseVersion = $rawVer -replace '-SNAPSHOT', ''
             Write-Host "      Auto-incrementing from current POM version: $rawVer (Release: $ReleaseVersion)" -ForegroundColor Green
@@ -118,7 +122,7 @@ if (-not $SkipRelease) {
     if ($Version) {
         $ReleaseVersion = $Version
     } else {
-        [xml]$pomXml = Get-Content (Join-Path $ScriptDir "pom.xml")
+        [xml]$pomXml = Get-Content (Join-Path $AlertModuleDir "pom.xml")
         $ReleaseVersion = $pomXml.project.version -replace '-SNAPSHOT', ''
     }
     Write-Host "      Target image version tag: $ReleaseVersion" -ForegroundColor Green
@@ -127,7 +131,7 @@ if (-not $SkipRelease) {
 # 2. Package the Java 25 shaded jar via Maven
 if (-not $SkipBuild) {
     Write-Host "[2/5] Packaging shaded uber-jar via Maven..." -ForegroundColor Yellow
-    Push-Location $ScriptDir
+    Push-Location $AlertModuleDir
     try {
         & mvn clean package -DskipTests
         if ($LASTEXITCODE -ne 0) {
@@ -140,14 +144,14 @@ if (-not $SkipBuild) {
     Write-Host "[2/5] Skipping Maven package as requested..." -ForegroundColor Yellow
 }
 
-$JarPath = Join-Path $ScriptDir "target\telegram-alert-$ReleaseVersion.jar"
+$JarPath = Join-Path $AlertModuleDir "target\telegram-alert-$ReleaseVersion.jar"
 if (-not (Test-Path $JarPath)) {
     # Fallback to wildcard search in target directory
-    $FoundJar = Get-ChildItem -Path (Join-Path $ScriptDir "target") -Filter "telegram-alert-*.jar" | Where-Object { $_.Name -notmatch "original-" } | Select-Object -First 1
+    $FoundJar = Get-ChildItem -Path (Join-Path $AlertModuleDir "target") -Filter "telegram-alert-*.jar" | Where-Object { $_.Name -notmatch "original-" } | Select-Object -First 1
     if ($FoundJar) {
         $JarPath = $FoundJar.FullName
     } else {
-        throw "Target shaded jar not found in $ScriptDir\target. Please run without -SkipBuild."
+        throw "Target shaded jar not found in $AlertModuleDir\target. Please run without -SkipBuild."
     }
 }
 Write-Host "      Using shaded jar: $JarPath" -ForegroundColor Green
@@ -185,7 +189,7 @@ Write-Host "[5/5] Building and pushing Docker container image (linux/arm64 & lin
 $VersionedUri = "$RepositoryUri`:$ReleaseVersion"
 $LatestUri = "$RepositoryUri`:latest"
 
-docker build -t $VersionedUri -t $LatestUri $ScriptDir
+docker build -t $VersionedUri -t $LatestUri $AlertModuleDir
 if ($LASTEXITCODE -ne 0) {
     throw "Docker build failed with exit code $LASTEXITCODE"
 }
