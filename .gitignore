@@ -12,3 +12,8 @@ __pycache__/
 .env
 .env.*
 logs/
+release.properties
+pom.xml.releaseBackup
+pom.xml.tag
+pom.xml.next
+pom.xml.branch

@@ -173,7 +173,7 @@ VERSIONED_URI="${REPOSITORY_URI}:${RELEASE_VERSION}"
 LATEST_URI="${REPOSITORY_URI}:latest"
 
 pushd "$REPO_ROOT" > /dev/null
-docker buildx build --platform linux/arm64 \
+docker buildx build --platform linux/arm64 --provenance=false \
     -t "${VERSIONED_URI}" \
     -t "${LATEST_URI}" \
     -f live/src/main/docker/Dockerfile.jvm \

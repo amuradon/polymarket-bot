@@ -215,24 +215,14 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-# 5. Build and Push Docker Images (SemVer + latest)
-Write-Host "[5/5] Building and pushing Docker container image (linux/arm64 & linux/amd64 compatible)..." -ForegroundColor Yellow
+# 5. Build and Push Docker Images (SemVer + latest, provenance disabled for AWS Lambda compatibility)
+Write-Host "[5/5] Building and pushing Docker container image with provenance=false for AWS Lambda compatibility..." -ForegroundColor Yellow
 $VersionedUri = "$RepositoryUri`:$ReleaseVersion"
 $LatestUri = "$RepositoryUri`:latest"
 
-docker build -t $VersionedUri -t $LatestUri $AlertModuleDir
+docker buildx build --provenance=false -t $VersionedUri -t $LatestUri --push $AlertModuleDir
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker build failed with exit code $LASTEXITCODE"
-}
-
-docker push $VersionedUri
-if ($LASTEXITCODE -ne 0) {
-    throw "Docker push for $VersionedUri failed with exit code $LASTEXITCODE"
-}
-
-docker push $LatestUri
-if ($LASTEXITCODE -ne 0) {
-    throw "Docker push for $LatestUri failed with exit code $LASTEXITCODE"
+    throw "Docker buildx build failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "SUCCESS: Pushed $VersionedUri and $LatestUri to Amazon ECR." -ForegroundColor Green

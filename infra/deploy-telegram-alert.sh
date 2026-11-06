@@ -157,14 +157,12 @@ echo "[4/5] Authenticating Docker with Amazon ECR in ${REGION}..."
 ECR_DOMAIN="${REPOSITORY_URI%%/*}"
 aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ECR_DOMAIN}"
 
-# 5. Build and Push Docker Images
-echo "[5/5] Building and pushing Docker container image..."
+# 5. Build and Push Docker Images (with provenance=false for AWS Lambda compatibility)
+echo "[5/5] Building and pushing Docker container image with provenance=false..."
 VERSIONED_URI="${REPOSITORY_URI}:${RELEASE_VERSION}"
 LATEST_URI="${REPOSITORY_URI}:latest"
 
-docker build -t "${VERSIONED_URI}" -t "${LATEST_URI}" "${ALERT_MODULE_DIR}"
-docker push "${VERSIONED_URI}"
-docker push "${LATEST_URI}"
+docker buildx build --provenance=false -t "${VERSIONED_URI}" -t "${LATEST_URI}" --push "${ALERT_MODULE_DIR}"
 
 echo "SUCCESS: Pushed ${VERSIONED_URI} and ${LATEST_URI} to Amazon ECR."
 

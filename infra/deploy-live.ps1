@@ -224,7 +224,7 @@ $LatestUri = "$RepositoryUri`:latest"
 
 Push-Location $RepoRoot
 try {
-    docker buildx build --platform linux/arm64 `
+    docker buildx build --platform linux/arm64 --provenance=false `
         -t $VersionedUri `
         -t $LatestUri `
         -f live/src/main/docker/Dockerfile.jvm `
