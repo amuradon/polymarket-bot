@@ -238,8 +238,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "SUCCESS: Pushed $VersionedUri and $LatestUri to Amazon ECR." -ForegroundColor Green
 
 # 6. Update existing Lambda function if present
-$FunctionExists = (aws lambda get-function --function-name $FunctionName --region $Region 2>&1)
-if ($LASTEXITCODE -eq 0) {
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+$null = aws lambda get-function --function-name $FunctionName --region $Region 2>$null
+$FunctionExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevErrorAction
+
+if ($FunctionExists) {
     Write-Host "Updating deployed Lambda function '$FunctionName' to image $VersionedUri..." -ForegroundColor Yellow
     aws lambda update-function-code `
         --function-name $FunctionName `
