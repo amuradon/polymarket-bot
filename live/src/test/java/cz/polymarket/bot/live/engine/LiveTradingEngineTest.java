@@ -70,11 +70,19 @@ class LiveTradingEngineTest {
     private final List<String> polyAddresses = new CopyOnWriteArrayList<>();
     private final List<String> cancelBodies = new CopyOnWriteArrayList<>();
     private final AtomicBoolean polyBoltAuthedBeforeSubscribe = new AtomicBoolean(false);
+    private final AtomicBoolean clobAutoRespond = new AtomicBoolean(true);
     private final List<ServerWebSocket> polyBoltSockets = new CopyOnWriteArrayList<>();
     private final List<ServerWebSocket> clobSockets = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() throws Exception {
+        polyBoltAuthedBeforeSubscribe.set(false);
+        clobAutoRespond.set(true);
+        orderBodies.clear();
+        polyAddresses.clear();
+        cancelBodies.clear();
+        polyBoltSockets.clear();
+        clobSockets.clear();
         vertx = Vertx.vertx();
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
@@ -183,7 +191,7 @@ class LiveTradingEngineTest {
             } else if ("/ws/clob".equals(ws.path())) {
                 clobSockets.add(ws);
                 ws.textMessageHandler(msg -> {
-                    if (!"PING".equals(msg)) {
+                    if (clobAutoRespond.get() && !"PING".equals(msg)) {
                         ws.writeTextMessage("""
                                 [
                                   {
@@ -380,8 +388,10 @@ class LiveTradingEngineTest {
         };
         engineLogger.addHandler(testHandler);
 
+        clobAutoRespond.set(false);
+        LiveTradingEngine engine = null;
         try {
-            LiveTradingEngine engine = createTestEngine(true);
+            engine = createTestEngine(true);
 
             // Market 1: [1792741500, 1792742400] - only PolyBolt receives a message, CLOB WS receives 0 messages
             long market1StartSec = 1792741500L;
@@ -481,6 +491,10 @@ class LiveTradingEngineTest {
                             && r.getMessage().contains("polyBoltMessages=1")
                             && r.getMessage().contains("clobWsMessages=1"));
         } finally {
+            if (engine != null) {
+                engine.onStop(null);
+            }
+            clobAutoRespond.set(true);
             engineLogger.removeHandler(testHandler);
         }
     }
