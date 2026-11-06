@@ -1,6 +1,7 @@
 package cz.polymarket.bot.connector.polymarket.auth;
 
 import cz.polymarket.bot.connector.polymarket.clob.PolymarketEip712Signer;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -96,7 +97,9 @@ public class PolymarketSecretsResolver {
 
     private static void requireNonBlank(String value, String propertyName) {
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("Mandatory configuration property '" + propertyName + "' is not set");
+            String msg = "Mandatory configuration property '" + propertyName + "' is not set";
+            Log.fatal(msg);
+            throw new IllegalStateException(msg);
         }
     }
 

@@ -37,8 +37,13 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LiveTradingEngineTest {
 
@@ -351,5 +356,233 @@ class LiveTradingEngineTest {
         } finally {
             engine.onStop(null);
         }
+    }
+
+    @Test
+    void shouldLogErrorWhenPolyBoltOrClobWebSocketReceivesZeroMessagesForMarket() {
+        List<LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
+        Logger engineLogger = Logger.getLogger(LiveTradingEngine.class.getName());
+        Handler testHandler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        engineLogger.addHandler(testHandler);
+
+        try {
+            LiveTradingEngine engine = createTestEngine(true);
+
+            // Market 1: [1792741500, 1792742400] - only PolyBolt receives a message, CLOB WS receives 0 messages
+            long market1StartSec = 1792741500L;
+            engine.discoverAndRotateMarket(market1StartSec + 10L);
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "key": "btcusd",
+                      "timestamp": 1792741500000,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "timestamp": 1792741500000,
+                        "value": 90000.0
+                      }
+                    }
+                    """, market1StartSec * 1000L);
+
+            assertThat(engine.getPolyBoltMarketMessageCount()).isEqualTo(1L);
+            assertThat(engine.getClobMarketMessageCount()).isZero();
+
+            // Rotate to Market 2: [1792742400, 1792743300] -> should detect 0 CLOB WS messages in Market 1 and log ERROR
+            long market2StartSec = 1792742400L;
+            engine.discoverAndRotateMarket(market2StartSec + 10L);
+
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
+                            && r.getMessage() != null
+                            && r.getMessage().contains("btc-updown-15m-1792741500")
+                            && r.getMessage().contains("polyBoltMessages=1")
+                            && r.getMessage().contains("clobWsMessages=0"));
+
+            capturedLogs.clear();
+
+            // Market 2: only CLOB WS receives a message, PolyBolt receives 0 messages
+            engine.onRawClobFrame("""
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "timestamp": "1792742410000",
+                        "bids": [{"price": "0.54", "size": "250"}],
+                        "asks": [{"price": "0.55", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP), (market2StartSec + 10L) * 1000L);
+
+            assertThat(engine.getPolyBoltMarketMessageCount()).isZero();
+            assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+
+            // Rotate to Market 3: [1792743300, 1792744200] -> should detect 0 PolyBolt messages in Market 2 and log ERROR
+            long market3StartSec = 1792743300L;
+            engine.discoverAndRotateMarket(market3StartSec + 10L);
+
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
+                            && r.getMessage() != null
+                            && r.getMessage().contains("btc-updown-15m-1792742400")
+                            && r.getMessage().contains("polyBoltMessages=0")
+                            && r.getMessage().contains("clobWsMessages=1"));
+
+            capturedLogs.clear();
+
+            // Market 3: both PolyBolt and CLOB WS receive messages -> no zero-message ERROR on rotation to Market 4
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto",
+                      "key": "btcusd",
+                      "timestamp": 1792743310000,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "timestamp": 1792743310000,
+                        "value": 90050.0
+                      }
+                    }
+                    """, (market3StartSec + 10L) * 1000L);
+            engine.onRawClobFrame("""
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "timestamp": "1792743310000",
+                        "bids": [{"price": "0.54", "size": "250"}],
+                        "asks": [{"price": "0.55", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP), (market3StartSec + 10L) * 1000L);
+
+            long market4StartSec = 1792744200L;
+            engine.discoverAndRotateMarket(market4StartSec + 10L);
+
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().equals(Level.INFO)
+                            && r.getMessage() != null
+                            && r.getMessage().contains("btc-updown-15m-1792743300")
+                            && r.getMessage().contains("polyBoltMessages=1")
+                            && r.getMessage().contains("clobWsMessages=1"));
+        } finally {
+            engineLogger.removeHandler(testHandler);
+        }
+    }
+
+    @Test
+    void shouldLogFatalAndThrowWhenStartingLiveModeWithoutCredentials() {
+        List<LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
+        Logger engineLogger = Logger.getLogger(LiveTradingEngine.class.getName());
+        Handler testHandler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        engineLogger.addHandler(testHandler);
+
+        try {
+            PolymarketSecretsResolver emptyResolver = new PolymarketSecretsResolver(
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty()
+            );
+            HttpClient httpClient = HttpClient.newHttpClient();
+            String baseHttpUrl = "http://localhost:" + port;
+            LiveTradingEngine engine = new LiveTradingEngine(
+                    new StrategyRegistry(Map.of("UtterParameciumStrategy",
+                            new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1()))),
+                    new HourlyPriceCache(3600L),
+                    new LiveTradeRepository(tempDir.toString(), 1000.0, objectMapper, new PerformanceMetricsCalculator()),
+                    emptyResolver,
+                    new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, emptyResolver),
+                    new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
+                    new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                    new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                            Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L),
+                    new PolymarketStreamParser(objectMapper),
+                    "UtterParameciumStrategy",
+                    "BTCUSDT",
+                    "15m",
+                    false,
+                    false, // dryRun = false -> live mode
+                    "FAK"
+            );
+
+            assertThatThrownBy(() -> engine.onStart(null))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to resolve Polymarket credentials for live trading");
+
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
+                            && r.getMessage() != null
+                            && r.getMessage().contains("Fatal configuration error"));
+        } finally {
+            engineLogger.removeHandler(testHandler);
+        }
+    }
+
+    private LiveTradingEngine createTestEngine(boolean dryRun) {
+        PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
+                Optional.of(TEST_PRIVATE_KEY),
+                Optional.of("api-key-live"),
+                Optional.of("passphrase-live"),
+                Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                Optional.of(TEST_MAKER_ADDRESS),
+                Optional.of(TEST_EOA_ADDRESS)
+        );
+        HttpClient httpClient = HttpClient.newHttpClient();
+        String baseHttpUrl = "http://localhost:" + port;
+        UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        return new LiveTradingEngine(
+                new StrategyRegistry(Map.of(strategy.getName(), strategy)),
+                new HourlyPriceCache(3600L),
+                new LiveTradeRepository(tempDir.toString(), 1000.0, objectMapper, new PerformanceMetricsCalculator()),
+                secretsResolver,
+                new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
+                new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
+                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                        Optional.of("api-key-live"),
+                        Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                        Optional.of("passphrase-live"),
+                        1000L, 10000L),
+                new PolymarketStreamParser(objectMapper),
+                "UtterParameciumStrategy",
+                "BTCUSDT",
+                "15m",
+                false,
+                dryRun,
+                "FAK"
+        );
     }
 }

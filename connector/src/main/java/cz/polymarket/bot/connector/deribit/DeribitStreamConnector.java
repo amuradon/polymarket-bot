@@ -127,7 +127,7 @@ public class DeribitStreamConnector {
                     "[%s] Missing required Deribit API credentials (DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET). Deribit raw trade streams require authentication; aborting startup.",
                     streamName
             );
-            Log.error(errorMsg);
+            Log.fatal(errorMsg);
             throw new IllegalStateException(errorMsg);
         }
 
@@ -154,7 +154,7 @@ public class DeribitStreamConnector {
                     // Handle authentication response
                     if (isAuthResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            Log.errorf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
+                            Log.fatalf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
                             triggerFatalError(rawJson);
                         } else {
                             Log.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
@@ -168,7 +168,7 @@ public class DeribitStreamConnector {
                     // Handle subscription response
                     if (isSubscriptionResponse(rawJson)) {
                         if (isErrorResponse(rawJson)) {
-                            Log.errorf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
+                            Log.fatalf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
                             triggerFatalError(rawJson);
                         } else {
                             Log.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);

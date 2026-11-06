@@ -64,6 +64,9 @@ public class PolymarketGammaClient {
         String url = baseUrl + "/markets/slug/" + encodedSlug;
 
         try {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Gamma GET %s", url);
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(10))
@@ -73,7 +76,17 @@ public class PolymarketGammaClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Gamma GET %s response (HTTP %d): %s", url, response.statusCode(), response.body());
+            }
+            if (response.statusCode() >= 500) {
+                Log.errorf("Gamma API GET %s failed with HTTP %d", url, response.statusCode());
+                return Optional.empty();
+            }
             if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
+                if (Log.isDebugEnabled()) {
+                    Log.debugf("Gamma market %s not found or empty response (HTTP %d)", slug, response.statusCode());
+                }
                 return Optional.empty();
             }
 
@@ -82,7 +95,7 @@ public class PolymarketGammaClient {
                 return parseMarketNode(root, durationSeconds);
             }
         } catch (Exception e) {
-            Log.debugf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
+            Log.errorf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
         }
         return Optional.empty();
     }

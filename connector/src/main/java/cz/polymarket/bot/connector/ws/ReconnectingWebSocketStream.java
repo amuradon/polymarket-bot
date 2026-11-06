@@ -22,6 +22,7 @@ import java.util.function.Supplier;
 public class ReconnectingWebSocketStream {
 
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
+    private static final long DEBUG_MESSAGE_LOG_INTERVAL = 500L;
 
     private final Vertx vertx;
     private final String streamName;
@@ -36,6 +37,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
     private final AtomicLong reconnectCount = new AtomicLong(0L);
+    private final AtomicLong debugReceivedFrameCounter = new AtomicLong(0L);
     private volatile WebSocket currentWebSocket;
     private volatile long pingTimerId = -1L;
 
@@ -112,6 +114,9 @@ public class ReconnectingWebSocketStream {
     public boolean sendText(String textPayload) {
         WebSocket ws = this.currentWebSocket;
         if (ws != null && !ws.isClosed() && state.get() == ConnectionState.CONNECTED) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] Sending WebSocket text frame: %s", streamName, textPayload);
+            }
             ws.writeTextMessage(textPayload);
             return true;
         }
@@ -173,25 +178,47 @@ public class ReconnectingWebSocketStream {
                         }
                         this.currentWebSocket = ws;
                         this.state.set(ConnectionState.CONNECTED);
-                        Log.infof("[%s] WebSocket connected to %s", streamName, wsUrl);
+                        Log.infof("[%s] WebSocket connected to %s (reconnectCount=%d)",
+                                streamName, wsUrl, reconnectCount.get());
 
                         ws.textMessageHandler(rawText -> {
                             long recvTs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(recvTs);
+                            if (Log.isTraceEnabled()) {
+                                Log.tracef("[%s] Received WebSocket text frame at %d ms: %s", streamName, recvTs, rawText);
+                            }
+                            if (Log.isDebugEnabled()) {
+                                long count = debugReceivedFrameCounter.incrementAndGet();
+                                if (count % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
+                                    Log.debugf("[%s] Received %d WebSocket frames (lastMessageTimestampMs=%d)",
+                                            streamName, count, recvTs);
+                                }
+                            }
                             if (messageListener != null) {
                                 messageListener.onMessage(rawText, recvTs);
                             }
                         });
 
-                        ws.pongHandler(buf -> lastMessageTimestampMs.set(System.currentTimeMillis()));
+                        ws.pongHandler(buf -> {
+                            long nowMs = System.currentTimeMillis();
+                            lastMessageTimestampMs.set(nowMs);
+                            if (Log.isTraceEnabled()) {
+                                Log.tracef("[%s] Received WebSocket PONG at %d ms", streamName, nowMs);
+                            }
+                        });
 
                         ws.closeHandler(v -> {
-                            Log.warnf("[%s] WebSocket connection closed", streamName);
+                            if (running.get()) {
+                                Log.errorf("[%s] WebSocket connection closed unexpectedly; scheduling reconnect in %d ms",
+                                        streamName, reconnectDelayMs);
+                            } else if (Log.isDebugEnabled()) {
+                                Log.debugf("[%s] WebSocket connection closed cleanly on stop", streamName);
+                            }
                             onConnectionClosed(ws);
                         });
 
                         ws.exceptionHandler(err -> {
-                            Log.warnf("[%s] WebSocket error: %s", streamName, err.getMessage());
+                            Log.errorf("[%s] WebSocket error: %s", streamName, err.getMessage());
                             onConnectionClosed(ws);
                         });
 
@@ -200,6 +227,9 @@ public class ReconnectingWebSocketStream {
                             if (subs != null) {
                                 for (String sub : subs) {
                                     if (sub != null && !sub.isBlank()) {
+                                        if (Log.isTraceEnabled()) {
+                                            Log.tracef("[%s] Sending initial WebSocket subscription/auth message", streamName);
+                                        }
                                         ws.writeTextMessage(sub);
                                     }
                                 }
@@ -209,11 +239,11 @@ public class ReconnectingWebSocketStream {
                         startPingTimer();
                     })
                     .onFailure(err -> {
-                        Log.warnf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
+                        Log.errorf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
                         scheduleReconnect();
                     });
         } catch (Exception e) {
-            Log.warnf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
+            Log.errorf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
             scheduleReconnect();
         }
     }
@@ -224,6 +254,9 @@ public class ReconnectingWebSocketStream {
             pingTimerId = vertx.setPeriodic(pingIntervalMs, id -> {
                 WebSocket ws = this.currentWebSocket;
                 if (ws != null && !ws.isClosed() && running.get()) {
+                    if (Log.isTraceEnabled()) {
+                        Log.tracef("[%s] Sending WebSocket PING frame", streamName);
+                    }
                     ws.writePing(Buffer.buffer("ping"));
                 }
             });

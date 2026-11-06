@@ -3,6 +3,7 @@ package cz.polymarket.bot.connector.polymarket;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -83,6 +84,7 @@ public class PolymarketClobClient {
                 pingIntervalMs
         );
         marketStreams.put(marketSlug, stream);
+        Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
         stream.start();
     }
 
@@ -97,6 +99,7 @@ public class PolymarketClobClient {
         }
         ReconnectingWebSocketStream stream = marketStreams.remove(marketSlug);
         if (stream != null) {
+            Log.infof("Closing Polymarket CLOB WebSocket stream for market %s", marketSlug);
             stream.stop();
         }
     }

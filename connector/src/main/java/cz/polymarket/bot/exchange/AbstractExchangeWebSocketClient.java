@@ -127,16 +127,16 @@ public abstract class AbstractExchangeWebSocketClient {
                         ws.textMessageHandler(this::handleMessage);
                         ws.closeHandler(v -> onConnectionClosed());
                         ws.exceptionHandler(err -> {
-                            Log.warnf("[%s] WebSocket error: %s", exchange, err.getMessage());
+                            Log.errorf("[%s] WebSocket error: %s", exchange, err.getMessage());
                             onConnectionClosed();
                         });
                     })
                     .onFailure(err -> {
-                        Log.warnf("[%s] WebSocket connection failed: %s", exchange, err.getMessage());
+                        Log.errorf("[%s] WebSocket connection failed: %s", exchange, err.getMessage());
                         scheduleReconnect();
                     });
         } catch (Exception e) {
-            Log.warnf("[%s] Error initiating WebSocket connection: %s", exchange, e.getMessage());
+            Log.errorf("[%s] Error initiating WebSocket connection: %s", exchange, e.getMessage());
             scheduleReconnect();
         }
     }

@@ -237,6 +237,18 @@ public class UtterParameciumStrategy implements TradingStrategy {
             throw new IllegalArgumentException("context cannot be null");
         }
         this.context = context;
+        Log.infof("Initialized %s (tau=[%d..%d ms], cooldown=%d ms, entryPrice=[%d..%d mc], maxSpread=%d mc, minEdge=%d mc, shares=[%d..%d], maxInventory=%d)",
+                getName(),
+                config.minTauMs(),
+                config.maxTauMs(),
+                config.cooldownMs(),
+                config.minEntryPriceMc(),
+                config.maxEntryPriceMc(),
+                config.maxSpreadMc(),
+                config.minEdgeMc(),
+                config.minOrderShares(),
+                config.maxOrderShares(),
+                config.maxInventorySharesPerSide());
     }
 
     @Override
@@ -292,6 +304,10 @@ public class UtterParameciumStrategy implements TradingStrategy {
             targetPriceCents = (alignedStartMs == nextCandleStartMs && nextCandleTargetPriceCents > 0L)
                     ? nextCandleTargetPriceCents
                     : 0L;
+            if (targetPriceCents > 0L) {
+                Log.infof("Market [%d, %d] target price locked from boundary PolyBolt 60s TWAP: $%.2f",
+                        activeCandleStartMs, activeCandleEndMs, targetPriceCents / 100.0);
+            }
             nextCandleStartMs = 0L;
             nextCandleTargetPriceCents = 0L;
             missingTargetPriceWarned = false;
@@ -351,7 +367,12 @@ public class UtterParameciumStrategy implements TradingStrategy {
         long offsetFromStartMs = effectiveTsMs - activeCandleStartMs;
         if (offsetFromStartMs == 0L
                 || (targetPriceCents <= 0L && offsetFromStartMs > 0L && offsetFromStartMs <= MAX_TARGET_PRICE_OFFSET_MS)) {
+            boolean newlyLocked = targetPriceCents <= 0L;
             targetPriceCents = priceCents;
+            if (newlyLocked) {
+                Log.infof("Market [%d, %d] target price locked from PolyBolt 60s TWAP: $%.2f (offsetMs=%d)",
+                        activeCandleStartMs, activeCandleEndMs, priceCents / 100.0, offsetFromStartMs);
+            }
         }
     }
 
@@ -525,6 +546,10 @@ public class UtterParameciumStrategy implements TradingStrategy {
         }
 
         if (chosenDirection == TradeDirection.NO_TRADE) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Strategy evaluateEntry NO_TRADE: tauMs=%d, spotCents=%d, projTwapCents=%d, targetCents=%d, sigmaRemCents=%d, askUpMc=%d, askDownMc=%d, edgeUpMc=%d, edgeDownMc=%d",
+                        tauMs, spotCents, projectedTwapCents, targetPriceCents, sigmaRemCents, askUpMc, askDownMc, edgeUpMc, edgeDownMc);
+            }
             return;
         }
 
@@ -542,6 +567,11 @@ public class UtterParameciumStrategy implements TradingStrategy {
         int qFinal = Math.min(qRaw, remainingCap);
         if (qFinal < config.minOrderShares()) {
             return;
+        }
+
+        if (Log.isDebugEnabled()) {
+            Log.debugf("Strategy signal %s: tauMs=%d, askMc=%d, edgeMc=%d, shares=%d (netUp=%d, netDown=%d)",
+                    chosenDirection, tauMs, chosenAskMc, chosenEdgeMc, qFinal, netSharesUp, netSharesDown);
         }
 
         submitBatchOrder(nowMs, chosenDirection, chosenAskMc, qFinal);

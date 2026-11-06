@@ -123,7 +123,7 @@ public class LiveTradeRepository {
                 this.currentMetrics = metricsCalculator.calculate(trades, initialCapital);
             }
         } catch (IOException e) {
-            Log.errorf("Failed to initialize live trade storage in %s: %s", dataDirectory, e.getMessage());
+            Log.fatalf("Fatal storage error: failed to initialize live trade storage in %s: %s", dataDirectory, e.getMessage());
             throw new RuntimeException("Could not initialize LiveTradeRepository", e);
         }
     }
@@ -171,8 +171,12 @@ public class LiveTradeRepository {
                         StandardOpenOption.TRUNCATE_EXISTING,
                         StandardOpenOption.WRITE);
             } catch (IOException ex) {
-                Log.warnf("Failed to write live metrics snapshot: %s", ex.getMessage());
+                Log.errorf("Failed to write live metrics snapshot: %s", ex.getMessage());
             }
+        }
+        if (Log.isTraceEnabled()) {
+            Log.tracef("Persisted live trade record and metrics snapshot to %s (totalTrades=%d, balance=$%.2f)",
+                    dataDirectory, trades.size(), currentBalance);
         }
     }
 
@@ -188,7 +192,7 @@ public class LiveTradeRepository {
         try {
             Files.deleteIfExists(tradesFile);
         } catch (IOException e) {
-            Log.warnf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
+            Log.errorf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
         }
 
         Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
@@ -199,7 +203,7 @@ public class LiveTradeRepository {
                     StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE);
         } catch (IOException e) {
-            Log.warnf("Failed to write metrics.json during reset: %s", e.getMessage());
+            Log.errorf("Failed to write metrics.json during reset: %s", e.getMessage());
         }
         Log.infof("Reset live trade storage to initial capital: $%.2f", initialCapital);
     }

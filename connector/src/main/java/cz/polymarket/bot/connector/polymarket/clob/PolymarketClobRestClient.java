@@ -88,6 +88,9 @@ public class PolymarketClobRestClient {
         String signature = computeL2HmacSignature(creds.secret(), timestampStr, "POST", path, jsonBodyBytes);
 
         try {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB POST %s request payload: %s", path, new String(jsonBodyBytes, StandardCharsets.UTF_8));
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + path))
                     .timeout(Duration.ofSeconds(10))
@@ -102,8 +105,11 @@ public class PolymarketClobRestClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB POST %s response (HTTP %d): %s", path, response.statusCode(), response.body());
+            }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                Log.warnf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), response.body());
+                Log.errorf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), response.body());
                 return new ClobOrderResponse(
                         "HTTP " + response.statusCode() + ": " + response.body(),
                         "",
@@ -116,6 +122,7 @@ public class PolymarketClobRestClient {
             }
             return objectMapper.readValue(response.body(), ClobOrderResponse.class);
         } catch (Exception e) {
+            Log.errorf("CLOB POST /order transport error: %s", e.getMessage());
             throw new IllegalStateException("CLOB POST /order transport error: " + e.getMessage(), e);
         }
     }
@@ -137,6 +144,9 @@ public class PolymarketClobRestClient {
         String signature = computeL2HmacSignature(creds.secret(), timestampStr, "DELETE", path, bodyBytes);
 
         try {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB DELETE %s for orderId=%s", path, orderId);
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + path))
                     .timeout(Duration.ofSeconds(10))
@@ -151,11 +161,17 @@ public class PolymarketClobRestClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB DELETE %s response (HTTP %d): %s", path, response.statusCode(), response.body());
+            }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                Log.errorf("CLOB DELETE /order returned HTTP %d for order %s: %s",
+                        response.statusCode(), orderId, response.body());
                 throw new IllegalStateException("CLOB DELETE /order HTTP " + response.statusCode() + ": " + response.body());
             }
             return objectMapper.readValue(response.body(), ClobCancelResponse.class);
         } catch (Exception e) {
+            Log.errorf("Failed to cancel CLOB order %s: %s", orderId, e.getMessage());
             throw new IllegalStateException("Failed to cancel CLOB order " + orderId + ": " + e.getMessage(), e);
         }
     }
@@ -183,6 +199,9 @@ public class PolymarketClobRestClient {
         String signature = computeL2HmacSignature(creds.secret(), timestampStr, "GET", cleanPath, new byte[0]);
 
         try {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB GET %s", fullPathWithQuery);
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + fullPathWithQuery))
                     .timeout(Duration.ofSeconds(10))
@@ -196,7 +215,11 @@ public class PolymarketClobRestClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB GET %s response (HTTP %d): %s", fullPathWithQuery, response.statusCode(), response.body());
+            }
             if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
+                Log.errorf("CLOB GET /balance-allowance returned HTTP %d for token %s", response.statusCode(), tokenId);
                 throw new IllegalStateException("CLOB GET /balance-allowance HTTP " + response.statusCode());
             }
             JsonNode root = objectMapper.readTree(response.body());
@@ -207,6 +230,7 @@ public class PolymarketClobRestClient {
             }
             return Long.parseLong(balanceStr);
         } catch (Exception e) {
+            Log.errorf("Failed to query conditional token balance for %s: %s", tokenId, e.getMessage());
             throw new IllegalStateException("Failed to query conditional token balance for " + tokenId, e);
         }
     }
@@ -218,6 +242,9 @@ public class PolymarketClobRestClient {
      */
     public boolean pingKeepalive() {
         try {
+            if (Log.isTraceEnabled()) {
+                Log.trace("Sending CLOB GET /time keepalive request");
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/time"))
                     .timeout(Duration.ofSeconds(5))
@@ -225,9 +252,16 @@ public class PolymarketClobRestClient {
                     .GET()
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return response.statusCode() == 200;
+            if (Log.isTraceEnabled()) {
+                Log.tracef("CLOB GET /time keepalive response (HTTP %d): %s", response.statusCode(), response.body());
+            }
+            if (response.statusCode() != 200) {
+                Log.errorf("CLOB GET /time keepalive returned HTTP %d", response.statusCode());
+                return false;
+            }
+            return true;
         } catch (Exception e) {
-            Log.debugf("CLOB GET /time keepalive failed: %s", e.getMessage());
+            Log.errorf("CLOB GET /time keepalive failed: %s", e.getMessage());
             return false;
         }
     }
@@ -263,6 +297,7 @@ public class PolymarketClobRestClient {
             }
             return Base64.getUrlEncoder().encodeToString(mac.doFinal());
         } catch (Exception e) {
+            Log.fatalf("Failed to compute Polymarket L2 HMAC-SHA256 signature: %s", e.getMessage());
             throw new IllegalArgumentException("Failed to compute Polymarket L2 HMAC-SHA256 signature", e);
         }
     }
@@ -270,9 +305,9 @@ public class PolymarketClobRestClient {
     private PolymarketCredentials requireL2Credentials() {
         PolymarketCredentials creds = secretsResolver.resolveCredentials();
         if (!creds.hasL2Credentials() || creds.signerAddress().isBlank()) {
-            throw new IllegalStateException(
-                    "Missing Polymarket CLOB L2 credentials (apiKey, secret, passphrase, signerAddress)"
-            );
+            String msg = "Missing Polymarket CLOB L2 credentials (apiKey, secret, passphrase, signerAddress)";
+            Log.fatal(msg);
+            throw new IllegalStateException(msg);
         }
         return creds;
     }

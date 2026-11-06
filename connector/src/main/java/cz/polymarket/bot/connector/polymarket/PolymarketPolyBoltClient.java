@@ -196,7 +196,7 @@ public class PolymarketPolyBoltClient {
                     "[%s] Missing required Polymarket CLOB API credentials (POLYMARKET_API_KEY, POLYMARKET_SECRET, POLYMARKET_PASSPHRASE). All streams must be recorded; aborting startup.",
                     streamName
             );
-            Log.error(errorMsg);
+            Log.fatal(errorMsg);
             throw new IllegalStateException(errorMsg);
         }
         String initialMessage = buildAuthMessage();
@@ -211,6 +211,7 @@ public class PolymarketPolyBoltClient {
                         return;
                     }
                     if (isAuthedConfirmation(rawJson)) {
+                        Log.infof("[%s] PolyBolt session authenticated successfully; subscribing to channel", streamName);
                         ReconnectingWebSocketStream current = streamRef.get();
                         if (current != null) {
                             current.sendText(subscribeMsg);
@@ -218,10 +219,11 @@ public class PolymarketPolyBoltClient {
                         return;
                     }
                     if (isSubscribedConfirmation(rawJson)) {
+                        Log.infof("[%s] PolyBolt channel subscription confirmed: %s", streamName, rawJson);
                         return;
                     }
                     if (isErrorFrame(rawJson)) {
-                        Log.warnf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
+                        Log.errorf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
                         if (isAuthRequiredError(rawJson)) {
                             ReconnectingWebSocketStream current = streamRef.get();
                             if (current != null) {

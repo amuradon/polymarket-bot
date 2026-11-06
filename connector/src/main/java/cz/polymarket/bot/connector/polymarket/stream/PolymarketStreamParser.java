@@ -119,7 +119,7 @@ public class PolymarketStreamParser {
                     windowSeconds
             ));
         } catch (Exception e) {
-            Log.debugf("Failed to parse PolyBolt frame: %s", e.getMessage());
+            Log.warnf("Failed to parse PolyBolt frame: %s", e.getMessage());
             return Collections.emptyList();
         }
     }
@@ -157,7 +157,7 @@ public class PolymarketStreamParser {
             }
             return updated ? localBook.snapshotQuote(recvTimestampMs) : Optional.empty();
         } catch (Exception e) {
-            Log.debugf("Failed to parse CLOB WS frame: %s", e.getMessage());
+            Log.warnf("Failed to parse CLOB WS frame: %s", e.getMessage());
             return Optional.empty();
         }
     }
