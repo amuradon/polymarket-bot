@@ -2,7 +2,6 @@ package cz.polymarket.bot.connector.polymarket.stream;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,6 +16,7 @@ import java.util.Optional;
 /**
  * Low-latency JSON frame parser for Polymarket PolyBolt v2 ({@code price.crypto} and {@code price.crypto.twap})
  * and Polymarket CLOB Market WebSocket streams ({@code book}, {@code price_change}, {@code best_bid_ask}).
+ * Uses streaming Jackson {@link JsonParser} on both PolyBolt and CLOB hot paths to eliminate DOM tree allocations.
  */
 @ApplicationScoped
 public class PolymarketStreamParser {
@@ -34,7 +34,8 @@ public class PolymarketStreamParser {
     }
 
     /**
-     * Parses a raw PolyBolt v2 WebSocket text frame into zero, one, or more {@link PolyBoltTick} updates.
+     * Parses a raw PolyBolt v2 WebSocket text frame into zero, one, or more {@link PolyBoltTick} updates
+     * using streaming {@link JsonParser} without building a DOM tree.
      * <ul>
      *   <li>Control frames ({@code "op": "authed"}, {@code "op": "subscribed"}, {@code "PING"}/{@code "PONG"}) return an empty list.</li>
      *   <li>Initial snapshot frames ({@code payload.data: [...]}) return historical ticks ordered chronologically so the
@@ -48,21 +49,81 @@ public class PolymarketStreamParser {
      * @return list of parsed {@link PolyBoltTick} records
      */
     public List<PolyBoltTick> parsePolyBoltFrame(String rawJson, long recvTimestampMs) {
-        if (rawJson == null || rawJson.isBlank()) {
-            return Collections.emptyList();
-        }
-        String trimmed = rawJson.trim();
-        if ("PING".equalsIgnoreCase(trimmed) || "PONG".equalsIgnoreCase(trimmed)) {
+        if (rawJson == null || rawJson.isBlank() || !rawJson.contains("price.crypto")) {
             return Collections.emptyList();
         }
 
-        try {
-            JsonNode root = objectMapper.readTree(trimmed);
-            if (root == null || !root.isObject() || root.hasNonNull("op")) {
+        try (JsonParser parser = objectMapper.createParser(rawJson)) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) {
                 return Collections.emptyList();
             }
 
-            String channel = root.path("channel").asText("");
+            String channel = "";
+            long rootTs = recvTimestampMs;
+            String symbol = "btcusd";
+            String source = "chainlink";
+            int windowSeconds = -1;
+            double payloadPrice = 0.0;
+            long payloadTs = -1L;
+            List<double[]> rawDataItems = null;
+
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                String field = parser.currentName();
+                JsonToken token = parser.nextToken();
+                if (field == null || token == null) {
+                    break;
+                }
+                switch (field) {
+                    case "op" -> {
+                        if (token != JsonToken.VALUE_NULL) {
+                            return Collections.emptyList();
+                        }
+                    }
+                    case "channel" -> channel = parser.getValueAsString("");
+                    case "ts", "timestamp" -> rootTs = parser.getValueAsLong(recvTimestampMs);
+                    case "payload" -> {
+                        if (token == JsonToken.START_OBJECT) {
+                            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                                String pField = parser.currentName();
+                                JsonToken pToken = parser.nextToken();
+                                if (pField == null || pToken == null) {
+                                    break;
+                                }
+                                switch (pField) {
+                                    case "symbol" -> symbol = parser.getValueAsString("btcusd");
+                                    case "source" -> source = parser.getValueAsString("chainlink");
+                                    case "window_seconds" -> windowSeconds = parser.getValueAsInt(-1);
+                                    case "timestamp" -> payloadTs = parser.getValueAsLong(-1L);
+                                    case "full_accuracy_value" -> {
+                                        double v = parseCurrentNumberOrText(parser);
+                                        if (v > 0.0) {
+                                            payloadPrice = v;
+                                        }
+                                    }
+                                    case "value", "price", "twap" -> {
+                                        double v = parseCurrentNumberOrText(parser);
+                                        if (v > 0.0 && payloadPrice <= 0.0) {
+                                            payloadPrice = v;
+                                        }
+                                    }
+                                    case "data" -> {
+                                        if (pToken == JsonToken.START_ARRAY) {
+                                            rawDataItems = streamPolyBoltDataArray(parser, recvTimestampMs);
+                                        } else {
+                                            parser.skipChildren();
+                                        }
+                                    }
+                                    default -> parser.skipChildren();
+                                }
+                            }
+                        } else {
+                            parser.skipChildren();
+                        }
+                    }
+                    default -> parser.skipChildren();
+                }
+            }
+
             boolean isTwap;
             if ("price.crypto.twap".equals(channel)) {
                 isTwap = true;
@@ -72,44 +133,32 @@ public class PolymarketStreamParser {
                 return Collections.emptyList();
             }
 
-            JsonNode payload = root.get("payload");
-            if (payload == null || !payload.isObject()) {
-                return Collections.emptyList();
-            }
+            int resolvedWindow = windowSeconds >= 0 ? windowSeconds : (isTwap ? 60 : 0);
 
-            String symbol = payload.path("symbol").asText("btcusd");
-            String source = payload.path("source").asText("chainlink");
-            int windowSeconds = payload.path("window_seconds").asInt(isTwap ? 60 : 0);
-
-            JsonNode dataArray = payload.get("data");
-            if (dataArray != null && dataArray.isArray()) {
-                List<PolyBoltTick> ticks = new ArrayList<>(dataArray.size());
-                for (JsonNode item : dataArray) {
-                    double price = extractPrice(item);
-                    long rawTs = item.path("timestamp").asLong(recvTimestampMs);
-                    long itemTsMs = normalizeTimestampMs(rawTs, recvTimestampMs);
-                    if (price > 0.0) {
+            if (rawDataItems != null) {
+                List<PolyBoltTick> ticks = new ArrayList<>(rawDataItems.size());
+                for (double[] item : rawDataItems) {
+                    double itemPrice = item[0];
+                    long itemTsMs = normalizeTimestampMs((long) item[1], recvTimestampMs);
+                    if (itemPrice > 0.0) {
                         ticks.add(new PolyBoltTick(
                                 itemTsMs,
                                 itemTsMs,
                                 symbol,
                                 source,
-                                price,
+                                itemPrice,
                                 isTwap,
-                                windowSeconds
+                                resolvedWindow
                         ));
                     }
                 }
                 return ticks;
             }
 
-            double price = extractPrice(payload);
-            if (price <= 0.0) {
+            if (payloadPrice <= 0.0) {
                 return Collections.emptyList();
             }
-            long rawOracleTs = payload.hasNonNull("timestamp")
-                    ? payload.path("timestamp").asLong(recvTimestampMs)
-                    : root.path("ts").asLong(recvTimestampMs);
+            long rawOracleTs = payloadTs > 0L ? payloadTs : rootTs;
             long oracleTimestampMs = normalizeTimestampMs(rawOracleTs, recvTimestampMs);
 
             return List.of(new PolyBoltTick(
@@ -117,14 +166,53 @@ public class PolymarketStreamParser {
                     oracleTimestampMs,
                     symbol,
                     source,
-                    price,
+                    payloadPrice,
                     isTwap,
-                    windowSeconds
+                    resolvedWindow
             ));
         } catch (Exception e) {
             Log.warnf("Failed to parse PolyBolt frame: %s", e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    private static List<double[]> streamPolyBoltDataArray(JsonParser parser, long defaultTsMs) throws IOException {
+        List<double[]> items = new ArrayList<>();
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() == JsonToken.START_OBJECT) {
+                double itemPrice = 0.0;
+                long itemTs = defaultTsMs;
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    String dField = parser.currentName();
+                    parser.nextToken();
+                    if (dField == null) {
+                        break;
+                    }
+                    switch (dField) {
+                        case "full_accuracy_value" -> {
+                            double v = parseCurrentNumberOrText(parser);
+                            if (v > 0.0) {
+                                itemPrice = v;
+                            }
+                        }
+                        case "value", "price", "twap" -> {
+                            double v = parseCurrentNumberOrText(parser);
+                            if (v > 0.0 && itemPrice <= 0.0) {
+                                itemPrice = v;
+                            }
+                        }
+                        case "timestamp" -> itemTs = parser.getValueAsLong(defaultTsMs);
+                        default -> parser.skipChildren();
+                    }
+                }
+                if (itemPrice > 0.0) {
+                    items.add(new double[]{itemPrice, (double) itemTs});
+                }
+            } else {
+                parser.skipChildren();
+            }
+        }
+        return items;
     }
 
     /**
@@ -178,11 +266,18 @@ public class PolymarketStreamParser {
     }
 
     private static boolean containsRelevantClobEvent(String rawJson) {
-        return rawJson.contains("price_change")
-                || rawJson.contains("best_bid_ask")
-                || rawJson.contains("\"book\"")
+        int len = rawJson.length();
+        int tailStart = Math.max(0, len - 64);
+        if (rawJson.indexOf("last_trade_price", tailStart) >= 0
+                || rawJson.indexOf("tick_size_change", tailStart) >= 0) {
+            return false;
+        }
+        return rawJson.contains("\"price_changes\"")
                 || rawJson.contains("\"bids\"")
-                || rawJson.contains("\"asks\"");
+                || rawJson.contains("\"asks\"")
+                || rawJson.contains("best_bid_ask")
+                || rawJson.contains("price_change")
+                || rawJson.contains("\"book\"");
     }
 
     private boolean streamSingleClobEvent(JsonParser parser, PolymarketLocalBook localBook) throws IOException {
@@ -435,31 +530,6 @@ public class PolymarketStreamParser {
                 } catch (NumberFormatException ignored) {
                     return 0.0;
                 }
-            }
-        }
-        return 0.0;
-    }
-
-    private static double extractPrice(JsonNode node) {
-        double fullAcc = parseDoubleSafe(node.get("full_accuracy_value"));
-        if (fullAcc > 0.0) {
-            return fullAcc;
-        }
-        return parseDoubleSafe(node.get("value"));
-    }
-
-    private static double parseDoubleSafe(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return 0.0;
-        }
-        if (node.isNumber()) {
-            return node.asDouble();
-        }
-        if (node.isTextual()) {
-            try {
-                return Double.parseDouble(node.asText().trim());
-            } catch (NumberFormatException ignored) {
-                return 0.0;
             }
         }
         return 0.0;

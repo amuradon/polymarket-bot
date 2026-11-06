@@ -158,6 +158,14 @@ Resources:
               chown -R 185:185 /mnt/ebs/polymarket-data
               chmod -R 775 /mnt/ebs/polymarket-data
 
+              # Tune Linux kernel TCP receive buffer auto-tuning for high-frequency Polymarket CLOB WebSocket bursts
+              cat << 'EOF' > /etc/sysctl.d/99-polymarket-network.conf
+              net.core.rmem_max = 33554432
+              net.ipv4.tcp_rmem = 4096 262144 33554432
+              net.ipv4.tcp_moderate_rcvbuf = 1
+              EOF
+              sysctl --system || true
+
               # Create helper launch script for 24/7 container execution with CloudWatch Logs and AWS Secrets Manager integration
               cat << 'EOF' > /usr/local/bin/start-polymarket-live.sh
               #!/bin/bash

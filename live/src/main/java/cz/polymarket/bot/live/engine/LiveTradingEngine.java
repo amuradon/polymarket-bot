@@ -195,7 +195,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, durationSec=%d, dryRun=%s, orderType=%s, initialCapital=$%.2f, currentBalance=$%.2f)",
                 activeStrategy.getName(), symbol, timeframe, durationSeconds, dryRun, orderType,
                 repository.getInitialCapital(), repository.getCurrentBalance());
-        activeStrategy.init(this);
 
         if (!dryRun || streamsEnabled) {
             try {
@@ -297,6 +296,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         }
 
         PolymarketMarketInfo nextMarket = discovered.get();
+        String previousSlugToClose = null;
         synchronized (this) {
             PolymarketMarketInfo latestCurrent = activeMarketInfo.get();
             if (latestCurrent != null && nextMarket.slug().equals(latestCurrent.slug())) {
@@ -304,14 +304,17 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             }
             if (latestCurrent != null && !latestCurrent.slug().equals(nextMarket.slug())) {
                 evaluateCompletedMarketStreamActivity(latestCurrent.slug(), latestCurrent.startSec());
-                clobWsClient.closeMarketStream(latestCurrent.slug());
+                previousSlugToClose = latestCurrent.slug();
             }
 
             activeMarketInfo.set(nextMarket);
             activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
             this.latestQuote = null;
-            clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
         }
+        if (previousSlugToClose != null) {
+            clobWsClient.closeMarketStream(previousSlugToClose);
+        }
+        clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
 
         Log.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
                 nextMarket.slug(), nextMarket.conditionId(), nextMarket.yesTokenId(), nextMarket.noTokenId());
@@ -424,9 +427,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         return Double.compare(prev.bestAskUp(), next.bestAskUp()) == 0
                 && Double.compare(prev.bestBidUp(), next.bestBidUp()) == 0
                 && Double.compare(prev.bestAskDown(), next.bestAskDown()) == 0
-                && Double.compare(prev.bestBidDown(), next.bestBidDown()) == 0
-                && Double.compare(prev.depth1cUp(), next.askSizeUp()) == 0
-                && Double.compare(prev.depth1cDown(), next.askSizeDown()) == 0;
+                && Double.compare(prev.bestBidDown(), next.bestBidDown()) == 0;
     }
 
     @Override

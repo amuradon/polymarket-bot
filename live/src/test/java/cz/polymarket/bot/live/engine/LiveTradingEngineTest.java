@@ -627,6 +627,85 @@ class LiveTradingEngineTest {
         }
     }
 
+    @Test
+    void shouldDeduplicateClobPriceChangeEventsWhenTopOfBookPricesDoNotChange() {
+        LiveTradingEngine engine = createTestEngine(true);
+        engine.discoverAndRotateMarket(1792741500L);
+
+        String initialBook = """
+                [
+                  {
+                    "event_type": "book",
+                    "asset_id": "%s",
+                    "bids": [{"price": "0.54", "size": "250"}],
+                    "asks": [{"price": "0.55", "size": "300"}]
+                  },
+                  {
+                    "event_type": "book",
+                    "asset_id": "%s",
+                    "bids": [{"price": "0.44", "size": "250"}],
+                    "asks": [{"price": "0.45", "size": "300"}]
+                  }
+                ]
+                """.formatted(TEST_TOKEN_UP, TEST_TOKEN_DOWN);
+        engine.onRawClobFrame(initialBook, 1792741501000L);
+        var firstQuote = engine.getLatestQuote();
+        assertThat(firstQuote).isNotNull();
+        assertThat(firstQuote.timestampMs()).isEqualTo(1792741501000L);
+
+        // Price change that updates ask size at 0.55 from 300 to 450 and deep bid at 0.10, but keeps BBO prices identical
+        String sameBboPricesFrame = """
+                {
+                  "market": "%s",
+                  "price_changes": [
+                    {
+                      "asset_id": "%s",
+                      "price": "0.55",
+                      "size": "450",
+                      "side": "SELL",
+                      "best_bid": "0.54",
+                      "best_ask": "0.55"
+                    },
+                    {
+                      "asset_id": "%s",
+                      "price": "0.10",
+                      "size": "900",
+                      "side": "BUY",
+                      "best_bid": "0.44",
+                      "best_ask": "0.45"
+                    }
+                  ],
+                  "timestamp": "1792741502000",
+                  "event_type": "price_change"
+                }
+                """.formatted("0xcond_test", TEST_TOKEN_UP, TEST_TOKEN_DOWN);
+        engine.onRawClobFrame(sameBboPricesFrame, 1792741502000L);
+        assertThat(engine.getLatestQuote()).isSameAs(firstQuote);
+
+        // Price change that changes best_ask on UP to 0.56 -> should update latestQuote
+        String changedBboFrame = """
+                {
+                  "market": "%s",
+                  "price_changes": [
+                    {
+                      "asset_id": "%s",
+                      "price": "0.55",
+                      "size": "0",
+                      "side": "SELL",
+                      "best_bid": "0.54",
+                      "best_ask": "0.56"
+                    }
+                  ],
+                  "timestamp": "1792741503000",
+                  "event_type": "price_change"
+                }
+                """.formatted("0xcond_test", TEST_TOKEN_UP);
+        engine.onRawClobFrame(changedBboFrame, 1792741503000L);
+        assertThat(engine.getLatestQuote()).isNotSameAs(firstQuote);
+        assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.56);
+        assertThat(engine.getLatestQuote().timestampMs()).isEqualTo(1792741503000L);
+    }
+
     private LiveTradingEngine createTestEngine(boolean dryRun) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),

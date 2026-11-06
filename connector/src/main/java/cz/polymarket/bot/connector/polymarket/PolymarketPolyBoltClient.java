@@ -210,6 +210,12 @@ public class PolymarketPolyBoltClient {
                     if (rawJson == null || rawJson.isBlank()) {
                         return;
                     }
+                    if (!rawJson.contains("\"op\"")) {
+                        if (listener != null) {
+                            listener.onMessage(rawJson, recvTs);
+                        }
+                        return;
+                    }
                     if (isAuthedConfirmation(rawJson)) {
                         Log.infof("[%s] PolyBolt session authenticated successfully; subscribing to channel", streamName);
                         ReconnectingWebSocketStream current = streamRef.get();

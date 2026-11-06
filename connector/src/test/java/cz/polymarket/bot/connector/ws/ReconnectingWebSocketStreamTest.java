@@ -199,4 +199,51 @@ class ReconnectingWebSocketStreamTest {
         stream.stop();
         assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
     }
+
+    @Test
+    void shouldReuseSinglePersistentDrainThreadAcrossSpacedMessages() throws Exception {
+        int messageCount = 15;
+        List<Long> observerThreadIds = new CopyOnWriteArrayList<>();
+        List<String> receivedPayloads = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    for (int i = 0; i < messageCount; i++) {
+                        int idx = i;
+                        vertx.setTimer((i + 1) * 10L, timerId -> {
+                            if (!ws.isClosed()) {
+                                ws.writeTextMessage("{\"spaced_seq\":" + idx + "}");
+                            }
+                        });
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/persistent-thread-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "PERSISTENT-THREAD-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> {
+                    observerThreadIds.add(Thread.currentThread().threadId());
+                    receivedPayloads.add(rawJson);
+                },
+                1000L,
+                0L
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(receivedPayloads).hasSize(messageCount));
+
+        assertThat(observerThreadIds).isNotEmpty();
+        assertThat(observerThreadIds.stream().distinct().count()).isEqualTo(1L);
+
+        stream.stop();
+        assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
+    }
 }

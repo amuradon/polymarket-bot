@@ -225,6 +225,9 @@ public class PolymarketLocalBook {
     }
 
     private static int pruneAndSetBestBid(double[] bids, int currentBestBidMc, int bidMc) {
+        if (currentBestBidMc == bidMc && bids[bidMc] > 0.0) {
+            return bidMc;
+        }
         int upper = Math.min(BOOK_LEVELS - 1, Math.max(currentBestBidMc, bidMc));
         for (int p = bidMc + 1; p <= upper; p++) {
             bids[p] = 0.0;
@@ -236,6 +239,9 @@ public class PolymarketLocalBook {
     }
 
     private static int pruneAndSetBestAsk(double[] asks, int currentBestAskMc, int askMc) {
+        if (currentBestAskMc == askMc && asks[askMc] > 0.0) {
+            return askMc;
+        }
         int lower = Math.max(1, Math.min(currentBestAskMc, askMc));
         for (int p = lower; p < askMc; p++) {
             asks[p] = 0.0;

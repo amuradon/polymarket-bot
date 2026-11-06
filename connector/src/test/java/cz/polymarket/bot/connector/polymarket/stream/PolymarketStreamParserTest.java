@@ -169,15 +169,27 @@ class PolymarketStreamParserTest {
         assertThat(quote4.get().bestBidUp()).isCloseTo(0.55, within(1e-6));
         assertThat(quote4.get().bestAskUp()).isCloseTo(0.56, within(1e-6));
 
-        // Ignored event_type (last_trade_price) returns Optional.empty() quickly
+        // Ignored event_type (last_trade_price and tick_size_change) returns Optional.empty() quickly
         String tradeFrame = """
                 {
-                  "event_type": "last_trade_price",
+                  "market": "0xcond1",
                   "asset_id": "token_up_1",
                   "price": "0.56",
-                  "size": "25"
+                  "size": "25",
+                  "event_type": "last_trade_price"
                 }
                 """;
         assertThat(parser.applyClobFrame(tradeFrame, 1792741509000L, localBook)).isEmpty();
+
+        String tickSizeFrame = """
+                {
+                  "market": "0xcond1",
+                  "asset_id": "token_up_1",
+                  "old_tick_size": "0.01",
+                  "new_tick_size": "0.001",
+                  "event_type": "tick_size_change"
+                }
+                """;
+        assertThat(parser.applyClobFrame(tickSizeFrame, 1792741510000L, localBook)).isEmpty();
     }
 }
