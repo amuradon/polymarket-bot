@@ -41,6 +41,15 @@
 .PARAMETER DuckDbPath
     Path to DuckDB CLI executable. Defaults to 'duckdb' found on system PATH.
 
+.PARAMETER MemoryLimit
+    DuckDB max memory limit (e.g. '5GB', '4GB'). Defaults to '5GB'.
+
+.PARAMETER Threads
+    Number of worker threads. Defaults to min(ProcessorCount, 4). Automatically capped to 2 for heavy depth diff streams.
+
+.PARAMETER RowGroupSize
+    Maximum number of rows per Parquet row group. Defaults to 50000 (capped at 25000 for heavy depth diff streams).
+
 .EXAMPLE
     .\scripts\convert-to-parquet.ps1
     Converts all .jsonl.zst files in D:\Crypto\data\Polymarket\collector to .parquet and deletes originals.
@@ -97,6 +106,9 @@ param(
 
     [Parameter()]
     [int]$Threads = [Math]::Min([Environment]::ProcessorCount, 4),
+
+    [Parameter()]
+    [int]$RowGroupSize = 50000,
 
     [Parameter()]
     [string]$TempDir
@@ -364,6 +376,7 @@ Write-Host " Search Filter    : $Filter" -ForegroundColor White
 Write-Host " Compression      : $Compression" -ForegroundColor White
 Write-Host " Memory Limit     : $MemoryLimit" -ForegroundColor White
 Write-Host " Threads          : $Threads" -ForegroundColor White
+Write-Host " Row Group Size   : $RowGroupSize" -ForegroundColor White
 if ($DryRun) {
     Write-Host " Mode             : DRY-RUN (No files will be converted or deleted)" -ForegroundColor Yellow
 } elseif ($KeepOriginal) {
@@ -466,16 +479,23 @@ try {
             $inputEscaped = $srcPath.Replace('\', '/')
             $tempDestEscaped = $tempParquetPath.Replace('\', '/')
 
+            $effectiveThreads = $Threads
+            $effectiveRowGroupSize = $RowGroupSize
+            if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
+                $effectiveThreads = [Math]::Min($Threads, 2)
+                $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
+            }
+
             $selectQuery = Get-ConvertQuery -StreamType $streamType -InputPathEscaped $inputEscaped
             $copyScript = @"
 SET max_memory = '$MemoryLimit';
 SET temp_directory = '$duckdbTempDirEscaped';
-SET threads = $Threads;
+SET threads = $effectiveThreads;
 SET preserve_insertion_order = true;
 
 COPY (
 $selectQuery
-) TO '$tempDestEscaped' (FORMAT PARQUET, COMPRESSION $Compression);
+) TO '$tempDestEscaped' (FORMAT PARQUET, COMPRESSION $Compression, ROW_GROUP_SIZE $effectiveRowGroupSize);
 "@
 
             # Write DuckDB script to temp sql file without BOM

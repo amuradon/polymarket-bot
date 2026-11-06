@@ -514,15 +514,24 @@ while IFS=$'\t' read -r src_path src_size; do
 
     SELECT_QUERY=$(get_convert_query "$stream_type" "$src_path")
 
+    effective_threads=$THREADS
+    effective_row_group_size=50000
+    if [ "$stream_type" = "binance-futures-depthdiff" ] || [ "$stream_type" = "binance-futures-depthpartial" ]; then
+        if [ "$effective_threads" -gt 2 ]; then
+            effective_threads=2
+        fi
+        effective_row_group_size=25000
+    fi
+
     cat << EOF > "$TEMP_SQL_FILE"
 SET max_memory = '$MEMORY_LIMIT';
 SET temp_directory = '$DUCKDB_TEMP_DIR';
-SET threads = $THREADS;
+SET threads = $effective_threads;
 SET preserve_insertion_order = true;
 
 COPY (
 $SELECT_QUERY
-) TO '$temp_parquet_path' (FORMAT PARQUET, COMPRESSION $COMPRESSION);
+) TO '$temp_parquet_path' (FORMAT PARQUET, COMPRESSION $COMPRESSION, ROW_GROUP_SIZE $effective_row_group_size);
 EOF
 
     if ! "$DUCKDB_PATH" -c ".read '$TEMP_SQL_FILE'" >/dev/null 2>&1; then
