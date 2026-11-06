@@ -205,26 +205,31 @@ if [ "$DRY_RUN" = true ]; then
     DRY_RUN_VAL="true"
 fi
 
-COMMANDS=$(cat << EOF
-set -euxo pipefail
-export AWS_REGION="${REGION}"
-ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "\${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-docker pull "${VERSIONED_URI}"
-sudo /usr/local/bin/start-polymarket-live.sh "${VERSIONED_URI}" "${DRY_RUN_VAL}"
-sleep 3
-docker ps --filter name=polymarket-live
+TEMP_PARAMS=$(mktemp)
+cat << EOF > "${TEMP_PARAMS}"
+{
+  "commands": [
+    "set -euxo pipefail",
+    "export AWS_REGION=${REGION}",
+    "ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)",
+    "aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin \"\${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\"",
+    "docker pull ${VERSIONED_URI}",
+    "sudo /usr/local/bin/start-polymarket-live.sh \"${VERSIONED_URI}\" ${DRY_RUN_VAL}",
+    "sleep 3",
+    "docker ps --filter name=polymarket-live"
+  ]
+}
 EOF
-)
 
 SSM_COMMAND_ID=$(aws ssm send-command \
     --instance-ids "${INSTANCE_ID}" \
     --document-name "AWS-RunShellScript" \
     --comment "Deploy Polymarket Live Trading ${RELEASE_VERSION}" \
-    --parameters "commands=[$(printf '%s' "$COMMANDS" | jq -R -s .)]" \
+    --parameters "file://${TEMP_PARAMS}" \
     --region "${REGION}" \
     --query "Command.CommandId" \
     --output text)
+rm -f "${TEMP_PARAMS}"
 
 echo "      Dispatched SSM Command ID: ${SSM_COMMAND_ID}. Waiting for execution..."
 

@@ -81,6 +81,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:PYTHONIOENCODING = "utf-8"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 if (-not (Test-Path (Join-Path $RepoRoot "pom.xml"))) {
@@ -265,7 +266,7 @@ $DryRunVal = if ($DryRun) { "true" } else { "false" }
 $Commands = @(
     "set -euxo pipefail",
     "export AWS_REGION=$Region",
-    "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)",
+    'ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)',
     "aws ecr get-login-password --region $Region | docker login --username AWS --password-stdin `"`$ACCOUNT_ID.dkr.ecr.$Region.amazonaws.com`"",
     "docker pull $VersionedUri",
     "sudo /usr/local/bin/start-polymarket-live.sh `"$VersionedUri`" $DryRunVal",
@@ -273,16 +274,33 @@ $Commands = @(
     "docker ps --filter name=polymarket-live"
 )
 
-$CommandStr = $Commands -join "`n"
+$TempParamsFile = [System.IO.Path]::GetTempFileName()
+$ForwardPath = $TempParamsFile.Replace('\', '/')
+$SsmCommandId = ""
+try {
+    $ParamsObj = @{
+        commands = $Commands
+    }
+    $ParamsJson = $ParamsObj | ConvertTo-Json -Depth 5
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($TempParamsFile, $ParamsJson, $utf8NoBom)
 
-$SsmCommandId = (aws ssm send-command `
-    --instance-ids $InstanceId `
-    --document-name "AWS-RunShellScript" `
-    --comment "Deploy Polymarket Live Trading $ReleaseVersion" `
-    --parameters "commands=[`"$($CommandStr -replace '"', '\"')`"]" `
-    --region $Region `
-    --query "Command.CommandId" `
-    --output text).Trim()
+    $SsmCommandId = (aws ssm send-command `
+        --instance-ids $InstanceId `
+        --document-name "AWS-RunShellScript" `
+        --comment "Deploy Polymarket Live Trading $ReleaseVersion" `
+        --parameters "file://$ForwardPath" `
+        --region $Region `
+        --query "Command.CommandId" `
+        --output text)
+
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SsmCommandId)) {
+        throw "Failed to dispatch SSM command to instance $InstanceId (Exit code: $LASTEXITCODE)"
+    }
+    $SsmCommandId = $SsmCommandId.Trim()
+} finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $TempParamsFile
+}
 
 Write-Host "      Dispatched SSM Command ID: $SsmCommandId. Waiting for execution..." -ForegroundColor Yellow
 

@@ -63,15 +63,14 @@ Resources:
               dnf update -y
               dnf install -y docker jq awscli amazon-cloudwatch-agent
 
-              # Configure Docker daemon to stream container logs to CloudWatch Logs by default
+              # Configure Docker daemon
               mkdir -p /etc/docker
               cat << 'EOF' > /etc/docker/daemon.json
               {
-                "log-driver": "awslogs",
+                "log-driver": "json-file",
                 "log-opts": {
-                  "awslogs-region": "${AWS::Region}",
-                  "awslogs-group": "${LogGroupName}",
-                  "awslogs-create-stream": "true"
+                  "max-size": "50m",
+                  "max-file": "3"
                 }
               }
               EOF
