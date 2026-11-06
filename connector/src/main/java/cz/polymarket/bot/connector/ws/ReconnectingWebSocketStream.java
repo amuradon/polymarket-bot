@@ -212,7 +212,8 @@ public class ReconnectingWebSocketStream {
                             lastMessageTimestampMs.set(recvTs);
                             if (rawText != null) {
                                 String trimmed = rawText.trim();
-                                if ("PONG".equalsIgnoreCase(trimmed) || "PING".equalsIgnoreCase(trimmed)) {
+                                if ("PONG".equalsIgnoreCase(trimmed) || "PING".equalsIgnoreCase(trimmed)
+                                        || trimmed.contains("\"op\":\"pong\"") || trimmed.contains("\"op\": \"pong\"")) {
                                     if (Log.isTraceEnabled()) {
                                         Log.tracef("[%s] Received WebSocket text heartbeat: %s", streamName, trimmed);
                                     }

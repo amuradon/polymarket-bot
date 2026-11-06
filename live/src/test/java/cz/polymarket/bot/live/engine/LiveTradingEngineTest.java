@@ -153,6 +153,8 @@ class LiveTradingEngineTest {
                         if ("auth".equals(op)) {
                             authed.set(true);
                             ws.writeTextMessage("{\"op\":\"authed\"}");
+                        } else if ("ping".equals(op)) {
+                            ws.writeTextMessage("{\"op\":\"pong\"}");
                         } else if ("subscribe".equals(op)) {
                             if (authed.get()) {
                                 polyBoltAuthedBeforeSubscribe.set(true);

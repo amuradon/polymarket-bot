@@ -222,6 +222,12 @@ public class PolymarketPolyBoltClient {
                         Log.infof("[%s] PolyBolt channel subscription confirmed: %s", streamName, rawJson);
                         return;
                     }
+                    if (isPongConfirmation(rawJson)) {
+                        if (Log.isTraceEnabled()) {
+                            Log.tracef("[%s] PolyBolt pong received: %s", streamName, rawJson);
+                        }
+                        return;
+                    }
                     if (isErrorFrame(rawJson)) {
                         Log.errorf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
                         if (isAuthRequiredError(rawJson)) {
@@ -237,7 +243,8 @@ public class PolymarketPolyBoltClient {
                     }
                 },
                 reconnectDelayMs,
-                pingIntervalMs
+                pingIntervalMs,
+                "{\"op\":\"ping\"}"
         );
     }
 
@@ -272,5 +279,9 @@ public class PolymarketPolyBoltClient {
 
     private static boolean isAuthRequiredError(String rawJson) {
         return rawJson.contains("\"code\":\"auth_required\"") || rawJson.contains("\"code\": \"auth_required\"");
+    }
+
+    private static boolean isPongConfirmation(String rawJson) {
+        return rawJson.contains("\"op\":\"pong\"") || rawJson.contains("\"op\": \"pong\"");
     }
 }
