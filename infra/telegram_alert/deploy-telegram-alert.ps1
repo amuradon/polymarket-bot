@@ -1,52 +1,65 @@
 <#
 .SYNOPSIS
-    Builds, packages, and deploys the Java 25 Telegram Alert Lambda container image to Amazon ECR and AWS Lambda.
+    Builds, releases, packages, and uploads the Java 25 Telegram Alert Lambda container image to Amazon ECR.
 
 .DESCRIPTION
-    1. Compiles the Java 25 project and packages the shaded uber-jar via Maven.
-    2. Logs into Amazon ECR in the target region (default: eu-west-1).
-    3. Builds the Docker container image using the Amazon Corretto 25 runtime.
-    4. Pushes the Docker image to the Amazon ECR repository.
-    5. Updates the AWS Lambda function code with the newly pushed image URI.
+    1. Executes Maven release with optional SemVer versioning (e.g. 1.0.1).
+       - If -Version x.y.z is supplied: sets -DreleaseVersion=x.y.z and -DdevelopmentVersion=x.y.(z+1)-SNAPSHOT.
+       - If -Version is omitted: Maven release automatically increments the patch version in batch mode.
+    2. Packages the Java 25 shaded uber-jar via Maven.
+    3. Authenticates Docker with Amazon ECR in the target region (default: eu-west-1).
+    4. Builds and tags the Docker image with the released SemVer version and 'latest'.
+    5. Pushes the Docker images to the Amazon ECR repository provisioned by infra/telegram-alert-base.yaml.
+    6. If the Lambda function already exists, updates its code in-place.
+
+.PARAMETER Version
+    Optional SemVer version for Maven release (format: x.y.z). If omitted, patch version is incremented automatically.
 
 .PARAMETER Region
     Target AWS Region (default: eu-west-1).
 
-.PARAMETER StackName
-    CloudFormation stack name (default: polymarket-bot-live).
+.PARAMETER BaseStackName
+    Name of the Telegram Alert Base Infrastructure stack (default: polymarket-bot-alert-base).
 
 .PARAMETER RepositoryUri
-    Amazon ECR repository URI. If omitted, automatically resolves using AWS Account ID and '${StackName}-telegram-alert-repo'.
+    Amazon ECR repository URI override. If omitted, resolved from BaseStackName outputs or account ID.
 
 .PARAMETER FunctionName
-    AWS Lambda function name (default: '${StackName}-telegram-alert').
+    Optional Lambda function name to update in-place if it already exists (default: polymarket-bot-alert-lambda-function).
 
-.PARAMETER ImageTag
-    Docker image tag (default: latest).
+.PARAMETER SkipRelease
+    If specified, skips running Maven release.
 
 .PARAMETER SkipBuild
     If specified, skips running Maven package.
 
 .EXAMPLE
-    .\deploy-telegram-alert.ps1 -Region eu-west-1 -StackName "polymarket-bot-live"
+    # Auto-increment patch version:
+    .\deploy-telegram-alert.ps1
+
+    # Specify exact SemVer release version:
+    .\deploy-telegram-alert.ps1 -Version "1.0.1"
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
+    [string]$Version = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$Region = "eu-west-1",
 
     [Parameter(Mandatory = $false)]
-    [string]$StackName = "polymarket-bot-live",
+    [string]$BaseStackName = "polymarket-bot-alert-base",
 
     [Parameter(Mandatory = $false)]
     [string]$RepositoryUri = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$FunctionName = "",
+    [string]$FunctionName = "polymarket-bot-alert-lambda-function",
 
     [Parameter(Mandatory = $false)]
-    [string]$ImageTag = "latest",
+    [switch]$SkipRelease,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipBuild
@@ -54,84 +67,156 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $FunctionName) {
-    $FunctionName = "$StackName-telegram-alert"
-}
-
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Polymarket Bot: Deploy Java 25 Telegram Alert Lambda     " -ForegroundColor Cyan
-Write-Host " Region: $Region | Stack: $StackName | Function: $FunctionName" -ForegroundColor Cyan
+Write-Host " Polymarket Bot: Release & Upload Alert Lambda Container  " -ForegroundColor Cyan
+Write-Host " Region: $Region | Base Stack: $BaseStackName" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Compile and package the Java 25 shaded jar
-if (-not $SkipBuild) {
-    Write-Host "[1/4] Building Java 25 shaded jar via Maven..." -ForegroundColor Yellow
+# 1. Determine SemVer & Execute Maven Release
+$ReleaseVersion = ""
+if (-not $SkipRelease) {
+    Write-Host "[1/5] Executing Maven release..." -ForegroundColor Yellow
     Push-Location $ScriptDir
     try {
-        & mvn clean package
+        if ($Version) {
+            if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+                throw "Invalid version format '$Version'. Version must be in format x.y.z (SemVer), e.g. 1.0.1"
+            }
+            $major = $matches[1]
+            $minor = $matches[2]
+            $patch = [int]$matches[3]
+            $nextPatch = $patch + 1
+            $devVersion = "$major.$minor.$nextPatch-SNAPSHOT"
+            $ReleaseVersion = $Version
+
+            Write-Host "      Release version:     $ReleaseVersion" -ForegroundColor Green
+            Write-Host "      Development version: $devVersion" -ForegroundColor Green
+
+            & mvn -B release:clean release:prepare `
+                "-DreleaseVersion=$ReleaseVersion" `
+                "-DdevelopmentVersion=$devVersion" `
+                "-Dtag=telegram-alert-$ReleaseVersion"
+        } else {
+            [xml]$pomXml = Get-Content (Join-Path $ScriptDir "pom.xml")
+            $rawVer = $pomXml.project.version
+            $ReleaseVersion = $rawVer -replace '-SNAPSHOT', ''
+            Write-Host "      Auto-incrementing from current POM version: $rawVer (Release: $ReleaseVersion)" -ForegroundColor Green
+
+            & mvn -B release:clean release:prepare
+        }
+
         if ($LASTEXITCODE -ne 0) {
-            throw "Maven build failed with exit code $LASTEXITCODE"
+            throw "Maven release failed with exit code $LASTEXITCODE"
         }
     } finally {
         Pop-Location
     }
 } else {
-    Write-Host "[1/4] Skipping Maven package as requested..." -ForegroundColor Yellow
+    Write-Host "[1/5] Skipping Maven release as requested..." -ForegroundColor Yellow
+    if ($Version) {
+        $ReleaseVersion = $Version
+    } else {
+        [xml]$pomXml = Get-Content (Join-Path $ScriptDir "pom.xml")
+        $ReleaseVersion = $pomXml.project.version -replace '-SNAPSHOT', ''
+    }
+    Write-Host "      Target image version tag: $ReleaseVersion" -ForegroundColor Green
 }
 
-$JarPath = Join-Path $ScriptDir "target\telegram-alert-1.0.0.jar"
+# 2. Package the Java 25 shaded jar via Maven
+if (-not $SkipBuild) {
+    Write-Host "[2/5] Packaging shaded uber-jar via Maven..." -ForegroundColor Yellow
+    Push-Location $ScriptDir
+    try {
+        & mvn clean package -DskipTests
+        if ($LASTEXITCODE -ne 0) {
+            throw "Maven package failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+} else {
+    Write-Host "[2/5] Skipping Maven package as requested..." -ForegroundColor Yellow
+}
+
+$JarPath = Join-Path $ScriptDir "target\telegram-alert-$ReleaseVersion.jar"
 if (-not (Test-Path $JarPath)) {
-    throw "Target shaded jar not found at $JarPath. Please run without -SkipBuild."
+    # Fallback to wildcard search in target directory
+    $FoundJar = Get-ChildItem -Path (Join-Path $ScriptDir "target") -Filter "telegram-alert-*.jar" | Where-Object { $_.Name -notmatch "original-" } | Select-Object -First 1
+    if ($FoundJar) {
+        $JarPath = $FoundJar.FullName
+    } else {
+        throw "Target shaded jar not found in $ScriptDir\target. Please run without -SkipBuild."
+    }
 }
+Write-Host "      Using shaded jar: $JarPath" -ForegroundColor Green
 
-# 2. Resolve ECR Repository URI
+# 3. Resolve Amazon ECR Repository URI
 if (-not $RepositoryUri) {
-    $AccountId = (aws sts get-caller-identity --query "Account" --output text).Trim()
-    $RepositoryUri = "$AccountId.dkr.ecr.$Region.amazonaws.com/$StackName-telegram-alert-repo"
+    Write-Host "[3/5] Resolving Amazon ECR repository URI..." -ForegroundColor Yellow
+    try {
+        $RepositoryUri = (aws cloudformation describe-stacks `
+            --stack-name $BaseStackName `
+            --region $Region `
+            --query "Stacks[0].Outputs[?OutputKey=='TelegramAlertEcrRepositoryUri'].OutputValue" `
+            --output text 2>$null).Trim()
+    } catch {
+        $RepositoryUri = ""
+    }
+
+    if (-not $RepositoryUri -or $RepositoryUri -eq "None") {
+        $AccountId = (aws sts get-caller-identity --query "Account" --output text).Trim()
+        $RepositoryUri = "$AccountId.dkr.ecr.$Region.amazonaws.com/$BaseStackName-telegram-alert-repo"
+    }
 }
+Write-Host "      ECR Repository URI: $RepositoryUri" -ForegroundColor Green
 
-$FullImageUri = "$RepositoryUri`:$ImageTag"
-Write-Host "      Target Image URI: $FullImageUri" -ForegroundColor Green
-
-# 3. Authenticate Docker with Amazon ECR
-Write-Host "[2/4] Authenticating Docker with Amazon ECR in $Region..." -ForegroundColor Yellow
-$EcrDomain = "$((aws sts get-caller-identity --query 'Account' --output text).Trim()).dkr.ecr.$Region.amazonaws.com"
+# 4. Authenticate Docker with Amazon ECR
+Write-Host "[4/5] Authenticating Docker with Amazon ECR in $Region..." -ForegroundColor Yellow
+$EcrDomain = ($RepositoryUri -split '/')[0]
 aws ecr get-login-password --region $Region | docker login --username AWS --password-stdin $EcrDomain
 if ($LASTEXITCODE -ne 0) {
     throw "ECR authentication failed with exit code $LASTEXITCODE"
 }
 
-# 4. Build and Push Docker image
-Write-Host "[3/4] Building and pushing Docker image..." -ForegroundColor Yellow
-docker build -t $FullImageUri $ScriptDir
+# 5. Build and Push Docker Images (SemVer + latest)
+Write-Host "[5/5] Building and pushing Docker container image (linux/arm64 & linux/amd64 compatible)..." -ForegroundColor Yellow
+$VersionedUri = "$RepositoryUri`:$ReleaseVersion"
+$LatestUri = "$RepositoryUri`:latest"
+
+docker build -t $VersionedUri -t $LatestUri $ScriptDir
 if ($LASTEXITCODE -ne 0) {
     throw "Docker build failed with exit code $LASTEXITCODE"
 }
 
-docker push $FullImageUri
+docker push $VersionedUri
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker push failed with exit code $LASTEXITCODE"
+    throw "Docker push for $VersionedUri failed with exit code $LASTEXITCODE"
 }
 
-# 5. Update Lambda function code if function already exists
-Write-Host "[4/4] Updating AWS Lambda function code on '$FunctionName'..." -ForegroundColor Yellow
+docker push $LatestUri
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker push for $LatestUri failed with exit code $LASTEXITCODE"
+}
+
+Write-Host "SUCCESS: Pushed $VersionedUri and $LatestUri to Amazon ECR." -ForegroundColor Green
+
+# 6. Update existing Lambda function if present
 $FunctionExists = (aws lambda get-function --function-name $FunctionName --region $Region 2>&1)
 if ($LASTEXITCODE -eq 0) {
+    Write-Host "Updating deployed Lambda function '$FunctionName' to image $VersionedUri..." -ForegroundColor Yellow
     aws lambda update-function-code `
         --function-name $FunctionName `
-        --image-uri $FullImageUri `
+        --image-uri $VersionedUri `
         --region $Region `
         --no-cli-pager | Out-Null
 
-    Write-Host "      Waiting for Lambda function update to complete..." -ForegroundColor Yellow
     aws lambda wait function-updated `
         --function-name $FunctionName `
         --region $Region
 
-    Write-Host "SUCCESS: Telegram Alert Lambda function '$FunctionName' updated to $FullImageUri" -ForegroundColor Green
+    Write-Host "SUCCESS: Lambda function '$FunctionName' updated to $VersionedUri" -ForegroundColor Green
 } else {
-    Write-Host "NOTE: Function '$FunctionName' does not exist yet; deploy CloudFormation stack to provision it." -ForegroundColor Cyan
-    Write-Host "SUCCESS: Docker image pushed to $FullImageUri ready for CloudFormation stack creation." -ForegroundColor Green
+    Write-Host "NOTE: Function '$FunctionName' not yet created. Deploy CFN stack 'infra/telegram-alert-lambda.yaml' with ImageTag=$ReleaseVersion." -ForegroundColor Cyan
 }

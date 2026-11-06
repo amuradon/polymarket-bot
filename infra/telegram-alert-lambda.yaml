@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Telegram Alert Lambda Function in eu-west-1 (Dublin). Provisions the Java 25 Telegram
+  Alert Lambda function from an existing Amazon ECR container image, authorizes CloudWatch Logs invocation,
+  and attaches a CloudWatch Logs Subscription Filter to the Live Trading Log Group.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  AlertBaseStackName:
+    Type: String
+    Default: polymarket-bot-alert-base
+    Description: Name of the Telegram Alert Base Infrastructure stack exporting TelegramAlertEcrRepositoryUri and TelegramAlertRoleArn.
+
+  LiveBaseStackName:
+    Type: String
+    Default: polymarket-bot-live-base
+    Description: Name of the Live Trading Base Infrastructure stack exporting LogGroupName and LogGroupArn.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Container image tag (SemVer or latest) in Amazon ECR to deploy for the Lambda function.
+
+  TelegramSecretId:
+    Type: String
+    Default: polymarket-sniper/telegram-credentials
+    Description: AWS Secrets Manager secret ID storing Telegram Bot credentials.
+
+Resources:
+  TelegramAlertFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Decodes CloudWatch Logs error, warning, fatal, and exception events and dispatches formatted alerts to Telegram.
+        must: Run Java 25 container image from TelegramAlertEcrRepository with TELEGRAM_SECRET_ID configured.
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-function"
+      PackageType: Image
+      Code:
+        ImageUri:
+          Fn::Sub:
+            - "${RepoUri}:${ImageTag}"
+            - RepoUri:
+                Fn::ImportValue: !Sub "${AlertBaseStackName}-TelegramAlertEcrRepositoryUri"
+      Timeout: 30
+      MemorySize: 512
+      Role:
+        Fn::ImportValue: !Sub "${AlertBaseStackName}-TelegramAlertRoleArn"
+      Environment:
+        Variables:
+          TELEGRAM_SECRET_ID: !Ref TelegramSecretId
+
+  TelegramAlertPermission:
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Authorizes CloudWatch Logs service to invoke the Telegram alert Lambda function upon pattern match.
+        must: Restrict invocation strictly to Live Trading LogGroup.
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt TelegramAlertFunction.Arn
+      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceArn:
+        Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupArn"
+
+  TelegramAlertSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: TelegramAlertPermission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Filters Live Trading logs for WARN, ERROR, FATAL, and Java exceptions or errors, routing matching events to the alerting Lambda.
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupName"
+      FilterPattern: "?WARN ?warn ?ERROR ?error ?FATAL ?fatal ?Exception ?Error"
+      DestinationArn: !GetAtt TelegramAlertFunction.Arn
+
+Outputs:
+  TelegramAlertFunctionArn:
+    Description: AWS Lambda Function ARN dispatching Telegram alerts for live trading errors and warnings
+    Value: !GetAtt TelegramAlertFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TelegramAlertFunctionArn"
+  TelegramAlertFunctionName:
+    Description: AWS Lambda Function Name
+    Value: !Ref TelegramAlertFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-TelegramAlertFunctionName"

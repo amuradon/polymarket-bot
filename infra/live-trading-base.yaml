@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Live Trading Base Infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
+  CloudWatch Logs group, least-privilege IAM role with SSM Session Manager and Secrets Manager access,
+  encrypted gp3 EBS volume for persistent live trade history, and a security group restricting inbound
+  HTTPS (port 443) strictly to authorized management IP (178.17.13.13/32).
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  EbsVolumeSizeGb:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 1000
+    Description: Size in GiB of the persistent gp3 EBS volume mounted at /mnt/ebs/polymarket-data.
+
+  PolymarketSecretId:
+    Type: String
+    Default: polymarket-sniper/clob-credentials
+    Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2 and EIP-712 signing credentials.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: Retention period in days for the CloudWatch Logs log group.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0ebc7d75fbfa0bf7f
+    Description: VPC ID in eu-west-1 for the Live Trading security group.
+
+  AllowedInboundCidr:
+    Type: String
+    Default: 178.17.13.13/32
+    Description: CIDR IP range allowed inbound HTTPS (port 443) access.
+
+Resources:
+  LiveTradingEcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Docker images for the Polymarket Bot Live Trading Quarkus application.
+        must: Keep image scanning enabled and retain repository across stack updates.
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-repo"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  LiveTradingLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Centralized CloudWatch Logs log group for the Live Trading Docker container (awslogs driver) and EC2 host logs.
+        must: Retain logs across stack updates and enforce a bounded retention period.
+    Properties:
+      LogGroupName: !Sub "/polymarket-bot/${AWS::StackName}/live-trading"
+      RetentionInDays: !Ref LogRetentionDays
+
+  LiveTradingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Security group restricting inbound HTTPS to authorized management IP and permitting all outbound traffic for market feeds.
+        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound HTTPS (443) for Polymarket CLOB, PolyBolt, ECR, SSM, and CloudWatch.
+    Properties:
+      GroupDescription: Security group for Polymarket Live Trading EC2 instance with restricted inbound HTTPS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedInboundCidr
+          Description: Inbound HTTPS access strictly for authorized management IP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound traffic for Polymarket CLOB/Gamma/PolyBolt (443), ECR, SSM, CloudWatch Logs, and Secrets Manager
+
+  LiveTradingIamRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, pull images from ECR, and read credentials from Secrets Manager.
+        must: Scope Secrets Manager GetSecretValue permission strictly to the PolymarketSecretId prefix in eu-west-1.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: LiveTradingEcrSecretsAndCloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EcrAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPullLiveTradingImage
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt LiveTradingEcrRepository.Arn
+              - Sid: ListSecretsForQuarkusSecretsManagerConfigSource
+                Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                Resource: '*'
+              - Sid: ReadPolymarketCredentialsSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PolymarketSecretId}*"
+              - Sid: WriteContainerAndHostLogsToCloudWatch
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt LiveTradingLogGroup.Arn
+              - Sid: EbsAttachAndDescribe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:AttachVolume
+                Resource: '*'
+
+  LiveTradingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Binds the LiveTradingIamRole to the EC2 instance.
+        must: Reference LiveTradingIamRole.
+    Properties:
+      Roles:
+        - !Ref LiveTradingIamRole
+
+  LiveTradingEbsVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Dedicated persistent gp3 EBS volume for storing live trades.jsonl and metrics.json separately from the root OS volume.
+        must: Must be encrypted, gp3, retained on stack deletion, and created in eu-west-1a.
+        mutability: immutable
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      VolumeType: gp3
+      Size: !Ref EbsVolumeSizeGb
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ebs-live"
+
+Outputs:
+  EcrRepositoryUri:
+    Description: Amazon ECR Repository URI for the Live Trading Docker image
+    Value: !GetAtt LiveTradingEcrRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-EcrRepositoryUri"
+  EcrRepositoryArn:
+    Description: Amazon ECR Repository ARN for the Live Trading Docker image
+    Value: !GetAtt LiveTradingEcrRepository.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EcrRepositoryArn"
+  LogGroupName:
+    Description: CloudWatch Logs log group name for Live Trading logs
+    Value: !Ref LiveTradingLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupName"
+  LogGroupArn:
+    Description: CloudWatch Logs log group ARN for Live Trading logs
+    Value: !GetAtt LiveTradingLogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupArn"
+  SecurityGroupId:
+    Description: Security Group ID for Live Trading EC2 instance
+    Value: !GetAtt LiveTradingSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+  InstanceProfileName:
+    Description: IAM Instance Profile name for Live Trading EC2 instance
+    Value: !Ref LiveTradingInstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceProfileName"
+  EbsVolumeId:
+    Description: Persistent gp3 EBS Volume ID mounted at /mnt/ebs/polymarket-data
+    Value: !Ref LiveTradingEbsVolume
+    Export:
+      Name: !Sub "${AWS::StackName}-EbsVolumeId"
