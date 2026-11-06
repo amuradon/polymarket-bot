@@ -81,7 +81,8 @@ public class PolymarketClobClient {
                     }
                 },
                 reconnectDelayMs,
-                pingIntervalMs
+                pingIntervalMs,
+                "PING"
         );
         marketStreams.put(marketSlug, stream);
         Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());

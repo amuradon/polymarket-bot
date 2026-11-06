@@ -31,6 +31,7 @@ public class ReconnectingWebSocketStream {
     private final RawWebSocketListener messageListener;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
+    private final String textPingPayload;
     private final HttpClient httpClient;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -42,7 +43,7 @@ public class ReconnectingWebSocketStream {
     private volatile long pingTimerId = -1L;
 
     /**
-     * Constructs a managed, auto-reconnecting WebSocket stream.
+     * Constructs a managed, auto-reconnecting WebSocket stream with protocol-level ping frames.
      *
      * @param vertx                        Vert.x runtime instance
      * @param streamName                   human-readable stream identifier for logging and diagnostics
@@ -60,6 +61,30 @@ public class ReconnectingWebSocketStream {
             RawWebSocketListener messageListener,
             long reconnectDelayMs,
             long pingIntervalMs) {
+        this(vertx, streamName, wsUrl, subscriptionMessagesSupplier, messageListener, reconnectDelayMs, pingIntervalMs, null);
+    }
+
+    /**
+     * Constructs a managed, auto-reconnecting WebSocket stream with optional application-level text ping.
+     *
+     * @param vertx                        Vert.x runtime instance
+     * @param streamName                   human-readable stream identifier for logging and diagnostics
+     * @param wsUrl                        target WebSocket URL (ws:// or wss://)
+     * @param subscriptionMessagesSupplier supplier returning initial subscription messages to send upon each connection
+     * @param messageListener              listener invoked with raw JSON and local receipt timestamp
+     * @param reconnectDelayMs             delay in milliseconds before attempting reconnection after disconnect
+     * @param pingIntervalMs               interval in milliseconds for sending WebSocket ping frames (0 to disable)
+     * @param textPingPayload              optional application-level text ping payload (e.g. {@code "PING"}), or null if disabled
+     */
+    public ReconnectingWebSocketStream(
+            Vertx vertx,
+            String streamName,
+            String wsUrl,
+            Supplier<List<String>> subscriptionMessagesSupplier,
+            RawWebSocketListener messageListener,
+            long reconnectDelayMs,
+            long pingIntervalMs,
+            String textPingPayload) {
         this.vertx = vertx;
         this.streamName = streamName;
         this.wsUrl = wsUrl;
@@ -67,6 +92,7 @@ public class ReconnectingWebSocketStream {
         this.messageListener = messageListener;
         this.reconnectDelayMs = Math.max(50L, reconnectDelayMs);
         this.pingIntervalMs = pingIntervalMs;
+        this.textPingPayload = textPingPayload;
 
         HttpClientOptions options = new HttpClientOptions()
                 .setSsl(wsUrl.toLowerCase().startsWith("wss"))
@@ -184,6 +210,15 @@ public class ReconnectingWebSocketStream {
                         ws.textMessageHandler(rawText -> {
                             long recvTs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(recvTs);
+                            if (rawText != null) {
+                                String trimmed = rawText.trim();
+                                if ("PONG".equalsIgnoreCase(trimmed) || "PING".equalsIgnoreCase(trimmed)) {
+                                    if (Log.isTraceEnabled()) {
+                                        Log.tracef("[%s] Received WebSocket text heartbeat: %s", streamName, trimmed);
+                                    }
+                                    return;
+                                }
+                            }
                             if (Log.isTraceEnabled()) {
                                 Log.tracef("[%s] Received WebSocket text frame at %d ms: %s", streamName, recvTs, rawText);
                             }
@@ -208,11 +243,13 @@ public class ReconnectingWebSocketStream {
                         });
 
                         ws.closeHandler(v -> {
+                            short closeCode = ws.closeStatusCode() != null ? ws.closeStatusCode() : -1;
+                            String closeReason = ws.closeReason() != null ? ws.closeReason() : "none";
                             if (running.get()) {
-                                Log.errorf("[%s] WebSocket connection closed unexpectedly; scheduling reconnect in %d ms",
-                                        streamName, reconnectDelayMs);
+                                Log.errorf("[%s] WebSocket connection closed unexpectedly (code=%d, reason=%s); scheduling reconnect in %d ms",
+                                        streamName, closeCode, closeReason, reconnectDelayMs);
                             } else if (Log.isDebugEnabled()) {
-                                Log.debugf("[%s] WebSocket connection closed cleanly on stop", streamName);
+                                Log.debugf("[%s] WebSocket connection closed cleanly on stop (code=%d)", streamName, closeCode);
                             }
                             onConnectionClosed(ws);
                         });
@@ -254,8 +291,14 @@ public class ReconnectingWebSocketStream {
             pingTimerId = vertx.setPeriodic(pingIntervalMs, id -> {
                 WebSocket ws = this.currentWebSocket;
                 if (ws != null && !ws.isClosed() && running.get()) {
+                    if (textPingPayload != null && !textPingPayload.isBlank()) {
+                        if (Log.isTraceEnabled()) {
+                            Log.tracef("[%s] Sending WebSocket text ping: %s", streamName, textPingPayload);
+                        }
+                        ws.writeTextMessage(textPingPayload);
+                    }
                     if (Log.isTraceEnabled()) {
-                        Log.tracef("[%s] Sending WebSocket PING frame", streamName);
+                        Log.tracef("[%s] Sending WebSocket protocol PING frame", streamName);
                     }
                     ws.writePing(Buffer.buffer("ping"));
                 }

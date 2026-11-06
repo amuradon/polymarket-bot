@@ -237,7 +237,8 @@ public class PolymarketPolyBoltClient {
                     }
                 },
                 reconnectDelayMs,
-                pingIntervalMs
+                pingIntervalMs,
+                "PING"
         );
     }
 

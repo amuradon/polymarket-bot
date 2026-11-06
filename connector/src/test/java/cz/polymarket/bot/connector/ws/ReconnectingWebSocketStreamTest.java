@@ -92,4 +92,54 @@ class ReconnectingWebSocketStreamTest {
         stream.stop();
         assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
     }
+
+    @Test
+    void shouldSendPeriodicTextPingAndInterceptPongResponse() throws Exception {
+        List<String> serverReceivedMessages = new CopyOnWriteArrayList<>();
+        List<String> clientReceivedPayloads = new CopyOnWriteArrayList<>();
+        AtomicLong lastClientRecvTimestamp = new AtomicLong(0);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    ws.textMessageHandler(msg -> {
+                        serverReceivedMessages.add(msg);
+                        if ("PING".equals(msg)) {
+                            ws.writeTextMessage("PONG");
+                        } else {
+                            ws.writeTextMessage("{\"data\":\"ok\"}");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/ping-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "PING-TEST-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> {
+                    clientReceivedPayloads.add(rawJson);
+                    lastClientRecvTimestamp.set(recvTs);
+                },
+                1000L,
+                50L,
+                "PING"
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(serverReceivedMessages).contains("PING");
+                    assertThat(clientReceivedPayloads).doesNotContain("PONG");
+                    assertThat(clientReceivedPayloads).contains("{\"data\":\"ok\"}");
+                    assertThat(stream.getLastMessageTimestampMs()).isGreaterThan(0L);
+                });
+
+        stream.stop();
+        assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
+    }
 }
