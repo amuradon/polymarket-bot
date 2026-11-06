@@ -267,7 +267,7 @@ class LiveTradingEngineTest {
                 objectMapper,
                 secretsResolver
         );
-        PolymarketStreamParser streamParser = new PolymarketStreamParser(objectMapper);
+        PolymarketStreamParser streamParser = new PolymarketStreamParser(objectMapper, "BTCUSDT");
         LiveTradeRepository tradeRepository = new LiveTradeRepository(
                 tempDir.toString(),
                 1000.0,
@@ -605,7 +605,7 @@ class LiveTradingEngineTest {
                     new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
                     new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
                             Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L),
-                    new PolymarketStreamParser(objectMapper),
+                    new PolymarketStreamParser(objectMapper, "BTCUSDT"),
                     "UtterParameciumStrategy",
                     "BTCUSDT",
                     "15m",
@@ -731,7 +731,7 @@ class LiveTradingEngineTest {
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
                         1000L, 10000L),
-                new PolymarketStreamParser(objectMapper),
+                new PolymarketStreamParser(objectMapper, "BTCUSDT"),
                 "UtterParameciumStrategy",
                 "BTCUSDT",
                 "15m",

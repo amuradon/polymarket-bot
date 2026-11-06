@@ -3,9 +3,11 @@ package cz.polymarket.bot.connector.polymarket.stream;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -22,15 +24,21 @@ import java.util.Optional;
 public class PolymarketStreamParser {
 
     private final ObjectMapper objectMapper;
+    private final String defaultSymbol;
 
     /**
      * Constructs the Polymarket stream parser.
      *
      * @param objectMapper shared Jackson mapper
+     * @param symbol       configured trading asset symbol (e.g. {@code BTCUSDT}, {@code ETHUSDT}, {@code SOLUSDT})
      */
     @Inject
-    public PolymarketStreamParser(ObjectMapper objectMapper) {
+    public PolymarketStreamParser(
+            ObjectMapper objectMapper,
+            @ConfigProperty(name = "polymarket.live.symbol", defaultValue = "BTCUSDT")
+            String symbol) {
         this.objectMapper = objectMapper;
+        this.defaultSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
     }
 
     /**
@@ -60,7 +68,7 @@ public class PolymarketStreamParser {
 
             String channel = "";
             long rootTs = recvTimestampMs;
-            String symbol = "btcusd";
+            String symbol = this.defaultSymbol;
             String source = "chainlink";
             int windowSeconds = -1;
             double payloadPrice = 0.0;
@@ -80,6 +88,7 @@ public class PolymarketStreamParser {
                         }
                     }
                     case "channel" -> channel = parser.getValueAsString("");
+                    case "key" -> symbol = parser.getValueAsString(symbol);
                     case "ts", "timestamp" -> rootTs = parser.getValueAsLong(recvTimestampMs);
                     case "payload" -> {
                         if (token == JsonToken.START_OBJECT) {
@@ -90,7 +99,7 @@ public class PolymarketStreamParser {
                                     break;
                                 }
                                 switch (pField) {
-                                    case "symbol" -> symbol = parser.getValueAsString("btcusd");
+                                    case "symbol" -> symbol = parser.getValueAsString(symbol);
                                     case "source" -> source = parser.getValueAsString("chainlink");
                                     case "window_seconds" -> windowSeconds = parser.getValueAsInt(-1);
                                     case "timestamp" -> payloadTs = parser.getValueAsLong(-1L);

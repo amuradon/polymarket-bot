@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.within;
  */
 class PolymarketStreamParserTest {
 
-    private final PolymarketStreamParser parser = new PolymarketStreamParser(new ObjectMapper());
+    private final PolymarketStreamParser parser = new PolymarketStreamParser(new ObjectMapper(), "BTCUSDT");
 
     @Test
     void shouldParsePolyBoltInitialSnapshotAndLiveTwapAndSpotFrames() {
@@ -70,6 +70,23 @@ class PolymarketStreamParserTest {
 
         // Control frame yields empty list
         assertThat(parser.parsePolyBoltFrame("{\"op\":\"authed\",\"rid\":\"a1\"}", 1000L)).isEmpty();
+
+        // Configured fallback symbol (e.g. ETHUSDT -> ethusd) is used when frame omits symbol
+        PolymarketStreamParser ethParser = new PolymarketStreamParser(new ObjectMapper(), "ETHUSDT");
+        String ethFrameWithoutSymbol = """
+                {
+                  "channel": "price.crypto",
+                  "ts": 1792741520000,
+                  "payload": {
+                    "value": 3150.75,
+                    "timestamp": 1792741520000
+                  }
+                }
+                """;
+        List<PolyBoltTick> ethTicks = ethParser.parsePolyBoltFrame(ethFrameWithoutSymbol, 1792741520010L);
+        assertThat(ethTicks).hasSize(1);
+        assertThat(ethTicks.getFirst().symbol()).isEqualTo("ethusd");
+        assertThat(ethTicks.getFirst().price()).isCloseTo(3150.75, within(1e-6));
     }
 
     @Test
