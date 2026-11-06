@@ -4,7 +4,7 @@
 
     <groupId>cz.polymarket.bot</groupId>
     <artifactId>telegram-alert</artifactId>
-    <version>1.0.3-SNAPSHOT</version>
+    <version>1.0.3</version>
     <packaging>jar</packaging>
     <name>Polymarket Bot :: Telegram Alert Lambda</name>
     <description>Pure Java 25 AWS Lambda function for CloudWatch Logs monitoring and Telegram alerting</description>
@@ -12,7 +12,7 @@
     <scm>
         <connection>scm:git:git@github.com:amuradon/polymarket-bot.git</connection>
         <developerConnection>scm:git:git@github.com:amuradon/polymarket-bot.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>telegram-alert-1.0.3</tag>
     </scm>
 
     <properties>
