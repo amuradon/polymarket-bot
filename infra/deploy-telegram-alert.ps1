@@ -179,9 +179,40 @@ Write-Host "      ECR Repository URI: $RepositoryUri" -ForegroundColor Green
 # 4. Authenticate Docker with Amazon ECR
 Write-Host "[4/5] Authenticating Docker with Amazon ECR in $Region..." -ForegroundColor Yellow
 $EcrDomain = ($RepositoryUri -split '/')[0]
-aws ecr get-login-password --region $Region | docker login --username AWS --password-stdin $EcrDomain
+
+# Ensure Docker config does not fail due to Windows Credential Manager payload length limits on ECR tokens
+$DockerConfigPath = Join-Path $env:USERPROFILE ".docker\config.json"
+if (Test-Path $DockerConfigPath) {
+    try {
+        $dockerConfig = Get-Content $DockerConfigPath -Raw | ConvertFrom-Json
+        if ($dockerConfig.credsStore -in @("desktop", "wincred")) {
+            Write-Host "      Removing '$($dockerConfig.credsStore)' from credsStore to prevent Windows Credential Manager token buffer overflow..." -ForegroundColor DarkGray
+            $dockerConfig.PSObject.Properties.Remove("credsStore")
+            $dockerConfig | ConvertTo-Json -Depth 10 | Set-Content $DockerConfigPath
+        }
+    } catch {
+        # Proceed with standard login attempt
+    }
+}
+
+$ecrPassword = (aws ecr get-login-password --region $Region).Trim()
+$ecrPassword | docker login --username AWS --password-stdin $EcrDomain
 if ($LASTEXITCODE -ne 0) {
-    throw "ECR authentication failed with exit code $LASTEXITCODE"
+    # Direct fallback: write basic auth token directly to config.json
+    Write-Host "      Standard docker login failed; falling back to direct auth token injection..." -ForegroundColor Yellow
+    try {
+        $authBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("AWS:$ecrPassword"))
+        $dockerConfig = Get-Content $DockerConfigPath -Raw | ConvertFrom-Json
+        if (-not $dockerConfig.auths) {
+            $dockerConfig | Add-Member -Name "auths" -Value ([PSCustomObject]@{}) -MemberType NoteProperty -Force
+        }
+        $dockerConfig.auths | Add-Member -Name $EcrDomain -Value ([PSCustomObject]@{ auth = $authBase64 }) -MemberType NoteProperty -Force
+        $dockerConfig.PSObject.Properties.Remove("credsStore")
+        $dockerConfig | ConvertTo-Json -Depth 10 | Set-Content $DockerConfigPath
+        Write-Host "      Direct auth token configured successfully for $EcrDomain." -ForegroundColor Green
+    } catch {
+        throw "ECR authentication failed with exit code $LASTEXITCODE"
+    }
 }
 
 # 5. Build and Push Docker Images (SemVer + latest)
