@@ -140,7 +140,7 @@ fi
 if [ "$SKIP_BUILD" = false ]; then
     echo "[2/6] Packaging Quarkus application via Maven wrapper..."
     pushd "$REPO_ROOT" > /dev/null
-    ./mvnw clean package -DskipTests -pl connector,trading,live
+    ./mvnw clean package -DskipTests -pl live -am
     popd > /dev/null
 else
     echo "[2/6] Skipping Maven package as requested..."

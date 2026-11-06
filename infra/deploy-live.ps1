@@ -147,7 +147,7 @@ if (-not $SkipBuild) {
     Write-Host "[2/6] Packaging Quarkus application via Maven wrapper..." -ForegroundColor Yellow
     Push-Location $RepoRoot
     try {
-        & .\mvnw.cmd clean package -DskipTests -pl connector,trading,live
+        & .\mvnw.cmd clean package -DskipTests -pl live -am
         if ($LASTEXITCODE -ne 0) {
             throw "Maven package failed with exit code $LASTEXITCODE"
         }
