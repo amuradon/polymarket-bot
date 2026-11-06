@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>cz.amuradon.polymarket.bot</groupId>
     <artifactId>polymarket-bot</artifactId>
-    <version>1.0.5</version>
+    <version>1.0.6-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -19,7 +19,7 @@
     <scm>
         <connection>scm:git:git@github.com:amuradon/polymarket-bot.git</connection>
         <developerConnection>scm:git:git@github.com:amuradon/polymarket-bot.git</developerConnection>
-        <tag>1.0.5</tag>
+        <tag>1.0.0</tag>
     </scm>
 
     <properties>
