@@ -8,8 +8,7 @@ import java.util.List;
  * Diagnostic status DTO for the live trading engine and active Polymarket market.
  *
  * @param strategyName     active strategy name (e.g. {@code UtterParameciumStrategy})
- * @param status           engine execution mode ({@code "LIVE"} or {@code "DRY_RUN"})
- * @param dryRun           whether dry-run simulation mode is active
+ * @param status           engine execution mode ({@code "LIVE"})
  * @param orderType        configured CLOB order time-in-force (e.g. {@code "FAK"})
  * @param activeMarketSlug currently tracked Polymarket 15m market slug
  * @param yesTokenId       Up (YES) conditional token ID for the active market
@@ -23,7 +22,6 @@ import java.util.List;
 public record LiveStatusDto(
         String strategyName,
         String status,
-        boolean dryRun,
         String orderType,
         String activeMarketSlug,
         String yesTokenId,

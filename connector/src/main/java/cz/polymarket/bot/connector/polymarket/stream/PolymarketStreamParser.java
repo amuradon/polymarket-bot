@@ -544,6 +544,107 @@ public class PolymarketStreamParser {
         return 0.0;
     }
 
+    /**
+     * Parses a raw JSON frame from the authenticated Polymarket CLOB User WebSocket channel ({@code /ws/user})
+     * into zero, one, or more {@link PolymarketUserTradeEvent} records using streaming {@link JsonParser}.
+     *
+     * @param rawJson raw User channel WebSocket text frame (single object or array of objects)
+     * @return list of parsed trade events (empty for {@code PONG}, {@code order} events, or malformed frames)
+     */
+    public List<PolymarketUserTradeEvent> parseUserTradeEvents(String rawJson) {
+        if (rawJson == null || rawJson.isBlank()) {
+            return Collections.emptyList();
+        }
+        if (!rawJson.contains("trade") && !rawJson.contains("TRADE")) {
+            return Collections.emptyList();
+        }
+
+        try (JsonParser parser = objectMapper.createParser(rawJson)) {
+            JsonToken firstToken = parser.nextToken();
+            if (firstToken == null) {
+                return Collections.emptyList();
+            }
+            if (firstToken == JsonToken.START_OBJECT) {
+                PolymarketUserTradeEvent single = streamSingleUserEvent(parser);
+                return single != null ? List.of(single) : Collections.emptyList();
+            }
+            if (firstToken == JsonToken.START_ARRAY) {
+                List<PolymarketUserTradeEvent> events = null;
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    if (parser.currentToken() == JsonToken.START_OBJECT) {
+                        PolymarketUserTradeEvent item = streamSingleUserEvent(parser);
+                        if (item != null) {
+                            if (events == null) {
+                                events = new ArrayList<>(2);
+                            }
+                            events.add(item);
+                        }
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                return events != null ? events : Collections.emptyList();
+            }
+            return Collections.emptyList();
+        } catch (Exception e) {
+            Log.warnf("Failed to parse CLOB User WS frame: %s", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private static PolymarketUserTradeEvent streamSingleUserEvent(JsonParser parser) throws IOException {
+        String eventType = "";
+        String tradeId = "";
+        String status = "";
+        String side = "";
+        String traderSide = "";
+        double size = 0.0;
+        double price = 0.0;
+        int feeRateBps = -1;
+        String assetId = "";
+        String orderId = "";
+
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            String field = parser.currentName();
+            JsonToken token = parser.nextToken();
+            if (field == null || token == null) {
+                break;
+            }
+            switch (field) {
+                case "event_type", "type" -> eventType = parser.getValueAsString("");
+                case "id" -> tradeId = parser.getValueAsString("");
+                case "status" -> status = parser.getValueAsString("");
+                case "side" -> side = parser.getValueAsString("");
+                case "trader_side" -> traderSide = parser.getValueAsString("");
+                case "size", "matched_amount" -> size = parseCurrentNumberOrText(parser);
+                case "price" -> price = parseCurrentNumberOrText(parser);
+                case "fee_rate_bps" -> feeRateBps = (int) Math.round(parseCurrentNumberOrText(parser));
+                case "asset_id" -> assetId = parser.getValueAsString("");
+                case "taker_order_id", "order_id" -> orderId = parser.getValueAsString("");
+                default -> parser.skipChildren();
+            }
+        }
+
+        if (!"trade".equalsIgnoreCase(eventType)
+                && !"trades".equalsIgnoreCase(eventType)
+                && !"user_trades".equalsIgnoreCase(eventType)) {
+            return null;
+        }
+        if (side.isBlank() && ("BUY".equalsIgnoreCase(traderSide) || "SELL".equalsIgnoreCase(traderSide))) {
+            side = traderSide;
+        }
+        return new PolymarketUserTradeEvent(
+                tradeId,
+                status,
+                side,
+                size,
+                price,
+                feeRateBps,
+                assetId,
+                orderId
+        );
+    }
+
     private static long normalizeTimestampMs(long rawTs, long fallbackMs) {
         if (rawTs <= 0L) {
             return fallbackMs;

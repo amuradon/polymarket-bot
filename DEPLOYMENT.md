@@ -106,9 +106,6 @@ Executes Maven release, builds multi-arch `linux/arm64` container image via Dock
 
 # Option B: Explicit SemVer release version:
 .\infra\deploy-live.ps1 -Version "1.1.0"
-
-# Option C: Deploy in dry-run mode (virtual order execution against real Polymarket CLOB):
-.\infra\deploy-live.ps1 -DryRun
 ```
 
 #### Linux / macOS (Bash) - Alternative:
@@ -118,9 +115,6 @@ Executes Maven release, builds multi-arch `linux/arm64` container image via Dock
 
 # Option B: Explicit SemVer release version:
 ./infra/deploy-live.sh -v 1.1.0
-
-# Option C: Deploy in dry-run mode:
-./infra/deploy-live.sh --dry-run
 ```
 
 ---

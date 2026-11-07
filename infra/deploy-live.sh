@@ -2,7 +2,7 @@
 # ==============================================================================
 # Builds, releases, packages, and deploys the Quarkus Live Trading application to AWS EC2 in eu-west-1.
 # Usage:
-#   ./deploy-live.sh [-v <version>] [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [--dry-run] [--skip-release] [--skip-build]
+#   ./deploy-live.sh [-v <version>] [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [--skip-release] [--skip-build]
 # Example:
 #   ./deploy-live.sh -v 1.1.0
 # ==============================================================================
@@ -17,7 +17,6 @@ EC2_STACK_NAME="polymarket-bot-live-ec2"
 REPOSITORY_URI=""
 INSTANCE_ID=""
 VERSION=""
-DRY_RUN=false
 SKIP_RELEASE=false
 SKIP_BUILD=false
 
@@ -32,7 +31,6 @@ Options:
   -e, --ec2-stack <name>      EC2 Compute Stack Name (default: polymarket-bot-live-ec2)
   -u, --repository-uri <uri>  Amazon ECR repository URI override
   -i, --instance-id <id>      EC2 Instance ID override
-      --dry-run               Run live trading in dry-run mode (paper orders against live Polymarket CLOB)
       --skip-release          Skip Maven release execution
       --skip-build            Skip Maven packaging
   -h, --help                  Show this help message
@@ -65,10 +63,6 @@ while [[ $# -gt 0 ]]; do
         -i|--instance-id)
             INSTANCE_ID="$2"
             shift 2
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            shift
             ;;
         --skip-release)
             SKIP_RELEASE=true
@@ -200,11 +194,6 @@ fi
 
 echo "      Target EC2 Instance ID: ${INSTANCE_ID}"
 
-DRY_RUN_VAL="false"
-if [ "$DRY_RUN" = true ]; then
-    DRY_RUN_VAL="true"
-fi
-
 TEMP_PARAMS=$(mktemp)
 cat << EOF > "${TEMP_PARAMS}"
 {
@@ -214,7 +203,7 @@ cat << EOF > "${TEMP_PARAMS}"
     "ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)",
     "aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin \"\${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\"",
     "docker pull ${VERSIONED_URI}",
-    "sudo /usr/local/bin/start-polymarket-live.sh \"${VERSIONED_URI}\" ${DRY_RUN_VAL}",
+    "sudo /usr/local/bin/start-polymarket-live.sh \"${VERSIONED_URI}\"",
     "sleep 3",
     "docker ps --filter name=polymarket-live"
   ]

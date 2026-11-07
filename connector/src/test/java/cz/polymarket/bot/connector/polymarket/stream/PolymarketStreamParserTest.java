@@ -209,4 +209,69 @@ class PolymarketStreamParserTest {
                 """;
         assertThat(parser.applyClobFrame(tickSizeFrame, 1792741510000L, localBook)).isEmpty();
     }
+
+    @Test
+    void shouldParseUserChannelBuyAndSellTradeEventsAndIgnoreOrderEvents() {
+        String singleBuyTrade = """
+                {
+                  "event_type": "trade",
+                  "id": "trade-buy-1",
+                  "asset_id": "token_up_1",
+                  "taker_order_id": "0xorder-buy-1",
+                  "side": "BUY",
+                  "size": "100.0",
+                  "price": "0.55",
+                  "fee_rate_bps": "700",
+                  "status": "MATCHED",
+                  "trader_side": "TAKER",
+                  "timestamp": "1792741510000"
+                }
+                """;
+        List<PolymarketUserTradeEvent> buyEvents = parser.parseUserTradeEvents(singleBuyTrade);
+        assertThat(buyEvents).hasSize(1);
+        PolymarketUserTradeEvent buy = buyEvents.getFirst();
+        assertThat(buy.tradeId()).isEqualTo("trade-buy-1");
+        assertThat(buy.status()).isEqualTo("MATCHED");
+        assertThat(buy.side()).isEqualTo("BUY");
+        assertThat(buy.size()).isCloseTo(100.0, within(1e-6));
+        assertThat(buy.price()).isCloseTo(0.55, within(1e-6));
+        assertThat(buy.feeRateBps()).isEqualTo(700);
+        assertThat(buy.assetId()).isEqualTo("token_up_1");
+        assertThat(buy.orderId()).isEqualTo("0xorder-buy-1");
+
+        String batchMixedEvents = """
+                [
+                  {
+                    "event_type": "order",
+                    "id": "0xorder-sell-1",
+                    "status": "LIVE",
+                    "side": "SELL",
+                    "price": "0.70"
+                  },
+                  {
+                    "type": "TRADE",
+                    "id": "trade-sell-1",
+                    "asset_id": "token_up_1",
+                    "taker_order_id": "0xorder-sell-1",
+                    "side": "SELL",
+                    "size": "100",
+                    "price": "0.70",
+                    "fee_rate_bps": "700",
+                    "status": "CONFIRMED"
+                  }
+                ]
+                """;
+        List<PolymarketUserTradeEvent> mixedEvents = parser.parseUserTradeEvents(batchMixedEvents);
+        assertThat(mixedEvents).hasSize(1);
+        PolymarketUserTradeEvent sell = mixedEvents.getFirst();
+        assertThat(sell.tradeId()).isEqualTo("trade-sell-1");
+        assertThat(sell.status()).isEqualTo("CONFIRMED");
+        assertThat(sell.side()).isEqualTo("SELL");
+        assertThat(sell.size()).isCloseTo(100.0, within(1e-6));
+        assertThat(sell.price()).isCloseTo(0.70, within(1e-6));
+        assertThat(sell.feeRateBps()).isEqualTo(700);
+
+        assertThat(parser.parseUserTradeEvents("PONG")).isEmpty();
+        assertThat(parser.parseUserTradeEvents("{\"event_type\":\"order\",\"id\":\"o1\"}")).isEmpty();
+    }
 }

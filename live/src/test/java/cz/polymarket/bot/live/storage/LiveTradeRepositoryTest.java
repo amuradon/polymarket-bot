@@ -103,8 +103,10 @@ class LiveTradeRepositoryTest {
                 metricsCalculator
         );
         repository1.syncAccountBalance(1000.0);
-        repository1.debitOpenPositionCost(56.73);
+        repository1.applyAccountBalanceDelta(-56.73);
         assertThat(repository1.getCurrentBalance()).isEqualTo(943.27);
+        repository1.applyAccountBalanceDelta(68.53);
+        assertThat(repository1.getCurrentBalance()).isEqualTo(1011.80);
 
         TradeRecord trade1 = new TradeRecord(
                 "2026-11-04T12:00:00Z",

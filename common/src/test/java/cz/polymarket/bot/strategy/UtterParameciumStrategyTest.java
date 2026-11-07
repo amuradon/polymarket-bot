@@ -29,6 +29,7 @@ class UtterParameciumStrategyTest {
     private UtterParameciumStrategyConfig config;
     private UtterParameciumStrategy strategy;
     private List<OrderCommand> submittedOrders;
+    private int balanceRefreshCount;
     private StrategyContext testContext;
 
     @BeforeEach
@@ -36,6 +37,7 @@ class UtterParameciumStrategyTest {
         config = UtterParameciumStrategyConfig.defaultModelV1();
         strategy = new UtterParameciumStrategy(config);
         submittedOrders = new ArrayList<>();
+        balanceRefreshCount = 0;
 
         ExecutionRouter router = new ExecutionRouter() {
             @Override
@@ -58,6 +60,11 @@ class UtterParameciumStrategyTest {
             @Override
             public HourlyPriceCache getPriceCache() {
                 return cache;
+            }
+
+            @Override
+            public void refreshAccountBalance() {
+                balanceRefreshCount++;
             }
         };
 
@@ -396,5 +403,42 @@ class UtterParameciumStrategyTest {
                 0.82, 0.80, 0.20, 0.18, 500.0, 500.0, 0.82, 0.20, tau54Ms
         ));
         assertThat(submittedOrders).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("Should trigger refreshAccountBalance once per market at tau = maxTauMs + 10000 (71000 ms)")
+    void shouldTriggerRefreshAccountBalanceOncePerMarketBeforeActivation() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        assertThat(balanceRefreshCount).isZero();
+
+        // At tau = 72_000 ms (> 71_000 ms = maxTauMs 61_000 + 10_000), balance refresh must NOT be triggered yet
+        long tau72Ms = CANDLE_END_MS - 72_000L;
+        strategy.onPolymarketCryptoPrice(tau72Ms, "btcusd", "chainlink", 90_010.00, tau72Ms);
+        assertThat(balanceRefreshCount).isZero();
+
+        // At tau = 71_000 ms (== maxTauMs + 10_000), balance refresh MUST be triggered once
+        long tau71Ms = CANDLE_END_MS - 71_000L;
+        strategy.onPolymarketCryptoPrice(tau71Ms, "btcusd", "chainlink", 90_012.00, tau71Ms);
+        assertThat(balanceRefreshCount).isEqualTo(1);
+
+        // Subsequent ticks and quotes in the same market must NOT trigger duplicate refreshes
+        long tau60Ms = CANDLE_END_MS - 60_000L;
+        strategy.onPolymarketCryptoPrice(tau60Ms, "btcusd", "chainlink", 90_015.00, tau60Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, tau60Ms
+        ));
+        assertThat(balanceRefreshCount).isEqualTo(1);
+
+        // Next 15m market: resets state and triggers again when entering tau <= 71_000 ms
+        long nextCandleStartMs = CANDLE_END_MS;
+        long nextCandleEndMs = nextCandleStartMs + 900_000L;
+        strategy.onPolymarketCryptoTwap60s(nextCandleStartMs, "btcusd", "chainlink", 90_100.00, 60, nextCandleStartMs);
+        strategy.onPolymarketCryptoPrice(nextCandleEndMs - 80_000L, "btcusd", "chainlink", 90_110.00, nextCandleEndMs - 80_000L);
+        assertThat(balanceRefreshCount).isEqualTo(1);
+
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, nextCandleEndMs - 70_500L
+        ));
+        assertThat(balanceRefreshCount).isEqualTo(2);
     }
 }

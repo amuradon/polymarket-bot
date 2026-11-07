@@ -171,7 +171,6 @@ Resources:
               #!/bin/bash
               set -euo pipefail
               IMAGE_URI="${!1:-polymarket-bot/live:latest}"
-              DRY_RUN="${!2:-false}"
               docker rm -f polymarket-live || true
               docker run -d \
                 --name polymarket-live \
@@ -187,7 +186,6 @@ Resources:
                 -e AWS_REGION="${AWS::Region}" \
                 -e POLYMARKET_CREDENTIALS_SECRET_ID="${PolymarketSecretId}" \
                 -e POLYMARKET_STRATEGY_NAME="UtterParameciumStrategy" \
-                -e POLYMARKET_LIVE_DRY_RUN="$DRY_RUN" \
                 "$IMAGE_URI"
               EOF
               chmod +x /usr/local/bin/start-polymarket-live.sh

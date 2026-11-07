@@ -96,7 +96,6 @@ public class LiveDashboardResource {
         LiveStatusDto status = new LiveStatusDto(
                 engine.getActiveStrategyName(),
                 engine.getStatus(),
-                engine.isDryRun(),
                 engine.getOrderType(),
                 market != null ? market.slug() : "",
                 market != null ? market.yesTokenId() : "",

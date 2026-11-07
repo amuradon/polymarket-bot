@@ -61,6 +61,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private static final long MAX_TARGET_PRICE_OFFSET_MS = 10_000L;
     private static final long TWAP_WINDOW_MS = 60_000L;
     private static final long BUFFER_RETENTION_MS = 65_000L;
+    private static final long PRE_ACTIVATION_BALANCE_SYNC_LEAD_MS = 10_000L;
     private static final long INITIAL_BURST_MIN_TAU_MS = 55_000L;
     private static final long LATE_LOCKIN_MAX_TAU_MS = 25_000L;
     private static final long LATE_LOCKIN_MIN_PROJ_DIST_CENTS = 1_200L;
@@ -96,6 +97,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private int tradesInMarket = 0;
     private long lastSignalMs = 0L;
     private boolean hasEmittedSignal = false;
+    private boolean balanceRefreshedForMarket = false;
     private boolean orderInFlight = false;
     private TradeDirection pendingDirection = TradeDirection.NO_TRADE;
     private int pendingRequestedShares = 0;
@@ -273,6 +275,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         tradesInMarket = 0;
         lastSignalMs = 0L;
         hasEmittedSignal = false;
+        balanceRefreshedForMarket = false;
         orderInFlight = false;
         pendingDirection = TradeDirection.NO_TRADE;
         pendingRequestedShares = 0;
@@ -326,6 +329,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
         ensureActiveCandle(timestampMs);
+        maybeRefreshBalanceBeforeActivation(timestampMs);
         long priceCents = Math.round(price * 100.0);
         recordChainlinkSample(timestampMs, priceCents);
 
@@ -386,6 +390,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         long nowMs = quote.timestampMs() > 0L ? quote.timestampMs() : lastChainlinkTickMs;
         if (nowMs > 0L) {
             ensureActiveCandle(nowMs);
+            maybeRefreshBalanceBeforeActivation(nowMs);
             evaluateEntry(nowMs, quote);
         }
     }
@@ -429,6 +434,18 @@ public class UtterParameciumStrategy implements TradingStrategy {
         // Model V1 holds all accumulated UP and DOWN positions to candle expiration
         orderInFlight = false;
         pendingClientOrderId = null;
+    }
+
+    private void maybeRefreshBalanceBeforeActivation(long nowMs) {
+        if (balanceRefreshedForMarket || context == null || activeCandleEndMs <= 0L || nowMs <= 0L) {
+            return;
+        }
+        long tauMs = activeCandleEndMs - nowMs;
+        long preActivationTauMs = config.maxTauMs() + PRE_ACTIVATION_BALANCE_SYNC_LEAD_MS;
+        if (tauMs <= preActivationTauMs && tauMs >= config.minTauMs()) {
+            balanceRefreshedForMarket = true;
+            context.refreshAccountBalance();
+        }
     }
 
     /**

@@ -159,14 +159,14 @@ public class LiveTradeRepository {
     }
 
     /**
-     * Immediately debits the cost of a newly opened live BUY position ({@code sizeUsd + entryFee}) from
-     * the in-memory balance on the hot path so subsequent batch orders within the same candle cannot overspend.
+     * Applies a signed balance delta (negative for BUY cost + fee, positive for SELL proceeds - fee)
+     * from a live WebSocket User channel trade event to the internally maintained account balance.
      *
-     * @param costUsd total position cost in USD ({@code sizeUsd + entryFee})
+     * @param deltaUsd signed USD balance change
      */
-    public synchronized void debitOpenPositionCost(double costUsd) {
-        if (costUsd > 0.0 && Double.isFinite(costUsd)) {
-            this.currentBalance = Math.max(0.0, this.currentBalance - costUsd);
+    public synchronized void applyAccountBalanceDelta(double deltaUsd) {
+        if (Double.isFinite(deltaUsd) && deltaUsd != 0.0) {
+            this.currentBalance = Math.max(0.0, this.currentBalance + deltaUsd);
         }
     }
 

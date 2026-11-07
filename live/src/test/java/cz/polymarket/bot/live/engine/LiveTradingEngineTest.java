@@ -317,7 +317,6 @@ class LiveTradingEngineTest {
                 "BTCUSDT",
                 "15m",
                 true,
-                false, // dryRun = false -> real live execution against mock CLOB server
                 "FAK"
         );
 
@@ -421,7 +420,7 @@ class LiveTradingEngineTest {
         clobAutoRespond.set(false);
         LiveTradingEngine engine = null;
         try {
-            engine = createTestEngine(true);
+            engine = createTestEngine();
 
             // Market 1: [1792741500, 1792742400] - only PolyBolt receives a message, CLOB WS receives 0 messages
             long market1StartSec = 1792741500L;
@@ -638,7 +637,6 @@ class LiveTradingEngineTest {
                     "BTCUSDT",
                     "15m",
                     false,
-                    false, // dryRun = false -> live mode
                     "FAK"
             );
 
@@ -657,7 +655,7 @@ class LiveTradingEngineTest {
 
     @Test
     void shouldDeduplicateClobPriceChangeEventsWhenTopOfBookPricesDoNotChange() {
-        LiveTradingEngine engine = createTestEngine(true);
+        LiveTradingEngine engine = createTestEngine();
         engine.discoverAndRotateMarket(1792741500L);
 
         String initialBook = """
@@ -790,14 +788,13 @@ class LiveTradingEngineTest {
                 "BTCUSDT",
                 "15m",
                 true,
-                false,
                 "FAK"
         );
 
         try {
             engine.onStart(null);
 
-            // Startup immediately overwrites the stale -42.92 with the real $2,328.00 collateral balance
+            // 1. Startup immediately overwrites the stale -42.92 with the real $2,328.00 collateral balance
             assertThat(repository.getCurrentBalance()).isEqualTo(2328.0);
 
             Awaitility.await()
@@ -807,25 +804,65 @@ class LiveTradingEngineTest {
                         assertThat(engine.getActiveMarketInfo()).isNotNull();
                     });
 
-            // Submit BUY order (100 shares @ $0.55 = $55.00 + $1.7325 fee = $56.7325)
-            // Balance must be immediately debited in memory on the hot path
-            engine.submitOrder(new OrderCommand(
-                    "client-order-live-debit-1",
-                    "pm-btc-15m",
-                    "BTC-UP",
-                    Timeframe.FIFTEEN_MINUTES,
-                    "BUY",
-                    BigDecimal.valueOf(0.55),
-                    BigDecimal.valueOf(100)
-            ));
-            assertThat(repository.getCurrentBalance()).isCloseTo(2328.0 - 56.7325, org.assertj.core.data.Offset.offset(0.01));
-
-            // Close the position via candle resolution and simulate updated on-chain balance ($2,410.50) via User WS event
-            engine.resolveCandle(cz.polymarket.bot.strategy.TradeDirection.UP, 85100.0);
-            mockCollateralMicroUsdc.set(2_410_500_000L);
+            // 2. Incoming BUY Trade Event from User WS stream debits $55.00 + $1.7325 fee = $56.7325
             for (ServerWebSocket userWs : userSockets) {
-                userWs.writeTextMessage("{\"event_type\":\"trade\",\"status\":\"CONFIRMED\",\"id\":\"t1\"}");
+                userWs.writeTextMessage("""
+                        {
+                          "event_type": "trade",
+                          "id": "trade-buy-1",
+                          "side": "BUY",
+                          "size": "100",
+                          "price": "0.55",
+                          "fee_rate_bps": "700",
+                          "status": "MATCHED"
+                        }
+                        """);
+                // Subsequent MINED and CONFIRMED updates for the same trade ID must NOT double-debit
+                userWs.writeTextMessage("""
+                        {
+                          "event_type": "trade",
+                          "id": "trade-buy-1",
+                          "side": "BUY",
+                          "size": "100",
+                          "price": "0.55",
+                          "fee_rate_bps": "700",
+                          "status": "CONFIRMED"
+                        }
+                        """);
             }
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(repository.getCurrentBalance())
+                            .isCloseTo(2328.0 - 56.7325, org.assertj.core.data.Offset.offset(0.01)));
+
+            // 3. Incoming SELL Trade Event from User WS stream credits $70.00 - $1.47 fee = $68.53
+            for (ServerWebSocket userWs : userSockets) {
+                userWs.writeTextMessage("""
+                        {
+                          "event_type": "trade",
+                          "id": "trade-sell-1",
+                          "side": "SELL",
+                          "size": "100",
+                          "price": "0.70",
+                          "fee_rate_bps": "700",
+                          "status": "MATCHED"
+                        }
+                        """);
+            }
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(repository.getCurrentBalance())
+                            .isCloseTo(2328.0 - 56.7325 + 68.53, org.assertj.core.data.Offset.offset(0.01)));
+
+            // 4. UtterParameciumStrategy pre-activation at tau = maxTauMs + 10000 (71_000 ms before market end)
+            // forces a balance reload from Polymarket CLOB REST API ($2,410.50)
+            mockCollateralMicroUsdc.set(2_410_500_000L);
+            long candleStartMs = ((System.currentTimeMillis() / 900_000L) + 2L) * 900_000L;
+            long candleEndMs = candleStartMs + 900_000L;
+            engine.onPolymarketCryptoTwap60s(candleStartMs, "btcusd", "chainlink", 85000.0, 60, candleStartMs);
+            engine.onPolymarketCryptoPrice(candleEndMs - 71_000L, "btcusd", "chainlink", 85020.0, candleEndMs - 71_000L);
 
             Awaitility.await()
                     .atMost(Duration.ofSeconds(5))
@@ -835,7 +872,7 @@ class LiveTradingEngineTest {
         }
     }
 
-    private LiveTradingEngine createTestEngine(boolean dryRun) {
+    private LiveTradingEngine createTestEngine() {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),
                 Optional.of("api-key-live"),
@@ -871,7 +908,6 @@ class LiveTradingEngineTest {
                 "BTCUSDT",
                 "15m",
                 false,
-                dryRun,
                 "FAK"
         );
     }

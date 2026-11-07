@@ -31,8 +31,7 @@ class LiveTradingApplicationTest {
                 .statusCode(200)
                 .contentType(ContentType.JSON)
                 .body("strategyName", equalTo("UtterParameciumStrategy"))
-                .body("status", equalTo("DRY_RUN"))
-                .body("dryRun", equalTo(true))
+                .body("status", equalTo("LIVE"))
                 .body("orderType", equalTo("FAK"));
     }
 

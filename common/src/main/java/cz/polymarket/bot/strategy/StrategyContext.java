@@ -40,4 +40,11 @@ public interface StrategyContext {
     default java.util.Map<IndicatorType, Double> getIndicators() {
         return java.util.Map.of();
     }
+
+    /**
+     * Forces a refresh of the account collateral balance from Polymarket in live trading
+     * (no-op in paper trading and backtesting).
+     */
+    default void refreshAccountBalance() {
+    }
 }

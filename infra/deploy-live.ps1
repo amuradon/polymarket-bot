@@ -30,9 +30,6 @@
 .PARAMETER InstanceId
     EC2 Instance ID override. If omitted, resolved from Ec2StackName outputs.
 
-.PARAMETER DryRun
-    If specified, runs the live trading engine in dry-run mode (paper orders against live Polymarket CLOB).
-
 .PARAMETER SkipRelease
     If specified, skips running Maven release.
 
@@ -45,9 +42,6 @@
 
     # Specify exact SemVer release version:
     .\infra\deploy-live.ps1 -Version "1.1.0"
-
-    # Deploy in dry-run mode without Maven release:
-    .\infra\deploy-live.ps1 -SkipRelease -DryRun
 #>
 
 [CmdletBinding()]
@@ -69,9 +63,6 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$InstanceId = "",
-
-    [Parameter(Mandatory = $false)]
-    [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipRelease,
@@ -261,15 +252,13 @@ if (-not $InstanceId -or $InstanceId -eq "None") {
 
 Write-Host "      Target EC2 Instance ID: $InstanceId" -ForegroundColor Green
 
-$DryRunVal = if ($DryRun) { "true" } else { "false" }
-
 $Commands = @(
     "set -euxo pipefail",
     "export AWS_REGION=$Region",
     'ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)',
     "aws ecr get-login-password --region $Region | docker login --username AWS --password-stdin `"`$ACCOUNT_ID.dkr.ecr.$Region.amazonaws.com`"",
     "docker pull $VersionedUri",
-    "sudo /usr/local/bin/start-polymarket-live.sh `"$VersionedUri`" $DryRunVal",
+    "sudo /usr/local/bin/start-polymarket-live.sh `"$VersionedUri`"",
     "sleep 3",
     "docker ps --filter name=polymarket-live"
 )
