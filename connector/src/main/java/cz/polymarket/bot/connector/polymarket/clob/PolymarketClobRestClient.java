@@ -177,6 +177,32 @@ public class PolymarketClobRestClient {
     }
 
     /**
+     * Queries {@code GET /balance-allowance?asset_type=COLLATERAL&signature_type=3}
+     * and returns the available USDC collateral balance in micro-USDC ({@code 1 USDC = 1,000,000}).
+     * <p>
+     * Note: Polymarket L2 HMAC authentication signs only the base path {@code /balance-allowance}
+     * without the query string.
+     *
+     * @return available USDC collateral balance in micro-USDC
+     */
+    public long getCollateralBalanceMicroUsdc() {
+        return queryBalanceAllowanceMicroUnits(
+                "?asset_type=COLLATERAL&signature_type=3",
+                "collateral USDC"
+        );
+    }
+
+    /**
+     * Queries {@code GET /balance-allowance?asset_type=COLLATERAL&signature_type=3}
+     * and returns the available USDC collateral balance in USD.
+     *
+     * @return available USDC collateral balance in USD
+     */
+    public double getCollateralBalanceUsd() {
+        return getCollateralBalanceMicroUsdc() / 1_000_000.0;
+    }
+
+    /**
      * Queries {@code GET /balance-allowance?asset_type=CONDITIONAL&signature_type=3&token_id={tokenId}}
      * and returns the conditional token balance in micro-shares ({@code 1 share = 1,000,000}).
      * <p>
@@ -190,11 +216,15 @@ public class PolymarketClobRestClient {
         if (tokenId == null || tokenId.isBlank()) {
             throw new IllegalArgumentException("tokenId must not be blank");
         }
+        String querySuffix = "?asset_type=CONDITIONAL&signature_type=3&token_id="
+                + URLEncoder.encode(tokenId.trim(), StandardCharsets.UTF_8);
+        return queryBalanceAllowanceMicroUnits(querySuffix, "conditional token " + tokenId);
+    }
+
+    private long queryBalanceAllowanceMicroUnits(String querySuffix, String description) {
         PolymarketCredentials creds = requireL2Credentials();
         String cleanPath = "/balance-allowance";
-        String fullPathWithQuery = cleanPath
-                + "?asset_type=CONDITIONAL&signature_type=3&token_id="
-                + URLEncoder.encode(tokenId.trim(), StandardCharsets.UTF_8);
+        String fullPathWithQuery = cleanPath + querySuffix;
         String timestampStr = String.valueOf(Instant.now().getEpochSecond());
         String signature = computeL2HmacSignature(creds.secret(), timestampStr, "GET", cleanPath, new byte[0]);
 
@@ -219,7 +249,7 @@ public class PolymarketClobRestClient {
                 Log.tracef("CLOB GET %s response (HTTP %d): %s", fullPathWithQuery, response.statusCode(), response.body());
             }
             if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
-                Log.errorf("CLOB GET /balance-allowance returned HTTP %d for token %s", response.statusCode(), tokenId);
+                Log.errorf("CLOB GET /balance-allowance returned HTTP %d for %s", response.statusCode(), description);
                 throw new IllegalStateException("CLOB GET /balance-allowance HTTP " + response.statusCode());
             }
             JsonNode root = objectMapper.readTree(response.body());
@@ -230,8 +260,8 @@ public class PolymarketClobRestClient {
             }
             return Long.parseLong(balanceStr);
         } catch (Exception e) {
-            Log.errorf("Failed to query conditional token balance for %s: %s", tokenId, e.getMessage());
-            throw new IllegalStateException("Failed to query conditional token balance for " + tokenId, e);
+            Log.errorf("Failed to query balance for %s: %s", description, e.getMessage());
+            throw new IllegalStateException("Failed to query balance for " + description, e);
         }
     }
 

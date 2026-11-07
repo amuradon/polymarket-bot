@@ -31,11 +31,11 @@ public class LiveTradeRepository {
     private static final String METRICS_FILENAME = "metrics.json";
 
     private final Path dataDirectory;
-    private final double initialCapital;
     private final ObjectMapper objectMapper;
     private final PerformanceMetricsCalculator metricsCalculator;
 
     private final List<TradeRecord> trades = new CopyOnWriteArrayList<>();
+    private volatile double initialCapital;
     private volatile PerformanceMetrics currentMetrics;
     private volatile double currentBalance;
 
@@ -43,7 +43,6 @@ public class LiveTradeRepository {
      * Constructs the live trade repository.
      *
      * @param dataDir           directory path for persistent JSONL trade storage
-     * @param initialCapital    initial live trading bankroll in USD
      * @param objectMapper      Jackson mapper
      * @param metricsCalculator performance metrics calculator
      */
@@ -51,15 +50,10 @@ public class LiveTradeRepository {
     public LiveTradeRepository(
             @ConfigProperty(name = "polymarket.live.data-dir", defaultValue = "data/live")
             String dataDir,
-            @ConfigProperty(name = "polymarket.live.initial-capital", defaultValue = "100.0")
-            double initialCapital,
             ObjectMapper objectMapper,
             PerformanceMetricsCalculator metricsCalculator) {
         if (dataDir == null || dataDir.isBlank()) {
             throw new IllegalArgumentException("dataDir cannot be null or blank");
-        }
-        if (initialCapital <= 0.0) {
-            throw new IllegalArgumentException("initialCapital must be positive");
         }
         if (objectMapper == null) {
             throw new IllegalArgumentException("objectMapper cannot be null");
@@ -78,7 +72,6 @@ public class LiveTradeRepository {
             }
         }
         this.dataDirectory = path;
-        this.initialCapital = initialCapital;
         this.objectMapper = objectMapper;
         this.metricsCalculator = metricsCalculator;
 
@@ -89,6 +82,18 @@ public class LiveTradeRepository {
         try {
             Files.createDirectories(dataDirectory);
             Log.infof("Initializing live trade storage in directory: %s", dataDirectory.toAbsolutePath());
+
+            Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
+            if (Files.exists(metricsFile)) {
+                try {
+                    PerformanceMetrics persistedMetrics = objectMapper.readValue(metricsFile.toFile(), PerformanceMetrics.class);
+                    if (persistedMetrics != null && persistedMetrics.initialCapital() > 0.0) {
+                        this.initialCapital = persistedMetrics.initialCapital();
+                    }
+                } catch (Exception e) {
+                    Log.warnf("Skipping malformed live metrics file during startup: %s", e.getMessage());
+                }
+            }
 
             Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
             if (Files.exists(tradesFile)) {
@@ -111,20 +116,57 @@ public class LiveTradeRepository {
                 trades.addAll(loaded);
                 Log.infof("Restored %d live trades from %s", trades.size(), tradesFile.toAbsolutePath());
             } else {
-                Log.infof("No live trades file found at %s - starting with initial capital $%.2f",
-                        tradesFile.toAbsolutePath(), initialCapital);
+                Log.infof("No live trades file found at %s - awaiting live account balance synchronization",
+                        tradesFile.toAbsolutePath());
             }
 
             if (trades.isEmpty()) {
-                this.currentBalance = initialCapital;
-                this.currentMetrics = PerformanceMetrics.empty(initialCapital);
+                this.currentBalance = this.initialCapital;
+                this.currentMetrics = PerformanceMetrics.empty(this.initialCapital);
             } else {
                 this.currentBalance = trades.getLast().balanceAfterTrade();
-                this.currentMetrics = metricsCalculator.calculate(trades, initialCapital);
+                if (this.initialCapital <= 0.0) {
+                    TradeRecord first = trades.getFirst();
+                    this.initialCapital = Math.max(0.0, first.balanceAfterTrade() - first.netPnl());
+                }
+                this.currentMetrics = metricsCalculator.calculate(trades, this.initialCapital);
             }
         } catch (IOException e) {
             Log.fatalf("Fatal storage error: failed to initialize live trade storage in %s: %s", dataDirectory, e.getMessage());
             throw new RuntimeException("Could not initialize LiveTradeRepository", e);
+        }
+    }
+
+    /**
+     * Synchronizes the repository balance with the authoritative USDC collateral balance read from the
+     * Polymarket CLOB account. When no trades have been recorded yet (or {@code initialCapital} was not yet set),
+     * also initializes {@code initialCapital} to the account balance.
+     *
+     * @param accountBalanceUsd available Polymarket account USDC collateral balance in USD
+     */
+    public synchronized void syncAccountBalance(double accountBalanceUsd) {
+        if (!Double.isFinite(accountBalanceUsd) || accountBalanceUsd < 0.0) {
+            throw new IllegalArgumentException("accountBalanceUsd must be finite and non-negative");
+        }
+        this.currentBalance = accountBalanceUsd;
+        if (this.initialCapital <= 0.0 || trades.isEmpty()) {
+            this.initialCapital = accountBalanceUsd;
+        }
+        this.currentMetrics = trades.isEmpty()
+                ? PerformanceMetrics.empty(this.initialCapital)
+                : metricsCalculator.calculate(trades, this.initialCapital);
+        persistMetricsSnapshot();
+    }
+
+    /**
+     * Immediately debits the cost of a newly opened live BUY position ({@code sizeUsd + entryFee}) from
+     * the in-memory balance on the hot path so subsequent batch orders within the same candle cannot overspend.
+     *
+     * @param costUsd total position cost in USD ({@code sizeUsd + entryFee})
+     */
+    public synchronized void debitOpenPositionCost(double costUsd) {
+        if (costUsd > 0.0 && Double.isFinite(costUsd)) {
+            this.currentBalance = Math.max(0.0, this.currentBalance - costUsd);
         }
     }
 
@@ -140,7 +182,10 @@ public class LiveTradeRepository {
 
         trades.add(trade);
         this.currentBalance = trade.balanceAfterTrade();
-        this.currentMetrics = metricsCalculator.calculate(trades, initialCapital);
+        if (this.initialCapital <= 0.0 && trades.size() == 1) {
+            this.initialCapital = Math.max(0.0, trade.balanceAfterTrade() - trade.netPnl());
+        }
+        this.currentMetrics = metricsCalculator.calculate(trades, this.initialCapital);
 
         Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
         try {
@@ -154,6 +199,37 @@ public class LiveTradeRepository {
             throw new RuntimeException("Failed to persist live trade to " + tradesFile, e);
         }
 
+        persistMetricsSnapshot();
+        if (Log.isTraceEnabled()) {
+            Log.tracef("Persisted live trade record and metrics snapshot to %s (totalTrades=%d, balance=$%.2f)",
+                    dataDirectory, trades.size(), currentBalance);
+        }
+    }
+
+    /**
+     * Resets stored trade history and sets the current account balance as the new baseline {@code initialCapital}.
+     */
+    public synchronized void reset() {
+        trades.clear();
+        if (this.currentBalance > 0.0) {
+            this.initialCapital = this.currentBalance;
+        } else {
+            this.currentBalance = this.initialCapital;
+        }
+        this.currentMetrics = PerformanceMetrics.empty(this.initialCapital);
+
+        Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
+        try {
+            Files.deleteIfExists(tradesFile);
+        } catch (IOException e) {
+            Log.errorf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
+        }
+
+        persistMetricsSnapshot();
+        Log.infof("Reset live trade storage to account capital: $%.2f", initialCapital);
+    }
+
+    private void persistMetricsSnapshot() {
         Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
         Path tempFile = dataDirectory.resolve(METRICS_FILENAME + ".tmp");
         try {
@@ -174,38 +250,6 @@ public class LiveTradeRepository {
                 Log.errorf("Failed to write live metrics snapshot: %s", ex.getMessage());
             }
         }
-        if (Log.isTraceEnabled()) {
-            Log.tracef("Persisted live trade record and metrics snapshot to %s (totalTrades=%d, balance=$%.2f)",
-                    dataDirectory, trades.size(), currentBalance);
-        }
-    }
-
-    /**
-     * Resets stored trade history and restores balance to {@code initialCapital}.
-     */
-    public synchronized void reset() {
-        trades.clear();
-        this.currentBalance = initialCapital;
-        this.currentMetrics = PerformanceMetrics.empty(initialCapital);
-
-        Path tradesFile = dataDirectory.resolve(TRADES_FILENAME);
-        try {
-            Files.deleteIfExists(tradesFile);
-        } catch (IOException e) {
-            Log.errorf("Failed to delete %s during reset: %s", tradesFile, e.getMessage());
-        }
-
-        Path metricsFile = dataDirectory.resolve(METRICS_FILENAME);
-        try {
-            String metricsJson = objectMapper.writeValueAsString(currentMetrics);
-            Files.writeString(metricsFile, metricsJson,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE);
-        } catch (IOException e) {
-            Log.errorf("Failed to write metrics.json during reset: %s", e.getMessage());
-        }
-        Log.infof("Reset live trade storage to initial capital: $%.2f", initialCapital);
     }
 
     /**

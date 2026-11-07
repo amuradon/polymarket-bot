@@ -1,5 +1,6 @@
 package cz.polymarket.bot.connector.polymarket;
 
+import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
@@ -17,12 +18,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}).
- * Manages per-market WebSocket connections so each market's raw order book and trade frames are forwarded
- * directly to disk without JSON parsing overhead, and cleanly disconnects when a market resolves.
+ * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
+ * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
+ * Manages per-market WebSocket connections and the authenticated User Channel stream,
+ * cleanly disconnecting when a market resolves or on shutdown.
  */
 @ApplicationScoped
 public class PolymarketClobClient {
+
+    /**
+     * Connection state map key for the authenticated Polymarket CLOB User Channel WebSocket stream.
+     */
+    public static final String USER_STREAM_KEY = "USER";
 
     private final Vertx vertx;
     private final String wsUrl;
@@ -30,6 +37,7 @@ public class PolymarketClobClient {
     private final long pingIntervalMs;
 
     private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
+    private volatile ReconnectingWebSocketStream userStream;
 
     /**
      * Constructs the Polymarket CLOB WebSocket client.
@@ -106,22 +114,72 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Disconnects all active market CLOB WebSocket streams.
+     * Opens an authenticated CLOB User Channel WebSocket stream ({@code /ws/user}) receiving real-time
+     * account order and trade fill notifications.
+     *
+     * @param credentials Polymarket Level 2 API credentials
+     * @param listener    listener receiving raw JSON frames and receipt timestamps
+     */
+    public synchronized void openUserStream(PolymarketCredentials credentials, RawWebSocketListener listener) {
+        if (credentials == null || !credentials.hasL2Credentials()) {
+            throw new IllegalArgumentException("Valid Polymarket L2 credentials are required for the CLOB user stream");
+        }
+        closeUserStream();
+        String userWsUrl = resolveUserWsUrl(this.wsUrl);
+        String subPayload = buildUserSubscriptionPayload(credentials);
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "POLYMARKET-CLOB-USER",
+                userWsUrl,
+                () -> List.of(subPayload),
+                (rawJson, recvTs) -> {
+                    if (listener != null && rawJson != null && !rawJson.isBlank()) {
+                        listener.onMessage(rawJson, recvTs);
+                    }
+                },
+                reconnectDelayMs,
+                pingIntervalMs,
+                "PING"
+        );
+        this.userStream = stream;
+        Log.infof("Opening authenticated Polymarket CLOB User WebSocket stream (%s)", userWsUrl);
+        stream.start();
+    }
+
+    /**
+     * Disconnects and removes the authenticated CLOB User Channel WebSocket stream.
+     */
+    public synchronized void closeUserStream() {
+        ReconnectingWebSocketStream current = this.userStream;
+        this.userStream = null;
+        if (current != null) {
+            Log.info("Closing Polymarket CLOB User WebSocket stream");
+            current.stop();
+        }
+    }
+
+    /**
+     * Disconnects all active market and user CLOB WebSocket streams.
      */
     public synchronized void stopAll() {
         for (String slug : List.copyOf(marketStreams.keySet())) {
             closeMarketStream(slug);
         }
+        closeUserStream();
     }
 
     /**
-     * Returns an unmodifiable snapshot of the connection states of all active market CLOB streams.
+     * Returns an unmodifiable snapshot of the connection states of all active market and user CLOB streams.
      *
-     * @return map of market slug to {@link ConnectionState}
+     * @return map of stream key to {@link ConnectionState}
      */
     public Map<String, ConnectionState> getConnectionStates() {
         Map<String, ConnectionState> states = new LinkedHashMap<>();
         marketStreams.forEach((slug, stream) -> states.put(slug, stream.getState()));
+        ReconnectingWebSocketStream currentUser = this.userStream;
+        if (currentUser != null) {
+            states.put(USER_STREAM_KEY, currentUser.getState());
+        }
         return Collections.unmodifiableMap(states);
     }
 
@@ -131,5 +189,23 @@ public class PolymarketClobClient {
                 .map(id -> "\"" + id.trim() + "\"")
                 .collect(Collectors.joining(","));
         return "{\"assets_ids\":[" + quotedTokens + "],\"type\":\"market\",\"custom_feature_enabled\":true}";
+    }
+
+    private static String buildUserSubscriptionPayload(PolymarketCredentials credentials) {
+        return "{\"auth\":{\"apiKey\":\"" + credentials.apiKey().trim()
+                + "\",\"secret\":\"" + credentials.secret().trim()
+                + "\",\"passphrase\":\"" + credentials.passphrase().trim()
+                + "\"},\"markets\":[],\"type\":\"user\"}";
+    }
+
+    private static String resolveUserWsUrl(String marketWsUrl) {
+        String trimmed = marketWsUrl != null ? marketWsUrl.trim() : "";
+        if (trimmed.endsWith("/market")) {
+            return trimmed.substring(0, trimmed.length() - "/market".length()) + "/user";
+        }
+        if (trimmed.endsWith("/clob")) {
+            return trimmed.substring(0, trimmed.length() - "/clob".length()) + "/user";
+        }
+        return trimmed.endsWith("/") ? (trimmed + "user") : (trimmed + "/user");
     }
 }

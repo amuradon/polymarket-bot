@@ -1,5 +1,6 @@
 package cz.polymarket.bot.connector.polymarket;
 
+import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -84,6 +85,60 @@ class PolymarketClobClientTest {
 
         client.closeMarketStream(slug);
         assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+        client.stopAll();
+    }
+
+    @Test
+    void shouldOpenAndCloseAuthenticatedUserStreamDeliveringOrderAndTradeEvents() throws Exception {
+        List<String> receivedUserSubMessages = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    if ("/ws/user".equals(ws.path())) {
+                        ws.textMessageHandler(msg -> {
+                            receivedUserSubMessages.add(msg);
+                            if (msg.contains("\"type\":\"user\"") && msg.contains("\"apiKey\":\"api-key-1\"")) {
+                                ws.writeTextMessage("""
+                                        {"event_type":"trade","status":"MATCHED","id":"trade-1","market":"0xcond1"}
+                                        """.strip());
+                            }
+                        });
+                    }
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                "ws://localhost:" + port + "/ws/market",
+                200L,
+                5000L
+        );
+
+        PolymarketCredentials credentials = new PolymarketCredentials(
+                "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+                "api-key-1",
+                "passphrase-1",
+                "c2VjcmV0X2tleV9mb3JfdGVzdGluZ19wb2x5bWFya2V0X2htYWM=",
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+        );
+
+        List<String> userEvents = new CopyOnWriteArrayList<>();
+        client.openUserStream(credentials, (rawJson, recvTs) -> userEvents.add(rawJson));
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(receivedUserSubMessages).isNotEmpty();
+                    assertThat(client.getConnectionStates())
+                            .containsEntry(PolymarketClobClient.USER_STREAM_KEY, ConnectionState.CONNECTED);
+                    assertThat(userEvents).hasSize(1);
+                    assertThat(userEvents.get(0)).contains("\"event_type\":\"trade\"");
+                });
+
+        client.closeUserStream();
+        assertThat(client.getConnectionStates()).doesNotContainKey(PolymarketClobClient.USER_STREAM_KEY);
         client.stopAll();
     }
 }

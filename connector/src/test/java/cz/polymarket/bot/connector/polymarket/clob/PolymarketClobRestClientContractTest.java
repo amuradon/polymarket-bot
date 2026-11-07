@@ -170,21 +170,34 @@ class PolymarketClobRestClientContractTest {
                                         }
                                         """);
                     } else if ("GET".equals(method) && "/balance-allowance".equals(path)) {
-                        assertThat(query).isEqualTo("asset_type=CONDITIONAL&signature_type=3&token_id=" + TEST_TOKEN_ID_NO);
                         String ts = req.getHeader("POLY_TIMESTAMP");
                         String sig = req.getHeader("POLY_SIGNATURE");
                         // Critical contract rule: L2 HMAC uses clean path "/balance-allowance" without query string
                         assertThat(verifyL2Hmac("GET", "/balance-allowance", ts, sig, new byte[0])).isTrue();
-                        req.response()
-                                .putHeader("Content-Type", "application/json")
-                                .end("""
-                                        {
-                                          "balance": "5000000",
-                                          "allowances": {
-                                            "0xE111180000d2663C0091e4f400237545B87B996B": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
-                                          }
-                                        }
-                                        """);
+                        if ("asset_type=COLLATERAL&signature_type=3".equals(query)) {
+                            req.response()
+                                    .putHeader("Content-Type", "application/json")
+                                    .end("""
+                                            {
+                                              "balance": "2328000000",
+                                              "allowances": {
+                                                "0xE111180000d2663C0091e4f400237545B87B996B": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+                                              }
+                                            }
+                                            """);
+                        } else {
+                            assertThat(query).isEqualTo("asset_type=CONDITIONAL&signature_type=3&token_id=" + TEST_TOKEN_ID_NO);
+                            req.response()
+                                    .putHeader("Content-Type", "application/json")
+                                    .end("""
+                                            {
+                                              "balance": "5000000",
+                                              "allowances": {
+                                                "0xE111180000d2663C0091e4f400237545B87B996B": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+                                              }
+                                            }
+                                            """);
+                        }
                     } else if ("GET".equals(method) && "/time".equals(path)) {
                         req.response()
                                 .putHeader("Content-Type", "application/json")
@@ -203,6 +216,10 @@ class PolymarketClobRestClientContractTest {
 
         long microShares = client.getConditionalTokenBalanceMicroShares(TEST_TOKEN_ID_NO);
         assertThat(microShares).isEqualTo(5_000_000L);
+
+        long collateralMicroUsdc = client.getCollateralBalanceMicroUsdc();
+        assertThat(collateralMicroUsdc).isEqualTo(2_328_000_000L);
+        assertThat(client.getCollateralBalanceUsd()).isEqualTo(2328.0);
 
         assertThat(client.pingKeepalive()).isTrue();
     }

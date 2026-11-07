@@ -70,22 +70,41 @@ class LiveTradingEngineTest {
     private final List<String> polyAddresses = new CopyOnWriteArrayList<>();
     private final List<String> cancelBodies = new CopyOnWriteArrayList<>();
     private final AtomicBoolean polyBoltAuthedBeforeSubscribe = new AtomicBoolean(false);
+    private final AtomicBoolean clobUserAuthed = new AtomicBoolean(false);
     private final AtomicBoolean clobAutoRespond = new AtomicBoolean(true);
+    private final java.util.concurrent.atomic.AtomicLong mockCollateralMicroUsdc =
+            new java.util.concurrent.atomic.AtomicLong(2_328_000_000L);
     private final List<ServerWebSocket> polyBoltSockets = new CopyOnWriteArrayList<>();
     private final List<ServerWebSocket> clobSockets = new CopyOnWriteArrayList<>();
+    private final List<ServerWebSocket> userSockets = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() throws Exception {
         polyBoltAuthedBeforeSubscribe.set(false);
+        clobUserAuthed.set(false);
         clobAutoRespond.set(true);
+        mockCollateralMicroUsdc.set(2_328_000_000L);
         orderBodies.clear();
         polyAddresses.clear();
         cancelBodies.clear();
         polyBoltSockets.clear();
         clobSockets.clear();
+        userSockets.clear();
         vertx = Vertx.vertx();
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
+
+        router.get("/balance-allowance").handler(ctx -> {
+            long balanceMicro = mockCollateralMicroUsdc.get();
+            ctx.response()
+                    .putHeader("Content-Type", "application/json")
+                    .end("""
+                            {
+                              "balance": "%d",
+                              "allowances": {}
+                            }
+                            """.formatted(balanceMicro));
+        });
 
         router.get("/markets/slug/:slug").handler(ctx -> {
             String slug = ctx.pathParam("slug");
@@ -214,6 +233,13 @@ class LiveTradingEngineTest {
                                 """.formatted(TEST_TOKEN_UP, TEST_TOKEN_DOWN));
                     }
                 });
+            } else if ("/ws/user".equals(ws.path())) {
+                userSockets.add(ws);
+                ws.textMessageHandler(msg -> {
+                    if (msg.contains("\"type\":\"user\"") && msg.contains("\"apiKey\"")) {
+                        clobUserAuthed.set(true);
+                    }
+                });
             }
         });
 
@@ -270,7 +296,6 @@ class LiveTradingEngineTest {
         PolymarketStreamParser streamParser = new PolymarketStreamParser(objectMapper, "BTCUSDT");
         LiveTradeRepository tradeRepository = new LiveTradeRepository(
                 tempDir.toString(),
-                1000.0,
                 objectMapper,
                 new PerformanceMetricsCalculator()
         );
@@ -303,6 +328,9 @@ class LiveTradingEngineTest {
                     .atMost(Duration.ofSeconds(5))
                     .untilAsserted(() -> {
                         assertThat(polyBoltAuthedBeforeSubscribe.get()).isTrue();
+                        assertThat(clobUserAuthed.get()).isTrue();
+                        assertThat(tradeRepository.getInitialCapital()).isEqualTo(2328.0);
+                        assertThat(tradeRepository.getCurrentBalance()).isEqualTo(2328.0);
                         assertThat(engine.getActiveMarketInfo()).isNotNull();
                         assertThat(engine.getActiveMarketInfo().yesTokenId()).isEqualTo(TEST_TOKEN_UP);
                         assertThat(engine.getActiveMarketInfo().noTokenId()).isEqualTo(TEST_TOKEN_DOWN);
@@ -598,7 +626,7 @@ class LiveTradingEngineTest {
                     new StrategyRegistry(Map.of("UtterParameciumStrategy",
                             new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1()))),
                     new HourlyPriceCache(3600L),
-                    new LiveTradeRepository(tempDir.toString(), 1000.0, objectMapper, new PerformanceMetricsCalculator()),
+                    new LiveTradeRepository(tempDir.toString(), objectMapper, new PerformanceMetricsCalculator()),
                     emptyResolver,
                     new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, emptyResolver),
                     new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
@@ -706,6 +734,107 @@ class LiveTradingEngineTest {
         assertThat(engine.getLatestQuote().timestampMs()).isEqualTo(1792741503000L);
     }
 
+    @Test
+    void shouldSyncBalanceFromAccountRecoveringFromNegativeBalanceAndRefreshViaUserWsOffHotPath() {
+        PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
+                Optional.of(TEST_PRIVATE_KEY),
+                Optional.of("api-key-live"),
+                Optional.of("passphrase-live"),
+                Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                Optional.of(TEST_MAKER_ADDRESS),
+                Optional.of(TEST_EOA_ADDRESS)
+        );
+        HttpClient httpClient = HttpClient.newHttpClient();
+        String baseHttpUrl = "http://localhost:" + port;
+        LiveTradeRepository repository = new LiveTradeRepository(
+                tempDir.toString(),
+                objectMapper,
+                new PerformanceMetricsCalculator()
+        );
+        // Simulate a prior corrupted/stale negative balance in trades.jsonl (-42.92)
+        repository.recordTrade(new cz.polymarket.bot.domain.TradeRecord(
+                "2026-11-06T20:15:01Z",
+                1793995200L,
+                cz.polymarket.bot.strategy.TradeDirection.UP,
+                0.55,
+                0.00,
+                142.92,
+                260.0,
+                0.0,
+                -142.92,
+                "Resolution (TWAP 60s)",
+                0.70,
+                0.55,
+                0.15,
+                false,
+                -42.92
+        ));
+        assertThat(repository.getCurrentBalance()).isEqualTo(-42.92);
+
+        UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        LiveTradingEngine engine = new LiveTradingEngine(
+                new StrategyRegistry(Map.of(strategy.getName(), strategy)),
+                new HourlyPriceCache(3600L),
+                repository,
+                secretsResolver,
+                new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
+                new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
+                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                        Optional.of("api-key-live"),
+                        Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                        Optional.of("passphrase-live"),
+                        1000L, 10000L),
+                new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                "UtterParameciumStrategy",
+                "BTCUSDT",
+                "15m",
+                true,
+                false,
+                "FAK"
+        );
+
+        try {
+            engine.onStart(null);
+
+            // Startup immediately overwrites the stale -42.92 with the real $2,328.00 collateral balance
+            assertThat(repository.getCurrentBalance()).isEqualTo(2328.0);
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(clobUserAuthed.get()).isTrue();
+                        assertThat(engine.getActiveMarketInfo()).isNotNull();
+                    });
+
+            // Submit BUY order (100 shares @ $0.55 = $55.00 + $1.7325 fee = $56.7325)
+            // Balance must be immediately debited in memory on the hot path
+            engine.submitOrder(new OrderCommand(
+                    "client-order-live-debit-1",
+                    "pm-btc-15m",
+                    "BTC-UP",
+                    Timeframe.FIFTEEN_MINUTES,
+                    "BUY",
+                    BigDecimal.valueOf(0.55),
+                    BigDecimal.valueOf(100)
+            ));
+            assertThat(repository.getCurrentBalance()).isCloseTo(2328.0 - 56.7325, org.assertj.core.data.Offset.offset(0.01));
+
+            // Close the position via candle resolution and simulate updated on-chain balance ($2,410.50) via User WS event
+            engine.resolveCandle(cz.polymarket.bot.strategy.TradeDirection.UP, 85100.0);
+            mockCollateralMicroUsdc.set(2_410_500_000L);
+            for (ServerWebSocket userWs : userSockets) {
+                userWs.writeTextMessage("{\"event_type\":\"trade\",\"status\":\"CONFIRMED\",\"id\":\"t1\"}");
+            }
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(repository.getCurrentBalance()).isEqualTo(2410.50));
+        } finally {
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(boolean dryRun) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),
@@ -717,11 +846,17 @@ class LiveTradingEngineTest {
         );
         HttpClient httpClient = HttpClient.newHttpClient();
         String baseHttpUrl = "http://localhost:" + port;
+        LiveTradeRepository repository = new LiveTradeRepository(
+                tempDir.toString(),
+                objectMapper,
+                new PerformanceMetricsCalculator()
+        );
+        repository.syncAccountBalance(1000.0);
         UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
         return new LiveTradingEngine(
                 new StrategyRegistry(Map.of(strategy.getName(), strategy)),
                 new HourlyPriceCache(3600L),
-                new LiveTradeRepository(tempDir.toString(), 1000.0, objectMapper, new PerformanceMetricsCalculator()),
+                repository,
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),

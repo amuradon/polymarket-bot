@@ -30,28 +30,32 @@ class LiveTradeRepositoryTest {
     }
 
     @Test
-    void shouldInitializeEmptyWhenNoExistingFiles() {
+    void shouldInitializeEmptyAndSyncAccountBalanceFromAccount() {
         LiveTradeRepository repository = new LiveTradeRepository(
                 tempDir.toString(),
-                1000.0,
                 objectMapper,
                 metricsCalculator
         );
 
         assertThat(repository.getTrades()).isEmpty();
-        assertThat(repository.getCurrentBalance()).isEqualTo(1000.0);
-        assertThat(repository.getInitialCapital()).isEqualTo(1000.0);
+        assertThat(repository.getCurrentBalance()).isEqualTo(0.0);
+        assertThat(repository.getInitialCapital()).isEqualTo(0.0);
         assertThat(repository.getMetrics().totalTrades()).isEqualTo(0);
+
+        repository.syncAccountBalance(2328.0);
+        assertThat(repository.getCurrentBalance()).isEqualTo(2328.0);
+        assertThat(repository.getInitialCapital()).isEqualTo(2328.0);
+        assertThat(repository.getMetrics().initialCapital()).isEqualTo(2328.0);
     }
 
     @Test
     void shouldAppendTradesAndPersistToJsonLinesAndMetricsSnapshot() throws IOException {
         LiveTradeRepository repository = new LiveTradeRepository(
                 tempDir.toString(),
-                1000.0,
                 objectMapper,
                 metricsCalculator
         );
+        repository.syncAccountBalance(1000.0);
 
         TradeRecord trade1 = new TradeRecord(
                 "2026-11-04T12:00:00Z",
@@ -92,45 +96,51 @@ class LiveTradeRepositoryTest {
     }
 
     @Test
-    void shouldSurviveRestartAndResetCleanly() {
+    void shouldDebitOpenPositionCostAndRecoverFromStaleNegativeBalanceOnAccountSync() {
         LiveTradeRepository repository1 = new LiveTradeRepository(
                 tempDir.toString(),
-                1000.0,
                 objectMapper,
                 metricsCalculator
         );
+        repository1.syncAccountBalance(1000.0);
+        repository1.debitOpenPositionCost(56.73);
+        assertThat(repository1.getCurrentBalance()).isEqualTo(943.27);
 
         TradeRecord trade1 = new TradeRecord(
                 "2026-11-04T12:00:00Z",
                 1793793600L,
                 TradeDirection.UP,
                 0.50,
-                1.00,
-                50.0,
-                100.0,
+                0.00,
+                1042.92,
+                2085.84,
                 0.0,
-                50.0,
+                -1042.92,
                 "Resolution (TWAP 60s)",
                 0.65,
                 0.50,
                 0.15,
-                true,
-                1050.0
+                false,
+                -42.92
         );
         repository1.recordTrade(trade1);
 
         LiveTradeRepository repository2 = new LiveTradeRepository(
                 tempDir.toString(),
-                1000.0,
                 objectMapper,
                 metricsCalculator
         );
 
         assertThat(repository2.getTrades()).hasSize(1);
-        assertThat(repository2.getCurrentBalance()).isEqualTo(1050.0);
+        assertThat(repository2.getCurrentBalance()).isEqualTo(-42.92);
+
+        // Syncing from real Polymarket account collateral immediately restores the true positive balance
+        repository2.syncAccountBalance(2328.0);
+        assertThat(repository2.getCurrentBalance()).isEqualTo(2328.0);
 
         repository2.reset();
         assertThat(repository2.getTrades()).isEmpty();
-        assertThat(repository2.getCurrentBalance()).isEqualTo(1000.0);
+        assertThat(repository2.getCurrentBalance()).isEqualTo(2328.0);
+        assertThat(repository2.getInitialCapital()).isEqualTo(2328.0);
     }
 }

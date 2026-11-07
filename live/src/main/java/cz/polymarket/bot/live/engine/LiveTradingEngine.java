@@ -89,6 +89,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicLong lastEvaluatedMarketCycleStart = new AtomicLong(0L);
     private final AtomicLong debugPolyBoltBatchCounter = new AtomicLong(0L);
     private final AtomicLong debugClobBatchCounter = new AtomicLong(0L);
+    private final java.util.concurrent.atomic.AtomicBoolean balanceSyncInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private volatile PolymarketCredentials credentials;
     private volatile PolymarketEip712Signer eip712Signer;
@@ -192,21 +194,24 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     void onStart(@Observes StartupEvent event) {
-        Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, durationSec=%d, dryRun=%s, orderType=%s, initialCapital=$%.2f, currentBalance=$%.2f)",
-                activeStrategy.getName(), symbol, timeframe, durationSeconds, dryRun, orderType,
-                repository.getInitialCapital(), repository.getCurrentBalance());
-
         if (!dryRun || streamsEnabled) {
             try {
                 initializeCredentialsAndSigner();
+                if (!dryRun) {
+                    syncAccountBalanceFromClob();
+                }
             } catch (Exception e) {
                 if (!dryRun) {
-                    Log.fatalf("Fatal configuration error: failed to resolve Polymarket credentials for live trading: %s", e.getMessage());
+                    Log.fatalf("Fatal configuration error: failed to initialize Polymarket credentials or account balance for live trading: %s", e.getMessage());
                     throw new IllegalStateException("Failed to resolve Polymarket credentials for live trading", e);
                 }
                 Log.warnf("Running in dry-run mode without full Polymarket credentials: %s", e.getMessage());
             }
         }
+
+        Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, durationSec=%d, dryRun=%s, orderType=%s, initialCapital=$%.2f, currentBalance=$%.2f)",
+                activeStrategy.getName(), symbol, timeframe, durationSeconds, dryRun, orderType,
+                repository.getInitialCapital(), repository.getCurrentBalance());
 
         if (streamsEnabled) {
             startLiveStreams(Instant.now().getEpochSecond());
@@ -246,7 +251,60 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         Log.infof("Starting live WebSocket streams for symbol=%s, timeframe=%s...", symbol, timeframe);
         polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame);
         polyBoltClient.startCryptoPriceStream(symbol, this::onRawPolyBoltFrame);
+        if (credentials != null && credentials.hasL2Credentials()) {
+            clobWsClient.openUserStream(credentials, this::onRawUserFrame);
+        }
         discoverAndRotateMarket(nowEpochSec);
+    }
+
+    /**
+     * Processes a raw JSON frame from the authenticated Polymarket CLOB User WebSocket channel ({@code /ws/user})
+     * and triggers a non-blocking background collateral balance refresh when trade or order events occur.
+     *
+     * @param rawJson         raw User channel JSON frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public void onRawUserFrame(String rawJson, long recvTimestampMs) {
+        if (rawJson == null || rawJson.isBlank() || "PONG".equalsIgnoreCase(rawJson)) {
+            return;
+        }
+        if (Log.isDebugEnabled()) {
+            Log.debugf("Received Polymarket CLOB user channel frame at %d ms: %s", recvTimestampMs, rawJson);
+        }
+        if (rawJson.contains("\"trade\"") || rawJson.contains("\"order\"")) {
+            triggerAsyncBalanceSync();
+        }
+    }
+
+    /**
+     * Synchronizes the repository balance with the authoritative Polymarket CLOB collateral USDC balance.
+     */
+    public void syncAccountBalanceFromClob() {
+        try {
+            double collateralUsd = clobRestClient.getCollateralBalanceUsd();
+            repository.syncAccountBalance(collateralUsd);
+            Log.infof("Synchronized Polymarket live account collateral balance: $%.2f (initialCapital=$%.2f)",
+                    repository.getCurrentBalance(), repository.getInitialCapital());
+        } catch (Exception e) {
+            Log.warnf("Failed to synchronize Polymarket collateral balance from CLOB REST API: %s", e.getMessage());
+        }
+    }
+
+    private void triggerAsyncBalanceSync() {
+        if (dryRun || !balanceSyncInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        Thread.ofVirtual()
+                .name("polymarket-balance-sync")
+                .start(() -> {
+                    try {
+                        if (openPositions.isEmpty()) {
+                            syncAccountBalanceFromClob();
+                        }
+                    } finally {
+                        balanceSyncInFlight.set(false);
+                    }
+                });
     }
 
     /**
@@ -269,6 +327,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             return;
         }
         clobRestClient.pingKeepalive();
+        if (!dryRun && openPositions.isEmpty()) {
+            triggerAsyncBalanceSync();
+        }
     }
 
     /**
@@ -616,6 +677,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         );
         openPositions.add(pos);
         activePosition.set(pos);
+        repository.debitOpenPositionCost(sizeUsd + entryFee);
 
         ExecutionReport report = new ExecutionReport(
                 command.clientOrderId(),
@@ -786,7 +848,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         double payout = pos.shares() * exitPrice;
         double totalFee = pos.entryFee() + exitFee;
         double netPnl = payout - pos.sizeUsd() - totalFee;
-        double newBalance = repository.getCurrentBalance() + netPnl;
+        double newBalance = repository.getCurrentBalance() + payout - exitFee;
         boolean isWin = netPnl > 0.0;
 
         TradeRecord trade = new TradeRecord(
@@ -810,6 +872,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         repository.recordTrade(trade);
         openPositions.remove(pos);
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
+        if (openPositions.isEmpty()) {
+            triggerAsyncBalanceSync();
+        }
         Log.infof("Closed live trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, newBalance);
     }
