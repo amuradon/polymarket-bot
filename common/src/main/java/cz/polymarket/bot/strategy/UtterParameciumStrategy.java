@@ -105,11 +105,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private long orderSequence = 0L;
     private int lastModelProbUpMc = 500;
 
-    /**
-     * Constructs the {@link UtterParameciumStrategy} with the given configuration.
-     *
-     * @param config Model V1 strategy configuration bean
-     */
     @Inject
     public UtterParameciumStrategy(UtterParameciumStrategyConfig config) {
         if (config == null) {
@@ -126,6 +121,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
                         config.maxSpreadMc(),
                         config.minModelProbMc(),
                         config.minEdgeMc(),
+                        config.maxSlippageMc(),
                         config.minOrderShares(),
                         config.maxOrderShares(),
                         config.initialBurstShares(),
@@ -586,12 +582,26 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
 
+        long chosenDistProjCents = (chosenDirection == TradeDirection.UP)
+                ? (projectedTwapCents - targetPriceCents)
+                : (targetPriceCents - projectedTwapCents);
+        long chosenDistSpotCents = (chosenDirection == TradeDirection.UP)
+                ? (spotCents - targetPriceCents)
+                : (targetPriceCents - spotCents);
+        int limitPriceMc = computeEdgePreservingLimitPriceMc(
+                chosenAskMc,
+                chosenDistProjCents,
+                chosenDistSpotCents,
+                tauMs,
+                sigmaRemCents
+        );
+
         if (Log.isDebugEnabled()) {
-            Log.debugf("Strategy signal %s: tauMs=%d, askMc=%d, edgeMc=%d, shares=%d (netUp=%d, netDown=%d)",
-                    chosenDirection, tauMs, chosenAskMc, chosenEdgeMc, qFinal, netSharesUp, netSharesDown);
+            Log.debugf("Strategy signal %s: tauMs=%d, askMc=%d, limitPriceMc=%d, edgeMc=%d, shares=%d (netUp=%d, netDown=%d)",
+                    chosenDirection, tauMs, chosenAskMc, limitPriceMc, chosenEdgeMc, qFinal, netSharesUp, netSharesDown);
         }
 
-        submitBatchOrder(nowMs, chosenDirection, chosenAskMc, qFinal);
+        submitBatchOrder(nowMs, chosenDirection, limitPriceMc, qFinal);
     }
 
     private int evaluateCandidateSideEdge(
@@ -633,6 +643,43 @@ public class UtterParameciumStrategy implements TradingStrategy {
         }
         int feeMc = takerFeeMc(askMc, config.takerFeeRateBps());
         return pModelMc - askMc - feeMc;
+    }
+
+    /**
+     * Computes the highest 10-mc ($0.01) tick limit price {@code >= askMc} that does not exceed
+     * {@code askMc + config.maxSlippageMc()} or {@code config.maxEntryPriceMc()}, satisfies all
+     * high/extreme price z-score gates, and still preserves at least {@code config.minEdgeMc()}
+     * net edge after the parabolic taker fee.
+     *
+     * @param askMc observed top-of-book ask price in millicents
+     * @param distProjCents signed projected TWAP distance from target in USD cents
+     * @param distSpotCents signed current spot distance from target in USD cents
+     * @param tauMs remaining time to candle expiry in milliseconds
+     * @param sigmaRemCents remaining TWAP uncertainty in USD cents
+     * @return edge-preserving limit price in millicents
+     */
+    private int computeEdgePreservingLimitPriceMc(
+            int askMc,
+            long distProjCents,
+            long distSpotCents,
+            long tauMs,
+            long sigmaRemCents) {
+        int maxAllowedMc = Math.min(config.maxEntryPriceMc(), askMc + config.maxSlippageMc());
+        int limitMc = askMc;
+        for (int candidateMc = askMc + TICK_STEP_MC; candidateMc <= maxAllowedMc; candidateMc += TICK_STEP_MC) {
+            int candidateEdgeMc = evaluateCandidateSideEdge(
+                    candidateMc,
+                    distProjCents,
+                    distSpotCents,
+                    tauMs,
+                    sigmaRemCents
+            );
+            if (candidateEdgeMc < config.minEdgeMc()) {
+                break;
+            }
+            limitMc = candidateMc;
+        }
+        return limitMc;
     }
 
     private void submitBatchOrder(long nowMs, TradeDirection direction, int askMc, int shares) {

@@ -159,7 +159,7 @@ class UtterParameciumStrategyTest {
         OrderCommand order = submittedOrders.getFirst();
         assertThat(order.token()).isEqualTo("BTC-UP");
         assertThat(order.side()).isEqualTo("BUY");
-        assertThat(order.price()).isEqualByComparingTo("0.650");
+        assertThat(order.price()).isEqualByComparingTo("0.700");
         assertThat(order.size().intValue()).isBetween(5, 35);
     }
 
@@ -440,5 +440,43 @@ class UtterParameciumStrategyTest {
                 0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, nextCandleEndMs - 70_500L
         ));
         assertThat(balanceRefreshCount).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("Should expand limit price only while minEdgeMc, z-score gates, maxEntryPriceMc, and maxSlippageMc remain satisfied")
+    void shouldComputeEdgePreservingLimitPriceCappedByMinEdgeZScoreAndMaxSlippage() {
+        assertThat(config.maxSlippageMc()).isEqualTo(50);
+
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        // 1. Tight-edge scenario at tau = 55s (sigmaRem = 627 cents):
+        // Spot = $90,004.70 (+470 cents) -> z = 74 centi-sigma -> pModelMc = 770 mc.
+        // At askUp = $0.71 (710 mc): fee = 14 mc, edge = 46 mc >= 25 mc.
+        // At 720 mc: fee = 14 mc, edge = 36 mc >= 25 mc.
+        // At 730 mc: fee = 14 mc, edge = 26 mc >= 25 mc.
+        // At 740 mc: fee = 13 mc, edge = 17 mc < 25 mc -> must stop at 730 mc ($0.730), NOT 760 mc!
+        long tau55Ms = CANDLE_END_MS - 55_000L;
+        strategy.onPolymarketCryptoPrice(tau55Ms, "btcusd", "chainlink", 90_004.70, tau55Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.71, 0.69, 0.31, 0.29, 500.0, 500.0, 0.71, 0.31, tau55Ms
+        ));
+
+        assertThat(submittedOrders).hasSize(1);
+        OrderCommand tightEdgeOrder = submittedOrders.getFirst();
+        assertThat(tightEdgeOrder.price()).isEqualByComparingTo("0.730");
+
+        // 2. Z-score gate cap scenario on a clean market at tau = 55s (sigmaRem = 627 cents):
+        // Spot = $90,012.00 (+1200 cents) -> z = 191 centi-sigma (< 250 required for >= 800 mc), pModelMc = 972 mc.
+        // At askUp = $0.78 (780 mc): allowed (< 800 mc). Stepping up can reach 790 mc, but MUST NOT cross into 800 mc!
+        strategy.reset();
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        strategy.onPolymarketCryptoPrice(tau55Ms, "btcusd", "chainlink", 90_012.00, tau55Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.78, 0.76, 0.24, 0.22, 500.0, 500.0, 0.78, 0.24, tau55Ms
+        ));
+
+        assertThat(submittedOrders).hasSize(2);
+        OrderCommand zCappedOrder = submittedOrders.get(1);
+        assertThat(zCappedOrder.price()).isEqualByComparingTo("0.790");
     }
 }
