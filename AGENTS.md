@@ -69,16 +69,3 @@ When working with AWS services, infrastructure, or deployment in this repository
 - **Infrastructure as Code**: Prefer AWS CDK or CloudFormation over imperative CLI resource creation.
 - **Secret Safety**: Never expose raw secrets in context; follow the `aws-secrets-manager` resolution guidelines.
 
----
-
-## 5. Serena MCP Semantic Navigation & Refactoring Rules
-
-When exploring code structure, searching references, or refactoring in this repository, agents should follow:
-
-👉 [`.agents/rules/serena.md`](.agents/rules/serena.md)
-
-### Key Mandates from Serena Rules:
-- **Symbolic Navigation First**: Prefer `s.lsp.get_symbols_overview`, `s.lsp.find_symbol`, and `s.lsp.find_referencing_symbols` over reading whole files.
-- **Atomic Refactoring**: Prefer `s.lsp.rename_symbol` and `s.lsp.safe_delete_symbol` for automated reference-checked updates.
-- **Precise Symbolic Edits**: Use `s.edit.replace_symbol_body` or targeted replacements to minimize context overhead.
-
