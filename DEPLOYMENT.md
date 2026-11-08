@@ -243,7 +243,7 @@ Because inbound port 443 is strictly whitelisted for IP `178.17.13.13/32`:
     --target $InstanceId `
     --region eu-west-1 `
     --document-name AWS-StartPortForwardingSession `
-    --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+    --parameters "portNumber=8080,localPortNumber=8080"
   ```
   Then navigate to `http://localhost:8080` or `http://localhost:8080/api/live/telemetry`.
 
