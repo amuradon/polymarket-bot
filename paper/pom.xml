@@ -4,7 +4,7 @@
     <parent>
         <groupId>cz.amuradon.polymarket.bot</groupId>
         <artifactId>polymarket-bot</artifactId>
-        <version>1.0.13</version>
+        <version>1.0.14-SNAPSHOT</version>
     </parent>
 
     <artifactId>paper</artifactId>
