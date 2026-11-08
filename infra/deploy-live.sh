@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Builds, releases, packages, and deploys the Quarkus Live Trading application to AWS EC2 in eu-west-1.
+# Builds the Docker image, pushes it to Amazon ECR, and deploys the Quarkus Live
+# Trading application to AWS EC2 in eu-west-1.
+#
+# Resolves the Docker image version {x.y.z} from:
+#   ./live/target/quarkus-app/app/live-{x.y.z}.jar
+#
 # Usage:
-#   ./deploy-live.sh [-v <version>] [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [--skip-release] [--skip-build]
-# Example:
-#   ./deploy-live.sh -v 1.1.0
+#   ./deploy-live.sh [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [-u <repository-uri>] [-i <instance-id>]
 # ==============================================================================
 set -euo pipefail
 
@@ -16,23 +19,17 @@ BASE_STACK_NAME="polymarket-bot-live-base"
 EC2_STACK_NAME="polymarket-bot-live-ec2"
 REPOSITORY_URI=""
 INSTANCE_ID=""
-VERSION=""
-SKIP_RELEASE=false
-SKIP_BUILD=false
 
 usage() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  -v, --version <semver>      Optional SemVer version for Maven release (format: x.y.z)
   -r, --region <region>       AWS Region (default: eu-west-1)
   -b, --base-stack <name>     Base Infrastructure Stack Name (default: polymarket-bot-live-base)
   -e, --ec2-stack <name>      EC2 Compute Stack Name (default: polymarket-bot-live-ec2)
   -u, --repository-uri <uri>  Amazon ECR repository URI override
   -i, --instance-id <id>      EC2 Instance ID override
-      --skip-release          Skip Maven release execution
-      --skip-build            Skip Maven packaging
   -h, --help                  Show this help message
 EOF
     exit 1
@@ -40,10 +37,6 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -v|--version)
-            VERSION="$2"
-            shift 2
-            ;;
         -r|--region)
             REGION="$2"
             shift 2
@@ -64,14 +57,6 @@ while [[ $# -gt 0 ]]; do
             INSTANCE_ID="$2"
             shift 2
             ;;
-        --skip-release)
-            SKIP_RELEASE=true
-            shift
-            ;;
-        --skip-build)
-            SKIP_BUILD=true
-            shift
-            ;;
         -h|--help)
             usage
             ;;
@@ -83,66 +68,42 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "=========================================================="
-echo " Polymarket Bot: Release, Build & Deploy Live Trading App "
+echo " Polymarket Bot: Build Image & Deploy Live Trading App    "
 echo " Region: ${REGION} | Base: ${BASE_STACK_NAME} | EC2: ${EC2_STACK_NAME}"
 echo "=========================================================="
 
-# 1. Determine SemVer & Execute Maven Release
-RELEASE_VERSION=""
-if [ "$SKIP_RELEASE" = false ]; then
-    echo "[1/6] Executing Maven release on project root..."
-    pushd "$REPO_ROOT" > /dev/null
-    if [ -n "$VERSION" ]; then
-        if ! [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Error: Version must be in format x.y.z (SemVer), e.g. 1.1.0" >&2
-            exit 1
-        fi
-        MAJOR="${BASH_REMATCH[1]}"
-        MINOR="${BASH_REMATCH[2]}"
-        PATCH="${BASH_REMATCH[3]}"
-        NEXT_PATCH=$((PATCH + 1))
-        DEV_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-SNAPSHOT"
-        RELEASE_VERSION="$VERSION"
-
-        echo "      Release version:     ${RELEASE_VERSION}"
-        echo "      Development version: ${DEV_VERSION}"
-
-        ./mvnw -B release:clean release:prepare \
-            "-DreleaseVersion=${RELEASE_VERSION}" \
-            "-DdevelopmentVersion=${DEV_VERSION}" \
-            "-Dtag=${RELEASE_VERSION}"
-    else
-        RAW_VER=$(grep -m1 '<version>' pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
-        RELEASE_VERSION="${RAW_VER%-SNAPSHOT}"
-        echo "      Auto-incrementing from current POM version: ${RAW_VER} (Release: ${RELEASE_VERSION})"
-
-        ./mvnw -B release:clean release:prepare
-    fi
-    popd > /dev/null
-else
-    echo "[1/6] Skipping Maven release as requested..."
-    if [ -n "$VERSION" ]; then
-        RELEASE_VERSION="$VERSION"
-    else
-        RAW_VER=$(grep -m1 '<version>' "${REPO_ROOT}/pom.xml" | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
-        RELEASE_VERSION="${RAW_VER%-SNAPSHOT}"
-    fi
-    echo "      Target image version tag: ${RELEASE_VERSION}"
+# 1. Determine version from ./live/target/quarkus-app/app/live-{x.y.z}.jar
+echo "[1/5] Resolving version from ./live/target/quarkus-app/app/live-{x.y.z}.jar..."
+APP_DIR="${REPO_ROOT}/live/target/quarkus-app/app"
+if [ ! -d "$APP_DIR" ]; then
+    echo "Error: Directory '${APP_DIR}' not found. Run './mvnw release:clean release:prepare' before deploying." >&2
+    exit 1
 fi
 
-# 2. Package Quarkus application via Maven wrapper
-if [ "$SKIP_BUILD" = false ]; then
-    echo "[2/6] Packaging Quarkus application via Maven wrapper..."
-    pushd "$REPO_ROOT" > /dev/null
-    ./mvnw clean package -DskipTests -pl live -am
-    popd > /dev/null
-else
-    echo "[2/6] Skipping Maven package as requested..."
+shopt -s nullglob
+JAR_FILES=("${APP_DIR}"/live-*.jar)
+shopt -u nullglob
+
+if [ "${#JAR_FILES[@]}" -eq 0 ]; then
+    echo "Error: No 'live-*.jar' found in '${APP_DIR}'. Run './mvnw release:clean release:prepare' before deploying." >&2
+    exit 1
+fi
+if [ "${#JAR_FILES[@]}" -gt 1 ]; then
+    echo "Error: Multiple 'live-*.jar' files found in '${APP_DIR}'. Expected a single release JAR." >&2
+    exit 1
 fi
 
-# 3. Resolve Amazon ECR Repository URI
+JAR_NAME="$(basename "${JAR_FILES[0]}")"
+if ! [[ "$JAR_NAME" =~ ^live-([0-9]+\.[0-9]+\.[0-9]+)\.jar$ ]]; then
+    echo "Error: JAR file '${JAR_NAME}' does not match expected release format 'live-{x.y.z}.jar' (e.g. live-1.0.13.jar). Run './mvnw release:clean release:prepare' first." >&2
+    exit 1
+fi
+RELEASE_VERSION="${BASH_REMATCH[1]}"
+echo "      Detected artifact: ${JAR_NAME} (Version: ${RELEASE_VERSION})"
+
+# 2. Resolve Amazon ECR Repository URI
 if [ -z "$REPOSITORY_URI" ]; then
-    echo "[3/6] Resolving Amazon ECR repository URI..."
+    echo "[2/5] Resolving Amazon ECR repository URI..."
     REPOSITORY_URI=$(aws cloudformation describe-stacks \
         --stack-name "${BASE_STACK_NAME}" \
         --region "${REGION}" \
@@ -156,13 +117,13 @@ if [ -z "$REPOSITORY_URI" ]; then
 fi
 echo "      ECR Repository URI: ${REPOSITORY_URI}"
 
-# 4. Authenticate Docker with Amazon ECR
-echo "[4/6] Authenticating Docker with Amazon ECR in ${REGION}..."
+# 3. Authenticate Docker with Amazon ECR
+echo "[3/5] Authenticating Docker with Amazon ECR in ${REGION}..."
 ECR_DOMAIN="${REPOSITORY_URI%%/*}"
 aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ECR_DOMAIN}"
 
-# 5. Build and Push Multi-Platform ARM64 Docker Images (Docker Buildx)
-echo "[5/6] Building and pushing linux/arm64 Docker image via Buildx..."
+# 4. Build and Push Multi-Platform ARM64 Docker Images (Docker Buildx)
+echo "[4/5] Building and pushing linux/arm64 Docker image via Buildx..."
 VERSIONED_URI="${REPOSITORY_URI}:${RELEASE_VERSION}"
 LATEST_URI="${REPOSITORY_URI}:latest"
 
@@ -176,8 +137,8 @@ popd > /dev/null
 
 echo "SUCCESS: Pushed ${VERSIONED_URI} and ${LATEST_URI} to Amazon ECR."
 
-# 6. Deploy Container on EC2 via AWS Systems Manager (SSM)
-echo "[6/6] Deploying container on EC2 instance via AWS Systems Manager..."
+# 5. Deploy Container on EC2 via AWS Systems Manager (SSM)
+echo "[5/5] Deploying container on EC2 instance via AWS Systems Manager..."
 if [ -z "$INSTANCE_ID" ]; then
     INSTANCE_ID=$(aws cloudformation describe-stacks \
         --stack-name "${EC2_STACK_NAME}" \

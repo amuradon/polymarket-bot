@@ -15,7 +15,7 @@ flowchart TD
     subgraph LiveTrading["Live Trading Application"]
         LT_Base["1. infra/live-trading-base.yaml<br/>(ECR Repo, LogGroup, IAM Role, SG: 443 from 178.17.13.13/32)"]
         LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8gn.xlarge 4-vCPU Host, --network host, Non-Blocking awslogs)"]
-        LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Maven Release, Buildx ARM64, ECR Push, SSM Deploy)"]
+        LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Buildx ARM64, ECR Push, SSM Deploy)"]
         LT_Base --> LT_EC2
         LT_EC2 --> LT_Script
     end
@@ -43,11 +43,9 @@ flowchart TD
 4. **Network & Security**:
    - Inbound HTTPS (port 443, redirected via host `iptables` to Quarkus port 8080) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
    - No public SSH (port 22) is open. Management and deployment are executed exclusively via **AWS Systems Manager (SSM)**.
-5. **SemVer & Automated Maven Release**:
-   - Deployment scripts accept an optional SemVer parameter `-Version x.y.z`.
-   - If supplied: sets `-DreleaseVersion=x.y.z` and `-DdevelopmentVersion=x.y.(z+1)-SNAPSHOT`.
-   - If omitted: Maven release automatically increments the patch version in batch mode.
-   - The released SemVer version is used as the Docker image tag (along with `latest`).
+5. **SemVer & Maven Release**:
+   - Before deploying the Live Trading Engine, run `mvnw release:clean release:prepare` (or `mvnw release:clean release:prepare -DreleaseVersion=1.1.0`), which packages the release artifact `.\live\target\quarkus-app\app\live-{x.y.z}.jar`.
+   - `infra/deploy-live.ps1` and `infra/deploy-live.sh` determine the version `{x.y.z}` directly from `.\live\target\quarkus-app\app\live-{x.y.z}.jar` and tag the Docker image with `{x.y.z}` (along with `latest`).
 
 ---
 
@@ -102,24 +100,28 @@ aws cloudformation deploy \
 ---
 
 ### Step 2.3: Build & Deploy Live Trading Application
-Executes Maven release, builds multi-arch `linux/arm64` container image via Docker Buildx, pushes to ECR, and triggers container launch on EC2 via AWS Systems Manager (SSM).
+First, execute Maven release to build the release artifacts (including `.\live\target\quarkus-app\app\live-{x.y.z}.jar`), then run the deployment script to build the multi-arch `linux/arm64` container image via Docker Buildx, push it to ECR, and trigger container launch on EC2 via AWS Systems Manager (SSM).
 
 #### Windows 11 (PowerShell) - Primary:
 ```powershell
-# Option A: Automatic patch version increment (e.g. 1.0.0-SNAPSHOT -> 1.0.0 -> 1.0.1-SNAPSHOT):
-.\infra\deploy-live.ps1
+# 1. Prepare Maven release (auto-increment patch version or specify releaseVersion):
+mvnw release:clean release:prepare
+# or:
+mvnw release:clean release:prepare -DreleaseVersion=1.1.0
 
-# Option B: Explicit SemVer release version:
-.\infra\deploy-live.ps1 -Version "1.1.0"
+# 2. Build Docker image, push to ECR, and deploy to EC2:
+.\infra\deploy-live.ps1
 ```
 
 #### Linux / macOS (Bash) - Alternative:
 ```bash
-# Option A: Automatic patch version increment:
-./infra/deploy-live.sh
+# 1. Prepare Maven release (auto-increment patch version or specify releaseVersion):
+./mvnw release:clean release:prepare
+# or:
+./mvnw release:clean release:prepare -DreleaseVersion=1.1.0
 
-# Option B: Explicit SemVer release version:
-./infra/deploy-live.sh -v 1.1.0
+# 2. Build Docker image, push to ECR, and deploy to EC2:
+./infra/deploy-live.sh
 ```
 
 ---
@@ -206,15 +208,23 @@ aws cloudformation deploy \
 Once base infrastructure is provisioned, you **never** need to recreate EC2 instances or CloudFormation stacks for standard code updates:
 
 ### Updating the Live Trading Engine:
-Simply run the deployment script:
+First, prepare the Maven release, and then run the deployment script:
 ```powershell
 # Windows 11:
-.\infra\deploy-live.ps1 -Version "1.1.1"
+mvnw release:clean release:prepare
+# or with explicit release version:
+mvnw release:clean release:prepare -DreleaseVersion=1.1.0
+
+.\infra\deploy-live.ps1
 
 # Linux:
-./infra/deploy-live.sh -v 1.1.1
+./mvnw release:clean release:prepare
+# or with explicit release version:
+./mvnw release:clean release:prepare -DreleaseVersion=1.1.0
+
+./infra/deploy-live.sh
 ```
-The script performs the Maven release, builds and pushes the new `linux/arm64` image to ECR, and instructs the running EC2 instance via AWS SSM to pull the new image and restart the container within seconds—without downtime of the underlying server.
+The deployment script determines the Docker image version from `.\live\target\quarkus-app\app\live-{x.y.z}.jar`, builds and pushes the new `linux/arm64` image to ECR, and instructs the running EC2 instance via AWS SSM to pull the new image and restart the container within seconds—without downtime of the underlying server.
 
 ### Updating the Telegram Alert Lambda:
 Simply run the alert deployment script:
