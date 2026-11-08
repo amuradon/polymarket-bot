@@ -211,16 +211,16 @@ Once base infrastructure is provisioned, you **never** need to recreate EC2 inst
 First, prepare the Maven release, and then run the deployment script:
 ```powershell
 # Windows 11:
-mvnw release:clean release:prepare
+.\mvnw -B release:clean release:prepare
 # or with explicit release version:
-mvnw release:clean release:prepare -DreleaseVersion=1.1.0
+.\mvnw -B release:clean release:prepare -DreleaseVersion=1.1.0
 
 .\infra\deploy-live.ps1
 
 # Linux:
-./mvnw release:clean release:prepare
+./mvnw -B release:clean release:prepare
 # or with explicit release version:
-./mvnw release:clean release:prepare -DreleaseVersion=1.1.0
+./mvnw -B release:clean release:prepare -DreleaseVersion=1.1.0
 
 ./infra/deploy-live.sh
 ```
