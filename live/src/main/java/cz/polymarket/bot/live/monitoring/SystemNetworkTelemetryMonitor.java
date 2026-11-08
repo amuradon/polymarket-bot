@@ -418,7 +418,10 @@ public class SystemNetworkTelemetryMonitor {
     private static long readKernelRmemMaxBytes() {
         try {
             if (Files.isReadable(PROC_RMEM_MAX)) {
-                return parseSafeLong(Files.readString(PROC_RMEM_MAX).trim());
+                List<String> lines = Files.readAllLines(PROC_RMEM_MAX);
+                if (!lines.isEmpty() && lines.getFirst() != null) {
+                    return parseSafeLong(lines.getFirst().trim());
+                }
             }
         } catch (Exception ignored) {
         }

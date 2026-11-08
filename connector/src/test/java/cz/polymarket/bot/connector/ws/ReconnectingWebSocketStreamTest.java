@@ -247,7 +247,6 @@ class ReconnectingWebSocketStreamTest {
         assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
     }
 
-
     @Test
     void shouldCoalesceBatchesAndTrackTelemetryCounters() throws Exception {
         int burstSize = 50;
@@ -301,6 +300,53 @@ class ReconnectingWebSocketStreamTest {
         assertThat(telemetry.queueDepth()).isZero();
         assertThat(telemetry.maxProcessTimeUs()).isGreaterThan(0L);
         assertThat(stream.getIoReaderThread()).isNotNull();
+
+        stream.stop();
+    }
+
+    @Test
+    void shouldApplyDedicatedIoThreadNameAndSeedHistoricalTelemetry() throws Exception {
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> ws.writeTextMessage("{\"event_type\":\"book\"}")));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/dedicated-io-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "DEDICATED-IO-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                null,
+                batch -> {
+                    for (TimestampedFrame frame : batch) {
+                        assertThat(frame.rawUtf8Bytes()).isNotEmpty();
+                        assertThat(frame.rawText()).isEqualTo("{\"event_type\":\"book\"}");
+                    }
+                },
+                1000L,
+                0L,
+                null
+        );
+        stream.setDedicatedIoThreadName("clob-ws-io-reader");
+        stream.seedHistoricalTelemetry(2L, 1013, "slow consumer: send buffer full", 42, 18L, 350L);
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    WebSocketStreamTelemetry snap = stream.getTelemetrySnapshot();
+                    assertThat(snap.totalFramesReceived()).isEqualTo(1L);
+                    assertThat(snap.reconnectCount()).isEqualTo(2L);
+                    assertThat(snap.lastCloseCode()).isEqualTo(1013);
+                    assertThat(snap.lastCloseReason()).isEqualTo("slow consumer: send buffer full");
+                    assertThat(snap.maxQueueDepth()).isGreaterThanOrEqualTo(42);
+                    assertThat(snap.maxQueueLagMs()).isGreaterThanOrEqualTo(18L);
+                    assertThat(snap.maxProcessTimeUs()).isGreaterThanOrEqualTo(350L);
+                    assertThat(stream.getIoReaderThread()).isNotNull();
+                    assertThat(stream.getIoReaderThread().getName()).isEqualTo("clob-ws-io-reader");
+                });
 
         stream.stop();
     }

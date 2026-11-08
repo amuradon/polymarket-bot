@@ -9,6 +9,7 @@ import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketConnectOptions;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -22,12 +23,13 @@ import java.util.function.Supplier;
 /**
  * Resilient, non-blocking Vert.x WebSocket stream client with connection state monitoring,
  * periodic ping frames, automatic reconnection on disconnect or failure, immediate local timestamping
- * on the network I/O reader thread, and lock-free batch draining with real-time queue and latency telemetry.
+ * on the network I/O reader thread, zero-decode raw {@code byte[]} frame handoff, and lock-free batch draining
+ * with real-time queue and latency telemetry.
  */
 public class ReconnectingWebSocketStream {
 
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
-    private static final int SOCKET_RECEIVE_BUFFER_BYTES = 8 * 1024 * 1024;
+    private static final int SOCKET_RECEIVE_BUFFER_BYTES = 16 * 1024 * 1024;
     private static final int MAX_HEARTBEAT_FRAME_LENGTH = 64;
     private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
     private static final int DEFAULT_BATCH_LIMIT = 512;
@@ -65,6 +67,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<String> lastCloseReason = new AtomicReference<>("");
     private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
 
+    private volatile String dedicatedIoThreadName;
     private volatile Thread ioReaderThread;
     private volatile Thread drainThread;
     private volatile Thread externalWorkerThread;
@@ -159,6 +162,54 @@ public class ReconnectingWebSocketStream {
                 .setMaxWebSocketFrameSize(MAX_FRAME_SIZE_BYTES)
                 .setMaxWebSocketMessageSize(MAX_FRAME_SIZE_BYTES * 4);
         this.httpClient = vertx.createHttpClient(options);
+    }
+
+    /**
+     * Configures an explicit thread name and {@link Thread#MAX_PRIORITY} for the isolated Netty EventLoop
+     * thread servicing this stream (e.g. {@code "clob-ws-io-reader"}).
+     *
+     * @param dedicatedIoThreadName thread name to assign to the isolated EventLoop thread
+     */
+    public void setDedicatedIoThreadName(String dedicatedIoThreadName) {
+        this.dedicatedIoThreadName = dedicatedIoThreadName;
+    }
+
+    /**
+     * Seeds historical high-water mark and reconnect telemetry counters carried over from a previously
+     * rotated market stream so 15-minute market rotations do not wipe out historical diagnostics.
+     *
+     * @param priorReconnectCount cumulative reconnect count from prior market streams
+     * @param priorCloseCode      last observed close status code from prior market streams
+     * @param priorCloseReason    last observed close reason from prior market streams
+     * @param priorMaxQueueDepth  historical peak inbound queue depth
+     * @param priorMaxQueueLagMs  historical peak queue wait latency in milliseconds
+     * @param priorMaxProcessUs   historical peak batch processing time in microseconds
+     */
+    public void seedHistoricalTelemetry(
+            long priorReconnectCount,
+            int priorCloseCode,
+            String priorCloseReason,
+            int priorMaxQueueDepth,
+            long priorMaxQueueLagMs,
+            long priorMaxProcessUs) {
+        if (priorReconnectCount > 0L) {
+            reconnectCount.addAndGet(priorReconnectCount);
+        }
+        if (priorCloseCode != 0 && lastCloseCode.get() == 0) {
+            lastCloseCode.set(priorCloseCode);
+        }
+        if (priorCloseReason != null && !priorCloseReason.isEmpty() && lastCloseReason.get().isEmpty()) {
+            lastCloseReason.set(priorCloseReason);
+        }
+        if (priorMaxQueueDepth > 0) {
+            updateMaxInt(maxQueueDepth, priorMaxQueueDepth);
+        }
+        if (priorMaxQueueLagMs > 0L) {
+            updateMaxLong(maxQueueLagMs, priorMaxQueueLagMs);
+        }
+        if (priorMaxProcessUs > 0L) {
+            updateMaxLong(maxProcessTimeUs, priorMaxProcessUs);
+        }
     }
 
     /**
@@ -443,43 +494,44 @@ public class ReconnectingWebSocketStream {
                             }
                             return;
                         }
-                        this.ioReaderThread = Thread.currentThread();
+                        Thread currentThread = Thread.currentThread();
+                        applyDedicatedIoThreadTuning(currentThread);
+                        this.ioReaderThread = currentThread;
                         this.currentWebSocket = ws;
                         this.state.set(ConnectionState.CONNECTED);
-                        Log.infof("[%s] WebSocket connected to %s (reconnectCount=%d)",
-                                streamName, wsUrl, reconnectCount.get());
+                        Log.infof("[%s] WebSocket connected to %s on thread %s (reconnectCount=%d)",
+                                streamName, wsUrl, currentThread.getName(), reconnectCount.get());
 
-                        ws.textMessageHandler(rawText -> {
+                        final Buffer[] continuationBuffer = new Buffer[1];
+
+                        ws.frameHandler(frame -> {
                             this.ioReaderThread = Thread.currentThread();
                             long recvTs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(recvTs);
-                            if (isHeartbeatFrame(rawText)) {
-                                if (Log.isTraceEnabled()) {
-                                    Log.tracef("[%s] Received WebSocket text heartbeat: %s", streamName, rawText.trim());
-                                }
-                                return;
-                            }
-                            if (Log.isTraceEnabled()) {
-                                Log.tracef("[%s] Received WebSocket text frame at %d ms: %s", streamName, recvTs, rawText);
-                            }
-                            if (Log.isDebugEnabled()) {
-                                long count = debugReceivedFrameCounter.incrementAndGet();
-                                if (count % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
-                                    Log.debugf("[%s] Received %d WebSocket frames (lastMessageTimestampMs=%d)",
-                                            streamName, count, recvTs);
-                                }
-                            }
-                            if ((messageListener != null || batchListener != null) && rawText != null) {
-                                inboundQueue.offer(new TimestampedFrame(rawText, recvTs));
-                                int depth = queueDepth.incrementAndGet();
-                                updateMaxInt(maxQueueDepth, depth);
-                                totalFramesReceived.incrementAndGet();
 
-                                Thread extWorker = this.externalWorkerThread;
-                                if (extWorker != null) {
-                                    LockSupport.unpark(extWorker);
-                                } else if (workerParked.get() && workerParked.compareAndSet(true, false)) {
-                                    LockSupport.unpark(this.drainThread);
+                            if (frame.isText() || frame.isBinary()) {
+                                if (frame.isFinal()) {
+                                    continuationBuffer[0] = null;
+                                    handleInboundPayloadBuffer(frame.binaryData(), recvTs);
+                                } else {
+                                    Buffer partial = frame.binaryData();
+                                    Buffer acc = Buffer.buffer(Math.max(4096, partial != null ? partial.length() * 2 : 4096));
+                                    if (partial != null) {
+                                        acc.appendBuffer(partial);
+                                    }
+                                    continuationBuffer[0] = acc;
+                                }
+                            } else if (frame.isContinuation()) {
+                                Buffer acc = continuationBuffer[0];
+                                if (acc != null) {
+                                    Buffer partial = frame.binaryData();
+                                    if (partial != null) {
+                                        acc.appendBuffer(partial);
+                                    }
+                                    if (frame.isFinal()) {
+                                        continuationBuffer[0] = null;
+                                        handleInboundPayloadBuffer(acc, recvTs);
+                                    }
                                 }
                             }
                         });
@@ -537,6 +589,58 @@ public class ReconnectingWebSocketStream {
         } catch (Exception e) {
             Log.errorf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
             scheduleReconnect();
+        }
+    }
+
+    private void applyDedicatedIoThreadTuning(Thread thread) {
+        String customName = this.dedicatedIoThreadName;
+        if (customName != null && !customName.isBlank() && thread != null) {
+            try {
+                if (!customName.equals(thread.getName())) {
+                    thread.setName(customName);
+                }
+                if (thread.getPriority() != Thread.MAX_PRIORITY) {
+                    thread.setPriority(Thread.MAX_PRIORITY);
+                }
+            } catch (SecurityException ignored) {
+            }
+        }
+    }
+
+    private void handleInboundPayloadBuffer(Buffer payloadBuffer, long recvTs) {
+        if (payloadBuffer == null || payloadBuffer.length() == 0) {
+            return;
+        }
+        if (isHeartbeatBuffer(payloadBuffer)) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] Received WebSocket text heartbeat: %s",
+                        streamName, payloadBuffer.toString(StandardCharsets.UTF_8).trim());
+            }
+            return;
+        }
+        if (Log.isDebugEnabled()) {
+            long count = debugReceivedFrameCounter.incrementAndGet();
+            if (count % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
+                Log.debugf("[%s] Received %d WebSocket frames (lastMessageTimestampMs=%d)",
+                        streamName, count, recvTs);
+            }
+        }
+        if (messageListener != null || batchListener != null) {
+            byte[] rawUtf8Bytes = payloadBuffer.getBytes();
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] Received WebSocket frame at %d ms (%d bytes)", streamName, recvTs, rawUtf8Bytes.length);
+            }
+            inboundQueue.offer(new TimestampedFrame(rawUtf8Bytes, recvTs));
+            int depth = queueDepth.incrementAndGet();
+            updateMaxInt(maxQueueDepth, depth);
+            totalFramesReceived.incrementAndGet();
+
+            Thread extWorker = this.externalWorkerThread;
+            if (extWorker != null) {
+                LockSupport.unpark(extWorker);
+            } else if (workerParked.get() && workerParked.compareAndSet(true, false)) {
+                LockSupport.unpark(this.drainThread);
+            }
         }
     }
 
@@ -630,6 +734,29 @@ public class ReconnectingWebSocketStream {
             }
             prev = maxHolder.get();
         }
+    }
+
+    static boolean isHeartbeatBuffer(Buffer buf) {
+        if (buf == null) {
+            return false;
+        }
+        int len = buf.length();
+        if (len == 0 || len > MAX_HEARTBEAT_FRAME_LENGTH) {
+            return false;
+        }
+        if (len == 4) {
+            byte b0 = buf.getByte(0);
+            byte b1 = buf.getByte(1);
+            byte b2 = buf.getByte(2);
+            byte b3 = buf.getByte(3);
+            if ((b0 == 'P' || b0 == 'p')
+                    && (b1 == 'O' || b1 == 'o' || b1 == 'I' || b1 == 'i')
+                    && (b2 == 'N' || b2 == 'n')
+                    && (b3 == 'G' || b3 == 'g')) {
+                return true;
+            }
+        }
+        return isHeartbeatFrame(buf.toString(StandardCharsets.UTF_8));
     }
 
     static boolean isHeartbeatFrame(String rawText) {

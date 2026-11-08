@@ -9,6 +9,8 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -24,8 +26,10 @@ import java.util.stream.Collectors;
 /**
  * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
  * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
- * Manages per-market WebSocket connections and the authenticated User Channel stream,
- * supporting both standalone per-stream draining and external dedicated worker thread binding.
+ * <p>
+ * Isolates high-frequency market orderbook streams onto a dedicated single-thread Netty EventLoop
+ * ({@code clob-ws-io-reader}) so that TLS decryption and socket draining for orderbook bursts never contend
+ * with the HTTP server, PolyBolt streams, or the authenticated User Channel stream.
  */
 @ApplicationScoped
 public class PolymarketClobClient {
@@ -35,7 +39,13 @@ public class PolymarketClobClient {
      */
     public static final String USER_STREAM_KEY = "USER";
 
-    private final Vertx vertx;
+    /**
+     * Dedicated thread name for the isolated Netty EventLoop servicing CLOB market orderbook streams.
+     */
+    public static final String DEDICATED_MARKET_IO_THREAD_NAME = "clob-ws-io-reader";
+
+    private final Vertx sharedVertx;
+    private final Vertx clobMarketVertx;
     private final String wsUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
@@ -43,10 +53,19 @@ public class PolymarketClobClient {
     private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
     private volatile ReconnectingWebSocketStream userStream;
 
+    // Cumulative telemetry preserved across 15m market stream rotations
+    private long historicalMarketReconnects = 0L;
+    private int lastMarketCloseCode = 0;
+    private String lastMarketCloseReason = "";
+    private int historicalMaxQueueDepth = 0;
+    private long historicalMaxQueueLagMs = 0L;
+    private long historicalMaxProcessTimeUs = 0L;
+
     /**
-     * Constructs the Polymarket CLOB WebSocket client.
+     * Constructs the Polymarket CLOB WebSocket client with a dedicated 1-thread Vert.x instance
+     * exclusively for market orderbook streams.
      *
-     * @param vertx            Vert.x runtime instance
+     * @param vertx            shared Quarkus Vert.x runtime instance (used by the low-rate User stream)
      * @param wsUrl            Polymarket CLOB WebSocket URL
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
@@ -60,10 +79,22 @@ public class PolymarketClobClient {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
-        this.vertx = vertx;
+        this.sharedVertx = vertx;
+        this.clobMarketVertx = Vertx.vertx(new VertxOptions()
+                .setEventLoopPoolSize(1)
+                .setPreferNativeTransport(true));
         this.wsUrl = wsUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+    }
+
+    @PreDestroy
+    void destroy() {
+        stopAll();
+        try {
+            clobMarketVertx.close();
+        } catch (Exception ignored) {
+        }
     }
 
     /**
@@ -83,7 +114,7 @@ public class PolymarketClobClient {
         }
         String subPayload = buildSubscriptionPayload(tokenIds);
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                vertx,
+                clobMarketVertx,
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
@@ -95,6 +126,15 @@ public class PolymarketClobClient {
                 reconnectDelayMs,
                 pingIntervalMs,
                 "PING"
+        );
+        stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        stream.seedHistoricalTelemetry(
+                historicalMarketReconnects,
+                lastMarketCloseCode,
+                lastMarketCloseReason,
+                historicalMaxQueueDepth,
+                historicalMaxQueueLagMs,
+                historicalMaxProcessTimeUs
         );
         marketStreams.put(marketSlug, stream);
         Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
@@ -123,7 +163,7 @@ public class PolymarketClobClient {
         }
         String subPayload = buildSubscriptionPayload(tokenIds);
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                vertx,
+                clobMarketVertx,
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
@@ -132,6 +172,15 @@ public class PolymarketClobClient {
                 reconnectDelayMs,
                 pingIntervalMs,
                 "PING"
+        );
+        stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        stream.seedHistoricalTelemetry(
+                historicalMarketReconnects,
+                lastMarketCloseCode,
+                lastMarketCloseReason,
+                historicalMaxQueueDepth,
+                historicalMaxQueueLagMs,
+                historicalMaxProcessTimeUs
         );
         if (externalWorker != null) {
             stream.bindExternalWorker(externalWorker);
@@ -142,7 +191,8 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Disconnects and removes the CLOB WebSocket stream for a market that has finished and resolved.
+     * Disconnects and removes the CLOB WebSocket stream for a market that has finished and resolved,
+     * preserving its high-water mark and reconnect telemetry for subsequent market rotations.
      *
      * @param marketSlug Polymarket market slug to disconnect
      */
@@ -152,6 +202,17 @@ public class PolymarketClobClient {
         }
         ReconnectingWebSocketStream stream = marketStreams.remove(marketSlug);
         if (stream != null) {
+            WebSocketStreamTelemetry snap = stream.getTelemetrySnapshot();
+            historicalMarketReconnects = Math.max(historicalMarketReconnects, snap.reconnectCount());
+            if (snap.lastCloseCode() != 0) {
+                lastMarketCloseCode = snap.lastCloseCode();
+            }
+            if (snap.lastCloseReason() != null && !snap.lastCloseReason().isEmpty()) {
+                lastMarketCloseReason = snap.lastCloseReason();
+            }
+            historicalMaxQueueDepth = Math.max(historicalMaxQueueDepth, snap.maxQueueDepth());
+            historicalMaxQueueLagMs = Math.max(historicalMaxQueueLagMs, snap.maxQueueLagMs());
+            historicalMaxProcessTimeUs = Math.max(historicalMaxProcessTimeUs, snap.maxProcessTimeUs());
             Log.infof("Closing Polymarket CLOB WebSocket stream for market %s", marketSlug);
             stream.stop();
         }
@@ -187,7 +248,7 @@ public class PolymarketClobClient {
         String userWsUrl = resolveUserWsUrl(this.wsUrl);
         String subPayload = buildUserSubscriptionPayload(credentials);
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                vertx,
+                sharedVertx,
                 "POLYMARKET-CLOB-USER",
                 userWsUrl,
                 () -> List.of(subPayload),
@@ -330,7 +391,8 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns the Netty I/O reader thread observed by any active CLOB stream, or {@code null} if none connected yet.
+     * Returns the dedicated Netty I/O reader thread observed by any active CLOB market stream,
+     * or falls back to the User stream I/O thread if no market stream is connected yet.
      *
      * @return Netty I/O reader thread
      */

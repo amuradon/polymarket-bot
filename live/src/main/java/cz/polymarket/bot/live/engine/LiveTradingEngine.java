@@ -1514,7 +1514,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             ioReader = polyBoltClient.getIoReaderThread();
         }
         return List.of(
-                new MonitoredThreadSpec("vCPU #1: I/O Reader", "vert.x-eventloop-thread-0", ioReader, -1L),
+                new MonitoredThreadSpec("vCPU #1: I/O Reader", PolymarketClobClient.DEDICATED_MARKET_IO_THREAD_NAME, ioReader, -1L),
                 new MonitoredThreadSpec("vCPU #2: CLOB Book Worker", "clob-book-worker", clobBookWorkerThread, clobBookWorkerBusyNs.get()),
                 new MonitoredThreadSpec("vCPU #3: Strategy Calculator", "strategy-calculator-worker", strategyCalculatorThread, strategyWorkerBusyNs.get()),
                 new MonitoredThreadSpec("vCPU #4: Order & I/O Worker", "order-execution-io-worker", orderExecutionWorkerThread, orderExecutionWorkerBusyNs.get())

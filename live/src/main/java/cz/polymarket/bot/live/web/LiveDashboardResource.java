@@ -5,6 +5,7 @@ import cz.polymarket.bot.live.engine.LiveTradingEngine;
 import io.quarkus.qute.Location;
 import io.quarkus.qute.Template;
 import io.quarkus.qute.TemplateInstance;
+import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -22,6 +23,7 @@ import java.util.Map;
  * and 4-core / OS / WebSocket telemetry.
  */
 @Path("/")
+@Blocking
 @ApplicationScoped
 public class LiveDashboardResource {
 
