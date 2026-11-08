@@ -1,26 +1,20 @@
 package cz.polymarket.bot.live.web;
 
-import cz.polymarket.bot.domain.TradeRecord;
-import cz.polymarket.bot.live.storage.LiveTradeRepository;
-import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
 class LiveDashboardResourceTest {
 
-    @Inject
-    LiveTradeRepository repository;
-
     @Test
-    void shouldServeDashboardOnRootPath() {
+    void shouldServeDashboardWith4CoreTelemetryOnRootPath() {
         given()
                 .when().get("/")
                 .then()
@@ -30,42 +24,16 @@ class LiveDashboardResourceTest {
                 .body(containsString("UtterParameciumStrategy"))
                 .body(containsString("Initial Capital"))
                 .body(containsString("Current Balance"))
-                .body(containsString("Execution History"));
+                .body(containsString("4-Core Dedicated Pipeline Utilization"))
+                .body(containsString("OS TCP Rx Buffer"))
+                .body(containsString("vCPU #1: I/O Reader"))
+                .body(containsString("vCPU #2: CLOB Book Worker"))
+                .body(containsString("vCPU #3: Strategy Calculator"))
+                .body(containsString("vCPU #4: Order &amp; I/O Worker"));
     }
 
     @Test
-    void shouldServeDashboardWithRecordedTradesOnRootPath() {
-        repository.recordTrade(new TradeRecord(
-                "2026-11-04T12:00:00Z",
-                1793793600L,
-                TradeDirection.UP,
-                0.55,
-                1.00,
-                55.0,
-                100.0,
-                0.0,
-                45.0,
-                "Resolution (TWAP 60s)",
-                0.70,
-                0.55,
-                0.15,
-                true,
-                1045.0
-        ));
-
-        given()
-                .when().get("/")
-                .then()
-                .statusCode(200)
-                .contentType(ContentType.HTML)
-                .body(containsString("Polymarket Bot :: Live Trading"))
-                .body(containsString("WIN"))
-                .body(containsString("Resolution (TWAP 60s)"))
-                .body(containsString("$1045.0"));
-    }
-
-    @Test
-    void shouldReturnLiveStatusApi() {
+    void shouldReturnLiveStatusApiWithTelemetry() {
         given()
                 .when().get("/api/live/status")
                 .then()
@@ -75,29 +43,28 @@ class LiveDashboardResourceTest {
                 .body("status", equalTo("LIVE"))
                 .body("orderType", equalTo("FAK"))
                 .body("initialCapital", notNullValue())
-                .body("currentBalance", notNullValue());
+                .body("currentBalance", notNullValue())
+                .body("telemetry", notNullValue())
+                .body("telemetry.threads", hasSize(4));
     }
 
     @Test
-    void shouldReturnMetricsApi() {
+    void shouldReturnLiveTelemetryApi() {
         given()
-                .when().get("/api/live/metrics")
+                .when().get("/api/live/telemetry")
                 .then()
                 .statusCode(200)
                 .contentType(ContentType.JSON)
-                .body("totalTrades", notNullValue())
-                .body("winRatePct", notNullValue())
-                .body("initialCapital", notNullValue());
+                .body("gcName", notNullValue())
+                .body("threads", hasSize(4))
+                .body("threads[0].role", equalTo("vCPU #1: I/O Reader"))
+                .body("threads[1].role", equalTo("vCPU #2: CLOB Book Worker"))
+                .body("threads[2].role", equalTo("vCPU #3: Strategy Calculator"))
+                .body("threads[3].role", equalTo("vCPU #4: Order & I/O Worker"));
     }
 
     @Test
-    void shouldReturnTradesAndPositionsApi() {
-        given()
-                .when().get("/api/live/trades")
-                .then()
-                .statusCode(200)
-                .contentType(ContentType.JSON);
-
+    void shouldReturnPositionsApi() {
         given()
                 .when().get("/api/live/positions")
                 .then()

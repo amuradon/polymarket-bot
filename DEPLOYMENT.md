@@ -13,8 +13,8 @@ The deployment architecture is split into clean, single-responsibility units for
 ```mermaid
 flowchart TD
     subgraph LiveTrading["Live Trading Application"]
-        LT_Base["1. infra/live-trading-base.yaml<br/>(ECR Repo, LogGroup, IAM Role, EBS, SG: 443 from 178.17.13.13/32)"]
-        LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8g.large EC2 Host, Nitro EBS Mount, Docker awslogs)"]
+        LT_Base["1. infra/live-trading-base.yaml<br/>(ECR Repo, LogGroup, IAM Role, SG: 443 from 178.17.13.13/32)"]
+        LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8gn.xlarge 4-vCPU Host, --network host, Non-Blocking awslogs)"]
         LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Maven Release, Buildx ARM64, ECR Push, SSM Deploy)"]
         LT_Base --> LT_EC2
         LT_EC2 --> LT_Script
@@ -33,23 +33,28 @@ flowchart TD
 
 ### Key Architectural Invariants:
 1. **AWS Region**: `eu-west-1` (Ireland / Dublin) for physical proximity (~5-8 ms RTT over AWS backbone) to Polymarket CLOB in London (`eu-west-2`).
-2. **Compute**: Dedicated, non-throttled compute (`c8g.large` Graviton4 ARM64 for Live Trading; `t4g.small` with **Unlimited CPU Credits** for Data Collector).
-3. **Storage**: Encrypted persistent **Amazon EBS (`gp3`)** mounted at `/mnt/ebs/polymarket-data` (`DeletionPolicy: Retain`).
+2. **Compute & 4-Core Pipeline**:
+   - Dedicated, non-throttled **`c8gn.xlarge`** (4 vCPU Graviton4 ARM64, 8 GiB RAM, 30 Gbps Enhanced Networking / Nitro v5) for Live Trading.
+   - Each of the 4 physical Neoverse-V2 cores is mapped to a dedicated lock-free thread (`ws-io-reader`, `clob-book-worker`, `strategy-calculator-worker`, `order-execution-io-worker`) running under Java 25 **Generational ZGC** (`-XX:+UseZGC -XX:+AlwaysPreTouch`).
+   - `t4g.small` with **Unlimited CPU Credits** and persistent gp3 EBS volume for the Data Collector (`data`).
+3. **Zero-Overhead Container Runtime**:
+   - The Live Trading Docker container executes with **`--network host`** (eliminating `docker0` NAT bridge overhead and exposing host `/proc/net/tcp` directly to the telemetry monitor) and **`--log-opt mode=non-blocking --log-opt max-buffer-size=16m`** (preventing CloudWatch Logs flushes from stalling JVM threads).
+   - Live trading statistics are read externally from the Polymarket REST API; no secondary EBS volume or disk I/O is attached to the `live` instance.
 4. **Network & Security**:
-   - Inbound HTTPS (port 443) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
+   - Inbound HTTPS (port 443, redirected via host `iptables` to Quarkus port 8080) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
    - No public SSH (port 22) is open. Management and deployment are executed exclusively via **AWS Systems Manager (SSM)**.
 5. **SemVer & Automated Maven Release**:
    - Deployment scripts accept an optional SemVer parameter `-Version x.y.z`.
    - If supplied: sets `-DreleaseVersion=x.y.z` and `-DdevelopmentVersion=x.y.(z+1)-SNAPSHOT`.
    - If omitted: Maven release automatically increments the patch version in batch mode.
-   - The released SemVer version is used as the Docker image tag (along with `latest`). Git push of release tags and version bumps is enabled during script execution.
+   - The released SemVer version is used as the Docker image tag (along with `latest`).
 
 ---
 
 ## 2. Live Trading Application Deployment
 
 ### Step 2.1: Deploy Base Infrastructure Stack (`infra/live-trading-base.yaml`)
-Provisions the ECR repository (`polymarket-bot-live-base-repo`), CloudWatch Logs group, IAM role with SSM/SecretsManager access, encrypted gp3 EBS volume, and the security group allowing inbound port 443 access strictly from `178.17.13.13/32`.
+Provisions the ECR repository (`polymarket-bot-live-base-repo`), CloudWatch Logs group, IAM role with SSM/SecretsManager access, and the security group allowing inbound port 443 access strictly from `178.17.13.13/32`.
 
 #### Windows 11 (PowerShell):
 ```powershell
@@ -74,7 +79,7 @@ aws cloudformation deploy \
 ---
 
 ### Step 2.2: Deploy Compute Infrastructure Stack (`infra/live-trading-ec2.yaml`)
-Provisions the 24/7 `c8g.large` EC2 instance referencing the base stack outputs. UserData automatically attaches and mounts the persistent gp3 EBS volume to `/mnt/ebs/polymarket-data`, sets up Docker with `awslogs` driver, and creates `/usr/local/bin/start-polymarket-live.sh`.
+Provisions the 24/7 `c8gn.xlarge` (4 vCPU Graviton4) EC2 instance referencing the base stack outputs. UserData tunes kernel TCP receive buffers (`rmem_max = 33554432`), configures `iptables` port 443 → 8080 redirection, and creates `/usr/local/bin/start-polymarket-live.sh` with `--network host` and non-blocking `awslogs`.
 
 #### Windows 11 (PowerShell):
 ```powershell
@@ -82,7 +87,7 @@ aws cloudformation deploy `
   --region eu-west-1 `
   --stack-name polymarket-bot-live-ec2 `
   --template-file infra/live-trading-ec2.yaml `
-  --parameter-overrides BaseStackName="polymarket-bot-live-base" InstanceType="c8g.large"
+  --parameter-overrides BaseStackName="polymarket-bot-live-base" InstanceType="c8gn.xlarge"
 ```
 
 #### Linux / macOS (Bash):
@@ -91,7 +96,7 @@ aws cloudformation deploy \
   --region eu-west-1 \
   --stack-name polymarket-bot-live-ec2 \
   --template-file infra/live-trading-ec2.yaml \
-  --parameter-overrides BaseStackName="polymarket-bot-live-base" InstanceType="c8g.large"
+  --parameter-overrides BaseStackName="polymarket-bot-live-base" InstanceType="c8gn.xlarge"
 ```
 
 ---
@@ -226,9 +231,9 @@ If the Lambda function is already deployed, the script automatically updates the
 
 ## 5. Operational Verification & Access
 
-### 5.1 Accessing the Web Dashboard
-Because inbound HTTPS port 443 is strictly whitelisted for IP `178.17.13.13/32`:
-- Open `https://<EC2-Public-IP>:443` directly from your authorized IP (`178.17.13.13`).
+### 5.1 Accessing the Web Dashboard & Telemetry API
+Because inbound port 443 is strictly whitelisted for IP `178.17.13.13/32`:
+- Open `http://<EC2-Public-IP>:443` directly from your authorized IP (`178.17.13.13`), or query `/api/live/telemetry` and `/api/live/status`.
 - Or use secure AWS Systems Manager Port Forwarding from any authorized developer workstation without exposing ports:
   ```powershell
   # Windows 11:
@@ -240,7 +245,7 @@ Because inbound HTTPS port 443 is strictly whitelisted for IP `178.17.13.13/32`:
     --document-name AWS-StartPortForwardingSession `
     --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
   ```
-  Then navigate to `http://localhost:8080`.
+  Then navigate to `http://localhost:8080` or `http://localhost:8080/api/live/telemetry`.
 
 ### 5.2 Verifying CloudWatch Logs
 Tail live container logs directly from CloudWatch:

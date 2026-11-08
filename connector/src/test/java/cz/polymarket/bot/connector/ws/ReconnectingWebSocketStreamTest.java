@@ -246,4 +246,62 @@ class ReconnectingWebSocketStreamTest {
         stream.stop();
         assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
     }
+
+
+    @Test
+    void shouldCoalesceBatchesAndTrackTelemetryCounters() throws Exception {
+        int burstSize = 50;
+        List<Integer> batchSizes = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    for (int i = 0; i < burstSize; i++) {
+                        ws.writeTextMessage("{\"seq\":" + i + "}");
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/batch-telemetry-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "BATCH-TELEMETRY-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                null,
+                batch -> {
+                    if (batchSizes.isEmpty()) {
+                        try {
+                            Thread.sleep(15L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    batchSizes.add(batch.size());
+                },
+                1000L,
+                0L,
+                null
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    int total = batchSizes.stream().mapToInt(Integer::intValue).sum();
+                    assertThat(total).isEqualTo(burstSize);
+                });
+
+        WebSocketStreamTelemetry telemetry = stream.getTelemetrySnapshot();
+        assertThat(telemetry.streamName()).isEqualTo("BATCH-TELEMETRY-WS");
+        assertThat(telemetry.state()).isEqualTo(ConnectionState.CONNECTED);
+        assertThat(telemetry.totalFramesReceived()).isEqualTo(burstSize);
+        assertThat(telemetry.maxQueueDepth()).isGreaterThanOrEqualTo(1);
+        assertThat(telemetry.queueDepth()).isZero();
+        assertThat(telemetry.maxProcessTimeUs()).isGreaterThan(0L);
+        assertThat(stream.getIoReaderThread()).isNotNull();
+
+        stream.stop();
+    }
 }

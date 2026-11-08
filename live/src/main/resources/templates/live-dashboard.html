@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polymarket Bot :: Live Trading</title>
+    <title>Polymarket Bot :: Live Trading &amp; 4-Core Telemetry</title>
     <style>
         :root {
             --bg-primary: #0f172a;
@@ -38,7 +38,7 @@
         }
 
         .container {
-            max-width: 1400px;
+            max-width: 1440px;
             margin: 0 auto;
         }
 
@@ -51,12 +51,15 @@
             border-radius: 12px;
             border: 1px solid var(--border-color);
             margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
         }
 
         .header-left {
             display: flex;
             align-items: center;
             gap: 16px;
+            flex-wrap: wrap;
         }
 
         h1 {
@@ -110,6 +113,7 @@
             align-items: center;
             gap: 20px;
             font-size: 14px;
+            flex-wrap: wrap;
         }
 
         .header-stat {
@@ -132,7 +136,7 @@
 
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
@@ -155,8 +159,9 @@
         }
 
         .metric-card .value {
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
 
         .metric-card .subtitle {
@@ -248,7 +253,7 @@
         .no-data {
             text-align: center;
             color: var(--text-secondary);
-            padding: 32px;
+            padding: 28px;
             font-style: italic;
         }
 
@@ -276,6 +281,7 @@
             <span class="badge badge-strategy">{strategyName}</span>
             <span class="badge badge-live">● {status}</span>
             <span class="badge badge-armed">{orderType}</span>
+            <span class="badge badge-strategy">GC: {telemetry.gcName}</span>
         </div>
         <div class="header-right">
             <div class="header-stat">
@@ -298,53 +304,153 @@
 
     <div class="metrics-grid">
         <div class="metric-card">
-            <span class="title">Total Trades</span>
-            <span class="value">{metrics.totalTrades}</span>
-            <span class="subtitle">{metrics.winningTrades} Wins / {metrics.losingTrades} Losses</span>
-        </div>
-        <div class="metric-card">
-            <span class="title">Win Rate</span>
-            <span class="value {#if metrics.winRatePct >= 50}text-green{#else}text-orange{/if}">
-                {metrics.winRatePct}%
+            <span class="title">OS TCP Rx Buffer</span>
+            <span class="value {#if telemetry.currentTcpRxQueueBytes > 65536}text-red{#else}text-green{/if}">
+                {telemetry.currentTcpRxQueueBytes} B
             </span>
-            <span class="subtitle">Threshold: 50.0%</span>
+            <span class="subtitle">Peak Rx: {telemetry.maxTcpRxQueueBytes} B | rmem_max: {telemetry.kernelRmemMaxBytes} B</span>
         </div>
         <div class="metric-card">
-            <span class="title">Total Net PnL</span>
-            <span class="value {#if metrics.totalNetPnl >= 0}text-green{#else}text-red{/if}">
-                ${metrics.totalNetPnl}
+            <span class="title">OS TCP Tx &amp; Drops</span>
+            <span class="value {#if telemetry.tcpBacklogDrop > 0 || telemetry.tcpRcvCollapsed > 0}text-orange{#else}text-green{/if}">
+                {telemetry.currentTcpTxQueueBytes} B
             </span>
-            <span class="subtitle">Gross: ${metrics.grossPnl}</span>
+            <span class="subtitle">Peak Tx: {telemetry.maxTcpTxQueueBytes} B | Collapsed: {telemetry.tcpRcvCollapsed} | Drops: {telemetry.tcpBacklogDrop}</span>
         </div>
         <div class="metric-card">
-            <span class="title">Profit Factor</span>
-            <span class="value {#if metrics.profitFactor >= 1}text-green{#else}text-blue{/if}">
-                {metrics.profitFactor}
+            <span class="title">JVM CPU &amp; ZGC</span>
+            <span class="value {#if telemetry.processCpuLoadPct > 85}text-orange{#else}text-green{/if}">
+                {telemetry.processCpuLoadPct}%
             </span>
-            <span class="subtitle">G-Profit: ${metrics.grossProfit}</span>
+            <span class="subtitle">Peak CPU: {telemetry.maxProcessCpuLoadPct}% | GC: {telemetry.gcCount} ({telemetry.totalGcPauseMs} ms)</span>
         </div>
         <div class="metric-card">
-            <span class="title">Max Drawdown</span>
-            <span class="value text-red">${metrics.maxDrawdownUsd}</span>
-            <span class="subtitle">{metrics.maxDrawdownPct}% from peak</span>
+            <span class="title">JVM Heap Memory</span>
+            <span class="value text-blue">{telemetry.usedHeapMb} / {telemetry.maxHeapMb} MiB</span>
+            <span class="subtitle">Host CPU: {telemetry.systemCpuLoadPct}% | TCP Sockets: {telemetry.activeTcpSockets}</span>
         </div>
         <div class="metric-card">
-            <span class="title">EV Per Trade</span>
-            <span class="value {#if metrics.expectedValuePerTrade >= 0}text-green{#else}text-red{/if}">
-                ${metrics.expectedValuePerTrade}
+            <span class="title">Quote Freshness</span>
+            <span class="value {#if telemetry.lastQuoteAgeMs > 250}text-red{#else}text-green{/if}">
+                {telemetry.lastQuoteAgeMs} ms
             </span>
-            <span class="subtitle">Expectancy</span>
+            <span class="subtitle">Max Age: {telemetry.maxQuoteAgeMsObserved} ms | Stale Skipped: {telemetry.staleQuotesSkipped}</span>
         </div>
         <div class="metric-card">
-            <span class="title">Sharpe / Sortino</span>
-            <span class="value">{metrics.sharpeRatio} / {metrics.sortinoRatio}</span>
-            <span class="subtitle">Brier Score: {metrics.brierScore}</span>
+            <span class="title">Quote Conflation</span>
+            <span class="value text-blue">{telemetry.conflatedQuotesCount}</span>
+            <span class="subtitle">Superseded BBO snapshots coalesced on vCPU #2 → #3</span>
         </div>
         <div class="metric-card">
-            <span class="title">Total Fees</span>
-            <span class="value text-orange">${metrics.totalFees}</span>
-            <span class="subtitle">7% Polymarket formula</span>
+            <span class="title">CLOB Orders</span>
+            <span class="value text-green">{telemetry.ordersFilled} Filled</span>
+            <span class="subtitle">Submitted: {telemetry.ordersSubmitted} | Rejected/FAK-Killed: {telemetry.ordersRejected}</span>
         </div>
+        <div class="metric-card">
+            <span class="title">CLOB Order RTT</span>
+            <span class="value {#if telemetry.lastOrderRttMs > 250}text-orange{#else}text-green{/if}">
+                {telemetry.lastOrderRttMs} ms
+            </span>
+            <span class="subtitle">Max RTT: {telemetry.maxOrderRttMs} ms (EIP-712 + HTTP POST)</span>
+        </div>
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">4-Core Dedicated Pipeline Utilization (c8gn.xlarge)</span>
+            <a href="/api/live/telemetry" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Raw Telemetry JSON ↗</a>
+        </div>
+        <div style="overflow-x: auto;">
+            <table>
+                <thead>
+                <tr>
+                    <th>vCPU Pipeline Role</th>
+                    <th>JVM Thread Name</th>
+                    <th>State</th>
+                    <th>Core CPU %</th>
+                    <th>Peak Core CPU %</th>
+                    <th>Active Duty Cycle %</th>
+                    <th>Peak Duty Cycle %</th>
+                    <th>Total CPU Time</th>
+                </tr>
+                </thead>
+                <tbody>
+                {#for thread in telemetry.threads}
+                    <tr>
+                        <td><strong>{thread.role}</strong></td>
+                        <td>{thread.threadName}</td>
+                        <td>
+                            <span class="badge {#if thread.threadState == 'RUNNABLE'}badge-up{#else}badge-strategy{/if}">
+                                {thread.threadState}
+                            </span>
+                        </td>
+                        <td class="{#if thread.cpuUtilizationPct > 80}text-red{#else if thread.cpuUtilizationPct > 50}text-orange{#else}text-green{/if}">
+                            {thread.cpuUtilizationPct}%
+                        </td>
+                        <td class="{#if thread.maxCpuUtilizationPct > 85}text-orange{#else}text-blue{/if}">
+                            {thread.maxCpuUtilizationPct}%
+                        </td>
+                        <td>{thread.busyDutyCyclePct}%</td>
+                        <td>{thread.maxBusyDutyCyclePct}%</td>
+                        <td>{thread.totalCpuTimeMs} ms</td>
+                    </tr>
+                {/for}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">WebSocket Stream Inbound Queues &amp; Processing Latency</span>
+            <a href="/api/live/status" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Status JSON ↗</a>
+        </div>
+        {#if telemetry.streams.isEmpty}
+            <div class="no-data">
+                No active WebSocket streams registered yet.
+            </div>
+        {#else}
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Stream Name</th>
+                        <th>State</th>
+                        <th>Queue Depth (Cur / Max)</th>
+                        <th>Queue Lag (Cur / Max)</th>
+                        <th>Batch Process (Cur / Max)</th>
+                        <th>Frames Enqueued</th>
+                        <th>Coalesced Frames</th>
+                        <th>Reconnects</th>
+                        <th>Last Close</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for s in telemetry.streams}
+                        <tr>
+                            <td><strong>{s.streamName}</strong></td>
+                            <td>
+                                <span class="badge {#if s.state == 'CONNECTED'}badge-up{#else}badge-armed{/if}">{s.state}</span>
+                            </td>
+                            <td class="{#if s.queueDepth > 50}text-red{#else if s.maxQueueDepth > 100}text-orange{#else}text-green{/if}">
+                                {s.queueDepth} / {s.maxQueueDepth}
+                            </td>
+                            <td class="{#if s.lastQueueLagMs > 100}text-red{#else if s.maxQueueLagMs > 200}text-orange{#else}text-green{/if}">
+                                {s.lastQueueLagMs} ms / {s.maxQueueLagMs} ms
+                            </td>
+                            <td>{s.lastProcessTimeUs} µs / {s.maxProcessTimeUs} µs</td>
+                            <td>{s.totalFramesReceived}</td>
+                            <td class="text-blue">{s.coalescedFramesCount}</td>
+                            <td class="{#if s.reconnectCount > 0}text-orange{#else}text-green{/if}">{s.reconnectCount}</td>
+                            <td style="color: var(--text-secondary);">
+                                {#if s.lastCloseCode != 0}{s.lastCloseCode} ({s.lastCloseReason}){#else}NONE{/if}
+                            </td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
     </div>
 
     <div class="section-card">
@@ -389,65 +495,6 @@
             </div>
         {/if}
     </div>
-
-    <div class="section-card">
-        <div class="section-header">
-            <span class="section-title">Execution History ({trades.size} Trades)</span>
-            <a href="/api/live/trades" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Raw JSON ↗</a>
-        </div>
-        {#if trades.isEmpty}
-            <div class="no-data">
-                No live trades recorded yet. As orders execute on Polymarket CLOB, trades will be appended here and saved to trades.jsonl.
-            </div>
-        {#else}
-            <div style="overflow-x: auto;">
-                <table>
-                    <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Time (UTC)</th>
-                        <th>Side</th>
-                        <th>Entry Price</th>
-                        <th>Exit Price</th>
-                        <th>Size (USD)</th>
-                        <th>Fee (USD)</th>
-                        <th>Net PnL</th>
-                        <th>Result</th>
-                        <th>Exit Reason</th>
-                        <th>Balance</th>
-                    </tr>
-                    </thead>
-                    <tbody>
-                    {#for trade in trades}
-                        <tr>
-                            <td>{trade_count}</td>
-                            <td>{trade.entryTimeUtc}</td>
-                            <td>
-                                <span class="badge {#if trade.side == 'UP'}badge-up{#else}badge-down{/if}">{trade.side}</span>
-                            </td>
-                            <td>${trade.entryPrice}</td>
-                            <td>${trade.exitPrice}</td>
-                            <td>${trade.sizeUsd}</td>
-                            <td class="text-orange">${trade.feeUsd}</td>
-                            <td class="{#if trade.isWin}text-green{#else}text-red{/if}">
-                                ${trade.netPnl}
-                            </td>
-                            <td>
-                                {#if trade.isWin}
-                                    <span class="badge badge-up">WIN</span>
-                                {#else}
-                                    <span class="badge badge-down">LOSS</span>
-                                {/if}
-                            </td>
-                            <td style="color: var(--text-secondary);">{trade.exitReason}</td>
-                            <td><strong>${trade.balanceAfterTrade}</strong></td>
-                        </tr>
-                    {/for}
-                    </tbody>
-                </table>
-            </div>
-        {/if}
-    </div>
 </div>
 
 <script>
@@ -455,7 +502,7 @@
         if (!document.hidden) {
             window.location.reload();
         }
-    }, 10000);
+    }, 5000);
 </script>
 </body>
 </html>

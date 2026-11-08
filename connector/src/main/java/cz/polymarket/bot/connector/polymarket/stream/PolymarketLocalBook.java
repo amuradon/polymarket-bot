@@ -62,7 +62,7 @@ public class PolymarketLocalBook {
      *
      * @param assetId conditional token ID (or blank to default to {@code yesTokenId})
      */
-    public synchronized void clearAssetBook(String assetId) {
+    public void clearAssetBook(String assetId) {
         if (isNoAsset(assetId)) {
             Arrays.fill(noBids, 0.0);
             Arrays.fill(noAsks, 0.0);
@@ -85,7 +85,7 @@ public class PolymarketLocalBook {
      * @param price   price in {@code (0.0, 1.0)}
      * @param size    share quantity at this level
      */
-    public synchronized void updateLevel(String assetId, boolean isBid, double price, double size) {
+    public void updateLevel(String assetId, boolean isBid, double price, double size) {
         int priceMc = toPriceMc(price);
         if (priceMc <= 0 || priceMc >= BOOK_LEVELS) {
             return;
@@ -112,7 +112,7 @@ public class PolymarketLocalBook {
      * @param bestBid best bid price in {@code (0.0, 1.0)}
      * @param bestAsk best ask price in {@code (0.0, 1.0)}
      */
-    public synchronized void applyBestBidAsk(String assetId, double bestBid, double bestAsk) {
+    public void applyBestBidAsk(String assetId, double bestBid, double bestAsk) {
         int bidMc = toPriceMc(bestBid);
         int askMc = toPriceMc(bestAsk);
         if (isNoAsset(assetId)) {
@@ -140,7 +140,7 @@ public class PolymarketLocalBook {
      * @param timestampMs local receipt timestamp in epoch milliseconds
      * @return current {@link PolymarketBboQuote} if available
      */
-    public synchronized Optional<PolymarketBboQuote> snapshotQuote(long timestampMs) {
+    public Optional<PolymarketBboQuote> snapshotQuote(long timestampMs) {
         boolean hasYes = bestYesBidMc > 0 && bestYesAskMc < BOOK_LEVELS;
         boolean hasNo = bestNoBidMc > 0 && bestNoAskMc < BOOK_LEVELS;
         if (!hasYes && !hasNo) {

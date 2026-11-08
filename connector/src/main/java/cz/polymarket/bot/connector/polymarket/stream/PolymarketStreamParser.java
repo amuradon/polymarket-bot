@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -224,36 +225,96 @@ public class PolymarketStreamParser {
         return items;
     }
 
-    /**
-     * Applies a raw Polymarket CLOB Market WebSocket frame ({@code book}, {@code price_change}, or {@code best_bid_ask})
-     * to {@code localBook} and returns the updated {@link PolymarketBboQuote} if a valid BBO is present.
-     *
-     * @param rawJson         raw CLOB WebSocket frame (JSON object or JSON array of objects)
-     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
-     * @param localBook       stateful local orderbook for the active market
-     * @return updated {@link PolymarketBboQuote} if available
-     */
     public Optional<PolymarketBboQuote> applyClobFrame(
             String rawJson,
             long recvTimestampMs,
             PolymarketLocalBook localBook) {
-        if (rawJson == null || rawJson.isBlank() || localBook == null) {
+        if (!applyClobFrameToBookOnly(rawJson, localBook)) {
             return Optional.empty();
+        }
+        return localBook.snapshotQuote(recvTimestampMs);
+    }
+
+    /**
+     * Result of applying a batch of CLOB WebSocket frames to a {@link PolymarketLocalBook}.
+     *
+     * @param quote                    final {@link PolymarketBboQuote} snapshot at the end of the batch, if valid
+     * @param appliedFramesCount       number of frames in the batch that updated the orderbook
+     * @param fastForwardedFramesCount number of older frames skipped without JSON parsing due to a newer full book snapshot
+     */
+    public record ClobBatchResult(
+            Optional<PolymarketBboQuote> quote,
+            int appliedFramesCount,
+            int fastForwardedFramesCount
+    ) {
+    }
+
+    /**
+     * Applies a chronological batch of raw Polymarket CLOB WebSocket frames to {@code localBook} in a single pass.
+     * <p>
+     * If a newer frame in the batch is a full dual-asset {@code book} snapshot, all earlier frames in the batch
+     * are fast-forwarded (skipped without JSON parsing). Intermediate frames mutate {@code localBook} in place,
+     * and {@link PolymarketLocalBook#snapshotQuote(long)} is invoked only once at the end of the batch.
+     *
+     * @param frames    chronological batch of raw CLOB frames
+     * @param localBook stateful local orderbook owned by the CLOB book worker thread
+     * @return {@link ClobBatchResult} containing the final BBO quote and batch statistics
+     */
+    public ClobBatchResult applyClobFrameBatch(
+            List<TimestampedFrame> frames,
+            PolymarketLocalBook localBook) {
+        if (frames == null || frames.isEmpty() || localBook == null) {
+            return new ClobBatchResult(Optional.empty(), 0, 0);
+        }
+        int size = frames.size();
+        int startIndex = 0;
+        String yesToken = localBook.getYesTokenId();
+        String noToken = localBook.getNoTokenId();
+        if (size > 1 && !yesToken.isEmpty() && !noToken.isEmpty()) {
+            for (int i = size - 1; i > 0; i--) {
+                String raw = frames.get(i).rawText();
+                if (isFullDualBookSnapshot(raw, yesToken, noToken)) {
+                    startIndex = i;
+                    break;
+                }
+            }
+        }
+
+        int fastForwarded = startIndex;
+        int appliedCount = 0;
+        long lastUpdatedRecvTs = 0L;
+        for (int i = startIndex; i < size; i++) {
+            TimestampedFrame frame = frames.get(i);
+            if (applyClobFrameToBookOnly(frame.rawText(), localBook)) {
+                appliedCount++;
+                lastUpdatedRecvTs = frame.recvTs();
+            }
+        }
+
+        if (appliedCount == 0) {
+            return new ClobBatchResult(Optional.empty(), 0, fastForwarded);
+        }
+        return new ClobBatchResult(localBook.snapshotQuote(lastUpdatedRecvTs), appliedCount, fastForwarded);
+    }
+
+    private boolean applyClobFrameToBookOnly(String rawJson, PolymarketLocalBook localBook) {
+        if (rawJson == null || rawJson.isBlank() || localBook == null) {
+            return false;
         }
         if (rawJson.length() <= 16) {
             String trimmed = rawJson.trim();
             if ("PING".equalsIgnoreCase(trimmed) || "PONG".equalsIgnoreCase(trimmed)) {
-                return Optional.empty();
+                return false;
             }
         }
         if (!containsRelevantClobEvent(rawJson)) {
-            return Optional.empty();
+            return false;
         }
 
         try (JsonParser parser = objectMapper.createParser(rawJson)) {
             JsonToken firstToken = parser.nextToken();
             if (firstToken == null) {
-                return Optional.empty();
+                return false;
             }
             boolean updated = false;
             if (firstToken == JsonToken.START_ARRAY) {
@@ -267,11 +328,21 @@ public class PolymarketStreamParser {
             } else if (firstToken == JsonToken.START_OBJECT) {
                 updated = streamSingleClobEvent(parser, localBook);
             }
-            return updated ? localBook.snapshotQuote(recvTimestampMs) : Optional.empty();
+            return updated;
         } catch (Exception e) {
             Log.warnf("Failed to parse CLOB WS frame: %s", e.getMessage());
-            return Optional.empty();
+            return false;
         }
+    }
+
+    private static boolean isFullDualBookSnapshot(String rawJson, String yesTokenId, String noTokenId) {
+        if (rawJson == null || rawJson.length() < 64) {
+            return false;
+        }
+        return rawJson.contains("\"bids\"")
+                && rawJson.contains("\"asks\"")
+                && rawJson.contains(yesTokenId)
+                && rawJson.contains(noTokenId);
     }
 
     private static boolean containsRelevantClobEvent(String rawJson) {

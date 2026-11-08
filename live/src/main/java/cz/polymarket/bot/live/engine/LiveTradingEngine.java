@@ -17,12 +17,16 @@ import cz.polymarket.bot.connector.polymarket.stream.PolymarketBboQuote;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketLocalBook;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketUserTradeEvent;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.domain.TwapUpdate;
-import cz.polymarket.bot.live.storage.LiveTradeRepository;
+import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor;
+import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
+import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.SystemTelemetrySnapshot;
+import cz.polymarket.bot.live.web.LiveTelemetryDto;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
 import cz.polymarket.bot.strategy.OrderCommand;
@@ -48,16 +52,22 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 
 /**
- * Core Live Trading Engine orchestrating real-money execution on Polymarket CLOB.
- * <p>
- * Implements {@link StrategyContext} and {@link ExecutionRouter} from {@code common} so that
- * {@link cz.polymarket.bot.strategy.UtterParameciumStrategy} (and any registered {@link TradingStrategy})
- * executes with 100% zero-discrepancy parity across backtest, paper, and live environments.
+ * Core Live Trading Engine orchestrating real-money execution on Polymarket CLOB across a
+ * 4-core dedicated lock-free pipeline designed for {@code c8gn.xlarge} (4 vCPU Graviton4):
+ * <ul>
+ *   <li><b>vCPU #1 ({@code ws-io-reader})</b>: Single Netty I/O event-loop thread reading raw WebSocket frames into lock-free queues.</li>
+ *   <li><b>vCPU #2 ({@code clob-book-worker})</b>: Dedicated platform thread batch-draining CLOB orderbook frames, fast-forwarding superseded snapshots, and updating {@link PolymarketLocalBook} lock-free.</li>
+ *   <li><b>vCPU #3 ({@code strategy-calculator-worker})</b>: Dedicated platform thread draining PolyBolt ticks and the latest conflated {@link OrderBookQuote} to evaluate {@link TradingStrategy} lock-free.</li>
+ *   <li><b>vCPU #4 ({@code order-execution-io-worker})</b>: Dedicated platform thread executing EIP-712 signing, blocking HTTP {@code POST /order} calls, in-memory User WS balance updates, and 1s OS/thread telemetry sampling.</li>
+ * </ul>
  */
 @ApplicationScoped
 public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
@@ -65,22 +75,27 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private static final double TAKER_FEE_RATE = 0.07;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 100L;
     private static final int MAX_TRACKED_USER_TRADES = 1024;
+    private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
+    private static final long REALTIME_CLOCK_WINDOW_MS = 3_600_000L;
+    private static final long STALE_QUOTE_WARN_INTERVAL_MS = 1_000L;
 
     private final HourlyPriceCache priceCache;
-    private final LiveTradeRepository repository;
     private final PolymarketSecretsResolver secretsResolver;
     private final PolymarketClobRestClient clobRestClient;
     private final PolymarketGammaClient gammaClient;
     private final PolymarketClobClient clobWsClient;
     private final PolymarketPolyBoltClient polyBoltClient;
     private final PolymarketStreamParser streamParser;
+    private final SystemNetworkTelemetryMonitor telemetryMonitor;
     private final TradingStrategy activeStrategy;
     private final String symbol;
     private final String timeframe;
     private final long durationSeconds;
     private final boolean streamsEnabled;
     private final String orderType;
+    private final long maxQuoteAgeMs;
 
+    private final Object strategyLock = new Object();
     private final AtomicReference<LivePosition> activePosition = new AtomicReference<>();
     private final List<LivePosition> openPositions = new CopyOnWriteArrayList<>();
     private final AtomicLong activeCandleStart = new AtomicLong(0L);
@@ -92,8 +107,35 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicLong lastEvaluatedMarketCycleStart = new AtomicLong(0L);
     private final AtomicLong debugPolyBoltBatchCounter = new AtomicLong(0L);
     private final AtomicLong debugClobBatchCounter = new AtomicLong(0L);
-    private final java.util.concurrent.atomic.AtomicBoolean balanceSyncInFlight =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final AtomicBoolean balanceSyncRequested = new AtomicBoolean(false);
+    private final AtomicBoolean balanceSyncInFlight = new AtomicBoolean(false);
+
+    // 4-Core Pipeline Coordination Queues & Slots
+    private final AtomicBoolean workersRunning = new AtomicBoolean(false);
+    private final AtomicReference<OrderBookQuote> latestQuoteSlot = new AtomicReference<>();
+    private final ConcurrentLinkedQueue<OrderCommand> orderExecutionQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<ExecutionReport> executionReportQueue = new ConcurrentLinkedQueue<>();
+
+    // Dedicated Worker Threads (vCPU #2, #3, #4) & Busy Time Accumulators
+    private volatile Thread clobBookWorkerThread;
+    private volatile Thread strategyCalculatorThread;
+    private volatile Thread orderExecutionWorkerThread;
+    private final AtomicLong clobBookWorkerBusyNs = new AtomicLong(0L);
+    private final AtomicLong strategyWorkerBusyNs = new AtomicLong(0L);
+    private final AtomicLong orderExecutionWorkerBusyNs = new AtomicLong(0L);
+
+    // Real-time Execution & Freshness Telemetry Counters
+    private final AtomicLong ordersSubmitted = new AtomicLong(0L);
+    private final AtomicLong ordersFilled = new AtomicLong(0L);
+    private final AtomicLong ordersRejected = new AtomicLong(0L);
+    private final AtomicLong staleQuotesSkipped = new AtomicLong(0L);
+    private final AtomicLong conflatedQuotesCount = new AtomicLong(0L);
+    private final AtomicLong lastQuoteAgeMs = new AtomicLong(0L);
+    private final AtomicLong maxQuoteAgeMsObserved = new AtomicLong(0L);
+    private final AtomicLong lastOrderRttMs = new AtomicLong(0L);
+    private final AtomicLong maxOrderRttMs = new AtomicLong(0L);
+    private final AtomicLong lastStaleWarnLogMs = new AtomicLong(0L);
+
     private final Map<String, Double> appliedUserTradeDeltas = new LinkedHashMap<>(128, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Double> eldest) {
@@ -101,6 +143,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         }
     };
 
+    private volatile double initialCapital = 0.0;
+    private volatile double currentBalance = 0.0;
     private volatile PolymarketCredentials credentials;
     private volatile PolymarketEip712Signer eip712Signer;
     private volatile double twapOpenPrice = 0.0;
@@ -108,6 +152,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private volatile double candleHigh = 0.0;
     private volatile double candleLow = 0.0;
     private volatile long currentTimestampSec = 0L;
+    private volatile long latestOracleRecvTimestampMs = 0L;
     private volatile OrderBookQuote latestQuote;
 
     /**
@@ -115,30 +160,31 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      *
      * @param strategyRegistry  registry of available trading strategies
      * @param priceCache        sliding window price cache
-     * @param repository        persistent live trade repository
      * @param secretsResolver   AWS Secrets Manager / environment credentials resolver
      * @param clobRestClient    Polymarket CLOB REST client (L2 HMAC + EIP-712 order gateway)
      * @param gammaClient       Polymarket Gamma REST client ({@code GET /markets/slug/{slug}})
      * @param clobWsClient      Polymarket CLOB Market WebSocket client
      * @param polyBoltClient    Polymarket PolyBolt v2 authenticated WebSocket client
      * @param streamParser      JSON frame parser for PolyBolt and CLOB streams
+     * @param telemetryMonitor  OS kernel TCP buffer, JVM ZGC, and per-thread CPU utilization monitor
      * @param strategyName      configured strategy name (defaults to {@code UtterParameciumStrategy})
      * @param symbol            trading asset symbol (defaults to {@code BTCUSDT})
      * @param timeframe         market timeframe (defaults to {@code 15m})
      * @param streamsEnabled    whether to auto-connect live WebSocket streams on startup
      * @param orderType         CLOB order time-in-force (defaults to {@code FAK})
+     * @param maxQuoteAgeMs     maximum allowed orderbook quote age in milliseconds before skipping signal evaluation
      */
     @Inject
     public LiveTradingEngine(
             StrategyRegistry strategyRegistry,
             HourlyPriceCache priceCache,
-            LiveTradeRepository repository,
             PolymarketSecretsResolver secretsResolver,
             PolymarketClobRestClient clobRestClient,
             PolymarketGammaClient gammaClient,
             PolymarketClobClient clobWsClient,
             PolymarketPolyBoltClient polyBoltClient,
             PolymarketStreamParser streamParser,
+            SystemNetworkTelemetryMonitor telemetryMonitor,
             @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "UtterParameciumStrategy")
             String strategyName,
             @ConfigProperty(name = "polymarket.live.symbol", defaultValue = "BTCUSDT")
@@ -148,15 +194,14 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             @ConfigProperty(name = "polymarket.live.streams-enabled", defaultValue = "true")
             boolean streamsEnabled,
             @ConfigProperty(name = "polymarket.live.order-type", defaultValue = "FAK")
-            String orderType) {
+            String orderType,
+            @ConfigProperty(name = "polymarket.live.max-quote-age-ms", defaultValue = "250")
+            long maxQuoteAgeMs) {
         if (strategyRegistry == null) {
             throw new IllegalArgumentException("strategyRegistry cannot be null");
         }
         if (priceCache == null) {
             throw new IllegalArgumentException("priceCache cannot be null");
-        }
-        if (repository == null) {
-            throw new IllegalArgumentException("repository cannot be null");
         }
         if (secretsResolver == null) {
             throw new IllegalArgumentException("secretsResolver cannot be null");
@@ -176,20 +221,24 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (streamParser == null) {
             throw new IllegalArgumentException("streamParser cannot be null");
         }
+        if (telemetryMonitor == null) {
+            throw new IllegalArgumentException("telemetryMonitor cannot be null");
+        }
 
         this.priceCache = priceCache;
-        this.repository = repository;
         this.secretsResolver = secretsResolver;
         this.clobRestClient = clobRestClient;
         this.gammaClient = gammaClient;
         this.clobWsClient = clobWsClient;
         this.polyBoltClient = polyBoltClient;
         this.streamParser = streamParser;
+        this.telemetryMonitor = telemetryMonitor;
         this.symbol = symbol != null && !symbol.isBlank() ? symbol.trim() : "BTCUSDT";
         this.timeframe = timeframe != null && !timeframe.isBlank() ? timeframe.trim() : "15m";
         this.durationSeconds = PolymarketMarketInfo.parseTimeframeSeconds(this.timeframe);
         this.streamsEnabled = streamsEnabled;
         this.orderType = orderType != null && !orderType.isBlank() ? orderType.trim().toUpperCase(Locale.ROOT) : "FAK";
+        this.maxQuoteAgeMs = Math.max(10L, maxQuoteAgeMs);
 
         String resolvedName = (strategyName == null || strategyName.isBlank())
                 ? "UtterParameciumStrategy"
@@ -210,9 +259,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             syncAccountBalanceFromClob();
         }
 
-        Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, durationSec=%d, orderType=%s, initialCapital=$%.2f, currentBalance=$%.2f)",
-                activeStrategy.getName(), symbol, timeframe, durationSeconds, orderType,
-                repository.getInitialCapital(), repository.getCurrentBalance());
+        Log.infof("Initializing LiveTradingEngine with strategy: %s (symbol=%s, timeframe=%s, durationSec=%d, orderType=%s, maxQuoteAgeMs=%d, initialCapital=$%.2f, currentBalance=$%.2f)",
+                activeStrategy.getName(), symbol, timeframe, durationSeconds, orderType, maxQuoteAgeMs,
+                initialCapital, currentBalance);
 
         if (streamsEnabled) {
             startLiveStreams(Instant.now().getEpochSecond());
@@ -220,9 +269,14 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     void onStop(@Observes ShutdownEvent event) {
-        Log.info("Stopping LiveTradingEngine streams...");
+        Log.info("Stopping LiveTradingEngine 4-core pipeline and WebSocket streams...");
+        workersRunning.set(false);
         clobWsClient.stopAll();
         polyBoltClient.stop();
+        unparkAllWorkers();
+        clobBookWorkerThread = null;
+        strategyCalculatorThread = null;
+        orderExecutionWorkerThread = null;
     }
 
     /**
@@ -243,24 +297,175 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Starts the authenticated PolyBolt v2 streams ({@code price.crypto.twap} and {@code price.crypto})
-     * and discovers/subscribes the current Polymarket 15m market via Gamma and CLOB WebSocket.
+     * Starts the 3 dedicated application worker threads ({@code clob-book-worker}, {@code strategy-calculator-worker},
+     * {@code order-execution-io-worker}), binds the authenticated PolyBolt v2 and CLOB User streams to their respective
+     * dedicated threads, and discovers/subscribes the current Polymarket 15m market.
      *
      * @param nowEpochSec current epoch timestamp in seconds
      */
     public synchronized void startLiveStreams(long nowEpochSec) {
-        Log.infof("Starting live WebSocket streams for symbol=%s, timeframe=%s...", symbol, timeframe);
-        polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame);
-        polyBoltClient.startCryptoPriceStream(symbol, this::onRawPolyBoltFrame);
+        Log.infof("Starting 4-core live pipeline and WebSocket streams for symbol=%s, timeframe=%s...", symbol, timeframe);
+        if (workersRunning.compareAndSet(false, true)) {
+            this.clobBookWorkerThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .priority(Thread.MAX_PRIORITY)
+                    .name("clob-book-worker")
+                    .start(this::clobBookWorkerLoop);
+            this.strategyCalculatorThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .priority(Thread.MAX_PRIORITY)
+                    .name("strategy-calculator-worker")
+                    .start(this::strategyCalculatorLoop);
+            this.orderExecutionWorkerThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .name("order-execution-io-worker")
+                    .start(this::orderExecutionWorkerLoop);
+        }
+
+        polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
+        polyBoltClient.startCryptoPriceStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
         if (credentials != null && credentials.hasL2Credentials()) {
-            clobWsClient.openUserStream(credentials, this::onRawUserFrame);
+            clobWsClient.openUserStream(credentials, this::onRawUserFrame, this.orderExecutionWorkerThread);
         }
         discoverAndRotateMarket(nowEpochSec);
     }
 
     /**
+     * Dedicated loop for vCPU #2 ({@code clob-book-worker}): drains CLOB market frames in batches
+     * and updates {@link PolymarketLocalBook} without lock contention.
+     */
+    private void clobBookWorkerLoop() {
+        List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
+        while (workersRunning.get()) {
+            int drained = clobWsClient.drainMarketStreams(scratchBatch);
+            if (drained > 0) {
+                continue;
+            }
+            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get() && !clobWsClient.hasQueuedMarketFrames(); spin++) {
+                Thread.onSpinWait();
+            }
+            if (!workersRunning.get() || clobWsClient.hasQueuedMarketFrames()) {
+                continue;
+            }
+            LockSupport.parkNanos(this, 50_000_000L);
+        }
+    }
+
+    /**
+     * Dedicated loop for vCPU #3 ({@code strategy-calculator-worker}): processes execution reports,
+     * PolyBolt oracle ticks, and the latest conflated {@link OrderBookQuote} from {@code latestQuoteSlot}.
+     */
+    private void strategyCalculatorLoop() {
+        List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
+        while (workersRunning.get()) {
+            boolean didWork = false;
+            long startNs = System.nanoTime();
+
+            ExecutionReport report;
+            while ((report = executionReportQueue.poll()) != null) {
+                didWork = true;
+                synchronized (strategyLock) {
+                    activeStrategy.onExecutionReport(report);
+                }
+            }
+
+            int polyDrained = polyBoltClient.drainStreams(scratchBatch);
+            if (polyDrained > 0) {
+                didWork = true;
+            }
+
+            OrderBookQuote quote = latestQuoteSlot.getAndSet(null);
+            if (quote != null) {
+                didWork = true;
+                evaluateQuoteWithFreshnessGuard(quote, true);
+            }
+
+            if (didWork) {
+                strategyWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+                continue;
+            }
+
+            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get()
+                    && executionReportQueue.isEmpty()
+                    && !polyBoltClient.hasQueuedFrames()
+                    && latestQuoteSlot.get() == null; spin++) {
+                Thread.onSpinWait();
+            }
+            if (!workersRunning.get()
+                    || !executionReportQueue.isEmpty()
+                    || polyBoltClient.hasQueuedFrames()
+                    || latestQuoteSlot.get() != null) {
+                continue;
+            }
+            LockSupport.parkNanos(this, 50_000_000L);
+        }
+    }
+
+    /**
+     * Dedicated loop for vCPU #4 ({@code order-execution-io-worker}): executes EIP-712 signing,
+     * HTTP {@code POST /order} calls, CLOB User channel balance updates, and 1s OS/thread telemetry sampling.
+     */
+    private void orderExecutionWorkerLoop() {
+        List<TimestampedFrame> scratchBatch = new ArrayList<>(32);
+        long lastTelemetrySampleNs = 0L;
+        while (workersRunning.get()) {
+            boolean didWork = false;
+            long startNs = System.nanoTime();
+
+            OrderCommand cmd;
+            while ((cmd = orderExecutionQueue.poll()) != null) {
+                didWork = true;
+                executeOrderCommandInternal(cmd, true);
+            }
+
+            int userDrained = clobWsClient.drainUserStream(scratchBatch);
+            if (userDrained > 0) {
+                didWork = true;
+            }
+
+            if (balanceSyncRequested.compareAndSet(true, false)) {
+                didWork = true;
+                try {
+                    syncAccountBalanceFromClob();
+                } finally {
+                    balanceSyncInFlight.set(false);
+                }
+            }
+
+            long nowNs = System.nanoTime();
+            if (nowNs - lastTelemetrySampleNs >= 1_000_000_000L) {
+                didWork = true;
+                lastTelemetrySampleNs = nowNs;
+                telemetryMonitor.sample(buildMonitoredThreadSpecs());
+            }
+
+            if (didWork) {
+                orderExecutionWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+                continue;
+            }
+
+            LockSupport.parkNanos(this, 100_000_000L);
+        }
+    }
+
+    private void unparkAllWorkers() {
+        Thread t2 = this.clobBookWorkerThread;
+        if (t2 != null) {
+            LockSupport.unpark(t2);
+        }
+        Thread t3 = this.strategyCalculatorThread;
+        if (t3 != null) {
+            LockSupport.unpark(t3);
+        }
+        Thread t4 = this.orderExecutionWorkerThread;
+        if (t4 != null) {
+            LockSupport.unpark(t4);
+        }
+    }
+
+    /**
      * Processes a raw JSON frame from the authenticated Polymarket CLOB User WebSocket channel ({@code /ws/user})
-     * and updates the internally maintained account balance upon each incoming {@code BUY} or {@code SELL} trade event.
+     * and updates the in-memory account balance upon each incoming {@code BUY} or {@code SELL} trade event.
      *
      * @param rawJson         raw User channel JSON frame
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
@@ -286,9 +491,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             if (!tradeId.isEmpty()) {
                 Double previousDelta = removeAppliedTradeDelta(tradeId);
                 if (previousDelta != null && previousDelta != 0.0) {
-                    repository.applyAccountBalanceDelta(-previousDelta);
+                    applyAccountBalanceDelta(-previousDelta);
                     Log.warnf("Reverted live balance delta $%.2f for FAILED WS user trade %s: balance=$%.2f",
-                            previousDelta, tradeId, repository.getCurrentBalance());
+                            previousDelta, tradeId, currentBalance);
                 }
             }
             return;
@@ -317,9 +522,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             return;
         }
 
-        repository.applyAccountBalanceDelta(signedDeltaUsd);
+        applyAccountBalanceDelta(signedDeltaUsd);
         Log.infof("Updated live balance from WS user trade %s (%s %.2f shares @ %.4f, fee=$%.4f, delta=$%.2f): balance=$%.2f",
-                tradeId, side.toUpperCase(Locale.ROOT), size, price, feeUsd, signedDeltaUsd, repository.getCurrentBalance());
+                tradeId, side.toUpperCase(Locale.ROOT), size, price, feeUsd, signedDeltaUsd, currentBalance);
     }
 
     private synchronized boolean recordAppliedTradeDeltaIfAbsent(String tradeId, double signedDeltaUsd) {
@@ -335,14 +540,40 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Synchronizes the repository balance with the authoritative Polymarket CLOB collateral USDC balance.
+     * Synchronizes the in-memory balance with the authoritative Polymarket CLOB collateral USDC balance.
+     *
+     * @param accountBalanceUsd available Polymarket account USDC collateral balance in USD
+     */
+    public synchronized void syncAccountBalance(double accountBalanceUsd) {
+        if (!Double.isFinite(accountBalanceUsd) || accountBalanceUsd < 0.0) {
+            throw new IllegalArgumentException("accountBalanceUsd must be finite and non-negative");
+        }
+        this.currentBalance = accountBalanceUsd;
+        if (this.initialCapital <= 0.0) {
+            this.initialCapital = accountBalanceUsd;
+        }
+    }
+
+    /**
+     * Applies a signed balance delta to the in-memory account balance.
+     *
+     * @param deltaUsd signed USD balance change
+     */
+    public synchronized void applyAccountBalanceDelta(double deltaUsd) {
+        if (Double.isFinite(deltaUsd) && deltaUsd != 0.0) {
+            this.currentBalance = Math.max(0.0, this.currentBalance + deltaUsd);
+        }
+    }
+
+    /**
+     * Fetches the authoritative Polymarket CLOB collateral USDC balance via REST and updates in-memory state.
      */
     public void syncAccountBalanceFromClob() {
         try {
             double collateralUsd = clobRestClient.getCollateralBalanceUsd();
-            repository.syncAccountBalance(collateralUsd);
+            syncAccountBalance(collateralUsd);
             Log.infof("Synchronized Polymarket live account collateral balance: $%.2f (initialCapital=$%.2f)",
-                    repository.getCurrentBalance(), repository.getInitialCapital());
+                    currentBalance, initialCapital);
         } catch (Exception e) {
             Log.warnf("Failed to synchronize Polymarket collateral balance from CLOB REST API: %s", e.getMessage());
         }
@@ -350,22 +581,25 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
     @Override
     public void refreshAccountBalance() {
-        triggerAsyncBalanceSync();
-    }
-
-    private void triggerAsyncBalanceSync() {
         if (!balanceSyncInFlight.compareAndSet(false, true)) {
             return;
         }
-        Thread.ofVirtual()
-                .name("polymarket-balance-sync")
-                .start(() -> {
-                    try {
-                        syncAccountBalanceFromClob();
-                    } finally {
-                        balanceSyncInFlight.set(false);
-                    }
-                });
+        Thread ioWorker = this.orderExecutionWorkerThread;
+        if (workersRunning.get() && ioWorker != null) {
+            balanceSyncRequested.set(true);
+            LockSupport.unpark(ioWorker);
+        } else {
+            Thread.ofPlatform()
+                    .daemon(true)
+                    .name("polymarket-balance-sync")
+                    .start(() -> {
+                        try {
+                            syncAccountBalanceFromClob();
+                        } finally {
+                            balanceSyncInFlight.set(false);
+                        }
+                    });
+        }
     }
 
     /**
@@ -429,11 +663,21 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             activeMarketInfo.set(nextMarket);
             activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
             this.latestQuote = null;
+            this.latestQuoteSlot.set(null);
         }
         if (previousSlugToClose != null) {
             clobWsClient.closeMarketStream(previousSlugToClose);
         }
-        clobWsClient.openMarketStream(nextMarket.slug(), nextMarket.clobTokenIds(), this::onRawClobFrame);
+        clobWsClient.openMarketStreamBatch(
+                nextMarket.slug(),
+                nextMarket.clobTokenIds(),
+                this::onRawClobFrameBatch,
+                this.clobBookWorkerThread
+        );
+        Thread bookWorker = this.clobBookWorkerThread;
+        if (bookWorker != null) {
+            LockSupport.unpark(bookWorker);
+        }
 
         Log.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
                 nextMarket.slug(), nextMarket.conditionId(), nextMarket.yesTokenId(), nextMarket.noTokenId());
@@ -452,7 +696,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     marketLabel, polyBoltCount, clobCount);
         }
         Log.infof("Market %s summary statistics: polyBoltMessages=%d, clobWsMessages=%d, twapOpen=%.2f, lastSpot=%.2f, high=%.2f, low=%.2f, balance=$%.2f",
-                marketLabel, polyBoltCount, clobCount, twapOpenPrice, currentSpotPrice, candleHigh, candleLow, repository.getCurrentBalance());
+                marketLabel, polyBoltCount, clobCount, twapOpenPrice, currentSpotPrice, candleHigh, candleLow, currentBalance);
     }
 
     /**
@@ -500,7 +744,51 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Processes a raw JSON frame from the Polymarket CLOB Market WebSocket stream.
+     * Processes a batch of raw CLOB JSON frames on the dedicated {@code clob-book-worker} thread (vCPU #2),
+     * fast-forwarding past superseded snapshots, mutating {@link PolymarketLocalBook} lock-free, and publishing
+     * only the single final {@link OrderBookQuote} to {@code latestQuoteSlot} for {@code strategy-calculator-worker} (vCPU #3).
+     *
+     * @param batch chronological batch of CLOB frames drained from the inbound queue
+     */
+    public void onRawClobFrameBatch(List<TimestampedFrame> batch) {
+        if (batch == null || batch.isEmpty()) {
+            return;
+        }
+        long startNs = System.nanoTime();
+        try {
+            PolymarketLocalBook localBook = activeLocalBook.get();
+            if (localBook == null) {
+                localBook = new PolymarketLocalBook("", "");
+                activeLocalBook.compareAndSet(null, localBook);
+            }
+            PolymarketStreamParser.ClobBatchResult result = streamParser.applyClobFrameBatch(batch, localBook);
+            if (result.fastForwardedFramesCount() > 0) {
+                PolymarketMarketInfo info = activeMarketInfo.get();
+                if (info != null) {
+                    clobWsClient.addMarketCoalescedFrames(info.slug(), result.fastForwardedFramesCount());
+                }
+            }
+            if (result.appliedFramesCount() > 0) {
+                long marketTotal = clobMarketMsgCount.addAndGet(result.appliedFramesCount());
+                if (result.quote().isPresent()) {
+                    PolymarketBboQuote bbo = result.quote().get();
+                    if (Log.isDebugEnabled()) {
+                        long debugCount = debugClobBatchCounter.incrementAndGet();
+                        if (debugCount % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
+                            Log.debugf("Processed %d CLOB WS batches (marketMessages=%d, bestBidUp=%.3f, bestAskUp=%.3f, bestBidDown=%.3f, bestAskDown=%.3f)",
+                                    debugCount, marketTotal, bbo.bestBidUp(), bbo.bestAskUp(), bbo.bestBidDown(), bbo.bestAskDown());
+                        }
+                    }
+                    publishUpdatedBboIfChanged(bbo);
+                }
+            }
+        } finally {
+            clobBookWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+        }
+    }
+
+    /**
+     * Processes a single raw JSON frame from the Polymarket CLOB Market WebSocket stream.
      *
      * @param rawJson         raw CLOB JSON text frame
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
@@ -516,29 +804,48 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         }
         Optional<PolymarketBboQuote> bboOpt = streamParser.applyClobFrame(rawJson, recvTimestampMs, localBook);
         if (bboOpt.isPresent()) {
-            long marketTotal = clobMarketMsgCount.incrementAndGet();
-            PolymarketBboQuote bbo = bboOpt.get();
-            if (Log.isDebugEnabled()) {
-                long debugCount = debugClobBatchCounter.incrementAndGet();
-                if (debugCount % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
-                    Log.debugf("Processed %d CLOB WS messages (marketMessages=%d, bestBidUp=%.3f, bestAskUp=%.3f, bestBidDown=%.3f, bestAskDown=%.3f)",
-                            debugCount, marketTotal, bbo.bestBidUp(), bbo.bestAskUp(), bbo.bestBidDown(), bbo.bestAskDown());
-                }
+            clobMarketMsgCount.incrementAndGet();
+            publishUpdatedBboIfChanged(bboOpt.get());
+        }
+    }
+
+    private void publishUpdatedBboIfChanged(PolymarketBboQuote bbo) {
+        OrderBookQuote prevQuote = this.latestQuote;
+        if (prevQuote != null && isSameBbo(prevQuote, bbo)) {
+            return;
+        }
+        OrderBookQuote nextQuote = new OrderBookQuote(
+                bbo.bestAskUp(),
+                bbo.bestBidUp(),
+                bbo.bestAskDown(),
+                bbo.bestBidDown(),
+                bbo.askSizeUp(),
+                bbo.askSizeDown(),
+                bbo.midUp(),
+                bbo.midDown(),
+                bbo.timestampMs()
+        );
+        this.latestQuote = nextQuote;
+        updatePositionObservation(nextQuote);
+
+        Thread stratWorker = this.strategyCalculatorThread;
+        if (workersRunning.get() && stratWorker != null) {
+            OrderBookQuote overwritten = latestQuoteSlot.getAndSet(nextQuote);
+            if (overwritten != null) {
+                conflatedQuotesCount.incrementAndGet();
             }
-            OrderBookQuote prevQuote = this.latestQuote;
-            if (prevQuote == null || !isSameBbo(prevQuote, bbo)) {
-                onOrderBookQuote(new OrderBookQuote(
-                        bbo.bestAskUp(),
-                        bbo.bestBidUp(),
-                        bbo.bestAskDown(),
-                        bbo.bestBidDown(),
-                        bbo.askSizeUp(),
-                        bbo.askSizeDown(),
-                        bbo.midUp(),
-                        bbo.midDown(),
-                        bbo.timestampMs()
-                ));
-            }
+            LockSupport.unpark(stratWorker);
+        } else {
+            evaluateQuoteWithFreshnessGuard(nextQuote, false);
+        }
+    }
+
+    private void updatePositionObservation(OrderBookQuote quote) {
+        LivePosition pos = activePosition.get();
+        if (pos != null) {
+            double currentBid = (pos.side() == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
+            boolean armed = currentBid >= (pos.entryPrice() + 0.05);
+            activePosition.set(pos.withPriceObservation(currentBid, armed));
         }
     }
 
@@ -560,7 +867,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     @Override
-    public synchronized void submitOrder(OrderCommand command) {
+    public void submitOrder(OrderCommand command) {
         if (command == null) {
             return;
         }
@@ -568,15 +875,37 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             Log.tracef("Submitting order command: clientOrderId=%s, side=%s, token=%s, price=%s, size=%s",
                     command.clientOrderId(), command.side(), command.token(), command.price(), command.size());
         }
+        Thread ioWorker = this.orderExecutionWorkerThread;
+        if (workersRunning.get() && ioWorker != null && Thread.currentThread() == this.strategyCalculatorThread) {
+            orderExecutionQueue.offer(command);
+            LockSupport.unpark(ioWorker);
+        } else {
+            executeOrderCommandInternal(command, false);
+        }
+    }
+
+    private void executeOrderCommandInternal(OrderCommand command, boolean asyncReportDelivery) {
         if ("BUY".equalsIgnoreCase(command.side())) {
-            executeBuyOrder(command);
+            executeBuyOrder(command, asyncReportDelivery);
         } else if ("SELL".equalsIgnoreCase(command.side())) {
-            executeSellOrder(command);
+            executeSellOrder(command, asyncReportDelivery);
+        }
+    }
+
+    private void deliverExecutionReport(ExecutionReport report, boolean asyncReportDelivery) {
+        Thread stratWorker = this.strategyCalculatorThread;
+        if (asyncReportDelivery && workersRunning.get() && stratWorker != null && Thread.currentThread() != stratWorker) {
+            executionReportQueue.offer(report);
+            LockSupport.unpark(stratWorker);
+        } else {
+            synchronized (strategyLock) {
+                activeStrategy.onExecutionReport(report);
+            }
         }
     }
 
     @Override
-    public synchronized void cancelOrder(String clientOrderId) {
+    public void cancelOrder(String clientOrderId) {
         if (clientOrderId == null || clientOrderId.isBlank()) {
             return;
         }
@@ -609,10 +938,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 System.currentTimeMillis(),
                 "Order cancelled"
         );
-        activeStrategy.onExecutionReport(report);
+        deliverExecutionReport(report, false);
     }
 
-    private void executeBuyOrder(OrderCommand command) {
+    private void executeBuyOrder(OrderCommand command, boolean asyncReportDelivery) {
         double requestedPrice = command.price().doubleValue();
         double requestedShares = command.size().doubleValue();
         boolean isDown = command.token() != null && command.token().toLowerCase(Locale.ROOT).contains("down");
@@ -620,10 +949,11 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         String clobTokenId = resolveClobTokenId(command.token(), isDown);
 
         double estimatedCostUsd = requestedPrice * requestedShares;
-        if (repository.getCurrentBalance() < estimatedCostUsd) {
+        if (currentBalance < estimatedCostUsd) {
             Log.warnf("Insufficient live balance ($%.2f) for order notional $%.2f",
-                    repository.getCurrentBalance(), estimatedCostUsd);
-            activeStrategy.onExecutionReport(new ExecutionReport(
+                    currentBalance, estimatedCostUsd);
+            ordersRejected.incrementAndGet();
+            deliverExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
                     "live-reject-" + UUID.randomUUID(),
                     "REJECTED",
@@ -631,13 +961,14 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     BigDecimal.ZERO,
                     System.currentTimeMillis(),
                     "Insufficient balance"
-            ));
+            ), asyncReportDelivery);
             return;
         }
 
         if (clobTokenId.isBlank()) {
             Log.warnf("Cannot submit live BUY order %s: active market token ID is not resolved", command.clientOrderId());
-            activeStrategy.onExecutionReport(new ExecutionReport(
+            ordersRejected.incrementAndGet();
+            deliverExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
                     "",
                     "REJECTED",
@@ -645,10 +976,12 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     BigDecimal.ZERO,
                     System.currentTimeMillis(),
                     "Active market token ID not resolved"
-            ));
+            ), asyncReportDelivery);
             return;
         }
 
+        ordersSubmitted.incrementAndGet();
+        long orderStartMs = System.currentTimeMillis();
         double fillPrice;
         double filledShares;
         String clobOrderId;
@@ -665,13 +998,18 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     orderType
             );
             ClobOrderResponse response = clobRestClient.submitOrder(envelope);
+            long rttMs = Math.max(0L, System.currentTimeMillis() - orderStartMs);
+            lastOrderRttMs.set(rttMs);
+            updateMaxLong(maxOrderRttMs, rttMs);
+
             double actualShares = response.filledShares("BUY");
             if (!response.success() || actualShares <= 0.0) {
+                ordersRejected.incrementAndGet();
                 String err = (response.errorMsg() != null && !response.errorMsg().isBlank())
                         ? response.errorMsg()
                         : ("Order status: " + response.status());
                 Log.warnf("Live CLOB BUY order %s rejected/unfilled: %s", command.clientOrderId(), err);
-                activeStrategy.onExecutionReport(new ExecutionReport(
+                deliverExecutionReport(new ExecutionReport(
                         command.clientOrderId(),
                         response.orderID() != null ? response.orderID() : "",
                         "REJECTED",
@@ -679,16 +1017,21 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                         BigDecimal.ZERO,
                         System.currentTimeMillis(),
                         err
-                ));
+                ), asyncReportDelivery);
                 return;
             }
+            ordersFilled.incrementAndGet();
             filledShares = actualShares;
             int avgMc = response.avgPriceMc("BUY");
             fillPrice = avgMc > 0 ? (avgMc / 1000.0) : requestedPrice;
             clobOrderId = response.orderID() != null ? response.orderID() : "";
         } catch (Exception e) {
+            long rttMs = Math.max(0L, System.currentTimeMillis() - orderStartMs);
+            lastOrderRttMs.set(rttMs);
+            updateMaxLong(maxOrderRttMs, rttMs);
+            ordersRejected.incrementAndGet();
             Log.errorf("Live CLOB BUY order %s failed: %s", command.clientOrderId(), e.getMessage());
-            activeStrategy.onExecutionReport(new ExecutionReport(
+            deliverExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
                     "",
                     "REJECTED",
@@ -696,7 +1039,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     BigDecimal.ZERO,
                     System.currentTimeMillis(),
                     e.getMessage()
-            ));
+            ), asyncReportDelivery);
             return;
         }
 
@@ -736,18 +1079,20 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 System.currentTimeMillis(),
                 "Matched on Polymarket CLOB"
         );
-        activeStrategy.onExecutionReport(report);
-        Log.infof("Opened live position: %s (clobOrderId=%s) %s %.2f shares @ %.4f ($%.2f, fee: $%.4f)",
-                command.clientOrderId(), clobOrderId, side, filledShares, fillPrice, sizeUsd, entryFee);
+        deliverExecutionReport(report, asyncReportDelivery);
+        Log.infof("Opened live position: %s (clobOrderId=%s) %s %.2f shares @ %.4f ($%.2f, fee: $%.4f, rtt=%d ms)",
+                command.clientOrderId(), clobOrderId, side, filledShares, fillPrice, sizeUsd, entryFee, lastOrderRttMs.get());
     }
 
-    private void executeSellOrder(OrderCommand command) {
+    private void executeSellOrder(OrderCommand command, boolean asyncReportDelivery) {
         LivePosition pos = activePosition.get();
         if (pos == null) {
             Log.warnf("Ignoring SELL order %s because no active position exists", command.clientOrderId());
             return;
         }
 
+        ordersSubmitted.incrementAndGet();
+        long orderStartMs = System.currentTimeMillis();
         double requestedPrice = command.price().doubleValue();
         double fillPrice;
         String clobOrderId;
@@ -769,12 +1114,17 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     System.currentTimeMillis()
             );
             ClobOrderResponse response = clobRestClient.submitOrder(envelope);
+            long rttMs = Math.max(0L, System.currentTimeMillis() - orderStartMs);
+            lastOrderRttMs.set(rttMs);
+            updateMaxLong(maxOrderRttMs, rttMs);
+
             if (!response.success() || response.filledShares("SELL") <= 0.0) {
+                ordersRejected.incrementAndGet();
                 String err = (response.errorMsg() != null && !response.errorMsg().isBlank())
                         ? response.errorMsg()
                         : ("Exit order status: " + response.status());
                 Log.warnf("Live CLOB SELL order %s rejected/unfilled: %s", command.clientOrderId(), err);
-                activeStrategy.onExecutionReport(new ExecutionReport(
+                deliverExecutionReport(new ExecutionReport(
                         command.clientOrderId(),
                         response.orderID() != null ? response.orderID() : "",
                         "REJECTED",
@@ -782,15 +1132,20 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                         BigDecimal.ZERO,
                         System.currentTimeMillis(),
                         err
-                ));
+                ), asyncReportDelivery);
                 return;
             }
+            ordersFilled.incrementAndGet();
             int avgMc = response.avgPriceMc("SELL");
             fillPrice = avgMc > 0 ? (avgMc / 1000.0) : requestedPrice;
             clobOrderId = response.orderID() != null ? response.orderID() : "";
         } catch (Exception e) {
+            long rttMs = Math.max(0L, System.currentTimeMillis() - orderStartMs);
+            lastOrderRttMs.set(rttMs);
+            updateMaxLong(maxOrderRttMs, rttMs);
+            ordersRejected.incrementAndGet();
             Log.errorf("Live CLOB SELL order %s failed: %s", command.clientOrderId(), e.getMessage());
-            activeStrategy.onExecutionReport(new ExecutionReport(
+            deliverExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
                     "",
                     "REJECTED",
@@ -798,7 +1153,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     BigDecimal.ZERO,
                     System.currentTimeMillis(),
                     e.getMessage()
-            ));
+            ), asyncReportDelivery);
             return;
         }
 
@@ -806,7 +1161,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 ? (pos.shares() * TAKER_FEE_RATE * fillPrice * (1.0 - fillPrice))
                 : 0.0;
         String exitReason = String.format(Locale.ROOT, "Early Exit (%.2f)", fillPrice);
-        completeTrade(pos, fillPrice, exitFee, exitReason);
+        closePositionInMemory(pos, fillPrice, exitFee, exitReason);
 
         ExecutionReport report = new ExecutionReport(
                 command.clientOrderId(),
@@ -817,7 +1172,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 System.currentTimeMillis(),
                 "Exit matched on Polymarket CLOB"
         );
-        activeStrategy.onExecutionReport(report);
+        deliverExecutionReport(report, asyncReportDelivery);
     }
 
     /**
@@ -826,94 +1181,74 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * @param actualOutcome resolved candle outcome ({@link TradeDirection#UP} or {@link TradeDirection#DOWN})
      * @param finalPrice    closing reference price
      */
-    public synchronized void resolveCandle(TradeDirection actualOutcome, double finalPrice) {
-        int settledPositions = openPositions.size();
-        if (!openPositions.isEmpty() || activePosition.get() != null) {
-            activeStrategy.onCandleResolution(actualOutcome);
+    public void resolveCandle(TradeDirection actualOutcome, double finalPrice) {
+        synchronized (strategyLock) {
+            int settledPositions = openPositions.size();
+            if (!openPositions.isEmpty() || activePosition.get() != null) {
+                activeStrategy.onCandleResolution(actualOutcome);
 
-            List<LivePosition> remaining = new ArrayList<>(openPositions);
-            if (remaining.isEmpty() && activePosition.get() != null) {
-                remaining.add(activePosition.get());
+                List<LivePosition> remaining = new ArrayList<>(openPositions);
+                if (remaining.isEmpty() && activePosition.get() != null) {
+                    remaining.add(activePosition.get());
+                }
+                settledPositions = remaining.size();
+                for (LivePosition pos : remaining) {
+                    double exitPrice = (actualOutcome == pos.side()) ? 1.00 : 0.00;
+                    closePositionInMemory(pos, exitPrice, 0.0, "Resolution (TWAP 60s)");
+                }
+                openPositions.clear();
+                activePosition.set(null);
             }
-            settledPositions = remaining.size();
-            for (LivePosition pos : remaining) {
-                double exitPrice = (actualOutcome == pos.side()) ? 1.00 : 0.00;
-                completeTrade(pos, exitPrice, 0.0, "Resolution (TWAP 60s)");
-            }
-            openPositions.clear();
-            activePosition.set(null);
+
+            long start = activeCandleStart.get() > 0L
+                    ? activeCandleStart.get()
+                    : (currentTimestampSec > 0L ? currentTimestampSec - durationSeconds : 1700000000L);
+            long end = activeCandleEnd.get() > start ? activeCandleEnd.get() : (start + durationSeconds);
+            double open = twapOpenPrice > 0.0 ? twapOpenPrice : finalPrice;
+            double high = candleHigh > 0.0 ? Math.max(candleHigh, Math.max(open, finalPrice)) : Math.max(open, finalPrice);
+            double low = candleLow > 0.0 ? Math.min(candleLow, Math.min(open, finalPrice)) : Math.min(open, finalPrice);
+
+            double priceDelta = finalPrice - open;
+            double approxVolumeBtc = Math.max(50.0, Math.abs(priceDelta) * 2.0);
+            double approxVolumeUsd = approxVolumeBtc * finalPrice;
+            double approxDeltaBtc = Math.clamp(priceDelta / 10.0, -10.0, 10.0);
+
+            MarketCandle candle = new MarketCandle(
+                    start,
+                    end,
+                    open,
+                    high,
+                    low,
+                    finalPrice,
+                    approxVolumeBtc,
+                    approxVolumeUsd,
+                    approxDeltaBtc,
+                    open,
+                    high,
+                    low,
+                    finalPrice,
+                    approxVolumeBtc,
+                    approxVolumeUsd,
+                    approxDeltaBtc,
+                    0.0
+            );
+            activeStrategy.onMarketCandleCompleted(candle);
+            Log.infof("Resolved market candle [%d, %d]: outcome=%s, open=%.2f, close=%.2f, high=%.2f, low=%.2f, settledPositions=%d, balance=$%.2f",
+                    start, end, actualOutcome, open, finalPrice, high, low, settledPositions, currentBalance);
+
+            candleHigh = 0.0;
+            candleLow = 0.0;
         }
-
-        long start = activeCandleStart.get() > 0L
-                ? activeCandleStart.get()
-                : (currentTimestampSec > 0L ? currentTimestampSec - durationSeconds : 1700000000L);
-        long end = activeCandleEnd.get() > start ? activeCandleEnd.get() : (start + durationSeconds);
-        double open = twapOpenPrice > 0.0 ? twapOpenPrice : finalPrice;
-        double high = candleHigh > 0.0 ? Math.max(candleHigh, Math.max(open, finalPrice)) : Math.max(open, finalPrice);
-        double low = candleLow > 0.0 ? Math.min(candleLow, Math.min(open, finalPrice)) : Math.min(open, finalPrice);
-
-        double priceDelta = finalPrice - open;
-        double approxVolumeBtc = Math.max(50.0, Math.abs(priceDelta) * 2.0);
-        double approxVolumeUsd = approxVolumeBtc * finalPrice;
-        double approxDeltaBtc = Math.clamp(priceDelta / 10.0, -10.0, 10.0);
-
-        MarketCandle candle = new MarketCandle(
-                start,
-                end,
-                open,
-                high,
-                low,
-                finalPrice,
-                approxVolumeBtc,
-                approxVolumeUsd,
-                approxDeltaBtc,
-                open,
-                high,
-                low,
-                finalPrice,
-                approxVolumeBtc,
-                approxVolumeUsd,
-                approxDeltaBtc,
-                0.0
-        );
-        activeStrategy.onMarketCandleCompleted(candle);
-        Log.infof("Resolved market candle [%d, %d]: outcome=%s, open=%.2f, close=%.2f, high=%.2f, low=%.2f, settledPositions=%d, balance=$%.2f",
-                start, end, actualOutcome, open, finalPrice, high, low, settledPositions, repository.getCurrentBalance());
-
-        candleHigh = 0.0;
-        candleLow = 0.0;
     }
 
-    private void completeTrade(LivePosition pos, double exitPrice, double exitFee, String exitReason) {
+    private void closePositionInMemory(LivePosition pos, double exitPrice, double exitFee, String exitReason) {
         double payout = pos.shares() * exitPrice;
         double totalFee = pos.entryFee() + exitFee;
         double netPnl = payout - pos.sizeUsd() - totalFee;
-        double balanceSnapshot = repository.getCurrentBalance();
-        boolean isWin = netPnl > 0.0;
-
-        TradeRecord trade = new TradeRecord(
-                Instant.now().toString(),
-                pos.intervalStartSec(),
-                pos.side(),
-                pos.entryPrice(),
-                exitPrice,
-                pos.sizeUsd(),
-                pos.shares(),
-                totalFee,
-                netPnl,
-                exitReason,
-                pos.modelProbability(),
-                pos.marketPrice(),
-                pos.edge(),
-                isWin,
-                balanceSnapshot
-        );
-
-        repository.recordTrade(trade);
         openPositions.remove(pos);
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
-        Log.infof("Closed live trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
-                pos.side(), exitPrice, netPnl, exitReason, balanceSnapshot);
+        Log.infof("Closed live position: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
+                pos.side(), exitPrice, netPnl, exitReason, currentBalance);
     }
 
     /**
@@ -921,7 +1256,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      *
      * @param update TWAP update
      */
-    public synchronized void onTwapUpdate(TwapUpdate update) {
+    public void onTwapUpdate(TwapUpdate update) {
         if (update == null) {
             return;
         }
@@ -929,7 +1264,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (update.timeframe() != null && strategyTf != null && update.timeframe() != strategyTf) {
             return;
         }
-        activeStrategy.onTwapUpdate(update);
+        synchronized (strategyLock) {
+            activeStrategy.onTwapUpdate(update);
+        }
     }
 
     /**
@@ -943,7 +1280,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * @param windowSeconds   TWAP window in seconds (60)
      * @param twapTimestampMs oracle timestamp in epoch milliseconds
      */
-    public synchronized void onPolymarketCryptoTwap60s(
+    public void onPolymarketCryptoTwap60s(
             long timestampMs,
             String symbol,
             String source,
@@ -953,38 +1290,43 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (twapPrice <= 0.0 || timestampMs <= 0L) {
             return;
         }
+        if (timestampMs > latestOracleRecvTimestampMs) {
+            latestOracleRecvTimestampMs = timestampMs;
+        }
         long effectiveTsMs = twapTimestampMs > 0L ? twapTimestampMs : timestampMs;
         long candleStartSec = (effectiveTsMs / 1000L / durationSeconds) * durationSeconds;
 
-        if (activeCandleStart.get() > 0L && candleStartSec != activeCandleStart.get()) {
-            long prevCandleStart = activeCandleStart.get();
-            PolymarketMarketInfo currentMarket = activeMarketInfo.get();
-            String marketLabel = currentMarket != null
-                    ? currentMarket.slug()
-                    : PolymarketMarketInfo.buildMarketSlug(this.symbol, this.timeframe, prevCandleStart);
-            evaluateCompletedMarketStreamActivity(marketLabel, prevCandleStart);
+        synchronized (strategyLock) {
+            if (activeCandleStart.get() > 0L && candleStartSec != activeCandleStart.get()) {
+                long prevCandleStart = activeCandleStart.get();
+                PolymarketMarketInfo currentMarket = activeMarketInfo.get();
+                String marketLabel = currentMarket != null
+                        ? currentMarket.slug()
+                        : PolymarketMarketInfo.buildMarketSlug(this.symbol, this.timeframe, prevCandleStart);
+                evaluateCompletedMarketStreamActivity(marketLabel, prevCandleStart);
 
-            if (twapOpenPrice > 0.0) {
-                TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
-                resolveCandle(outcome, twapPrice);
-            } else {
-                Log.warnf("Skipping candle resolution for market %s (intervalStart=%d): target price was missing from PolyBolt 60s TWAP stream",
-                        marketLabel, prevCandleStart);
-                openPositions.clear();
-                activePosition.set(null);
+                if (twapOpenPrice > 0.0) {
+                    TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
+                    resolveCandle(outcome, twapPrice);
+                } else {
+                    Log.warnf("Skipping candle resolution for market %s (intervalStart=%d): target price was missing from PolyBolt 60s TWAP stream",
+                            marketLabel, prevCandleStart);
+                    openPositions.clear();
+                    activePosition.set(null);
+                }
+                activeCandleStart.set(candleStartSec);
+                activeCandleEnd.set(candleStartSec + durationSeconds);
+                twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
+            } else if (activeCandleStart.get() == 0L) {
+                activeCandleStart.set(candleStartSec);
+                activeCandleEnd.set(candleStartSec + durationSeconds);
+                twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
+            } else if (twapOpenPrice <= 0.0 && Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) {
+                twapOpenPrice = twapPrice;
             }
-            activeCandleStart.set(candleStartSec);
-            activeCandleEnd.set(candleStartSec + durationSeconds);
-            twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-        } else if (activeCandleStart.get() == 0L) {
-            activeCandleStart.set(candleStartSec);
-            activeCandleEnd.set(candleStartSec + durationSeconds);
-            twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-        } else if (twapOpenPrice <= 0.0 && Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) {
-            twapOpenPrice = twapPrice;
-        }
 
-        activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+            activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+        }
     }
 
     /**
@@ -996,7 +1338,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * @param price            1s Chainlink BTC/USD price
      * @param priceTimestampMs oracle timestamp in epoch milliseconds
      */
-    public synchronized void onPolymarketCryptoPrice(
+    public void onPolymarketCryptoPrice(
             long timestampMs,
             String symbol,
             String source,
@@ -1004,6 +1346,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             long priceTimestampMs) {
         if (price <= 0.0 || timestampMs <= 0L) {
             return;
+        }
+        if (timestampMs > latestOracleRecvTimestampMs) {
+            latestOracleRecvTimestampMs = timestampMs;
         }
         currentTimestampSec = timestampMs / 1000L;
         currentSpotPrice = price;
@@ -1019,32 +1364,57 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             activeCandleEnd.set(candleStartSec + durationSeconds);
         }
 
-        activeStrategy.onPolymarketCryptoPrice(timestampMs, symbol, source, price, priceTimestampMs);
+        synchronized (strategyLock) {
+            activeStrategy.onPolymarketCryptoPrice(timestampMs, symbol, source, price, priceTimestampMs);
+        }
     }
 
     /**
-     * Processes a normalized Polymarket L2 orderbook BBO quote and forwards it to the active strategy.
+     * Processes a normalized Polymarket L2 orderbook BBO quote, enforcing the quote freshness guard
+     * ({@code maxQuoteAgeMs}) before forwarding to the active strategy.
      *
      * @param quote current BBO quote across Up and Down tokens
      */
-    public synchronized void onOrderBookQuote(OrderBookQuote quote) {
+    public void onOrderBookQuote(OrderBookQuote quote) {
         if (quote == null) {
             return;
         }
+        this.latestQuote = quote;
+        updatePositionObservation(quote);
+        evaluateQuoteWithFreshnessGuard(quote, false);
+    }
+
+    private void evaluateQuoteWithFreshnessGuard(OrderBookQuote quote, boolean fromRealtimeWorker) {
+        if (quote.timestampMs() > 0L) {
+            long wallNowMs = System.currentTimeMillis();
+            long referenceNowMs;
+            if (fromRealtimeWorker || Math.abs(wallNowMs - quote.timestampMs()) < REALTIME_CLOCK_WINDOW_MS) {
+                referenceNowMs = wallNowMs;
+            } else {
+                referenceNowMs = Math.max(quote.timestampMs(), latestOracleRecvTimestampMs);
+            }
+            long quoteAgeMs = Math.max(0L, referenceNowMs - quote.timestampMs());
+            lastQuoteAgeMs.set(quoteAgeMs);
+            updateMaxLong(maxQuoteAgeMsObserved, quoteAgeMs);
+
+            if (quoteAgeMs > maxQuoteAgeMs) {
+                long totalStale = staleQuotesSkipped.incrementAndGet();
+                long prevLog = lastStaleWarnLogMs.get();
+                if (wallNowMs - prevLog >= STALE_QUOTE_WARN_INTERVAL_MS
+                        && lastStaleWarnLogMs.compareAndSet(prevLog, wallNowMs)) {
+                    Log.warnf("Skipping stale CLOB OrderBookQuote (quoteAgeMs=%d > maxQuoteAgeMs=%d, totalSkipped=%d)",
+                            quoteAgeMs, maxQuoteAgeMs, totalStale);
+                }
+                return;
+            }
+        }
         if (Log.isTraceEnabled()) {
-            Log.tracef("OrderBookQuote received at %d ms: bidUp=%.3f, askUp=%.3f, bidDown=%.3f, askDown=%.3f",
+            Log.tracef("OrderBookQuote evaluated at %d ms: bidUp=%.3f, askUp=%.3f, bidDown=%.3f, askDown=%.3f",
                     quote.timestampMs(), quote.bestBidUp(), quote.bestAskUp(), quote.bestBidDown(), quote.bestAskDown());
         }
-        this.latestQuote = quote;
-
-        LivePosition pos = activePosition.get();
-        if (pos != null) {
-            double currentBid = (pos.side() == TradeDirection.UP) ? quote.bestBidUp() : quote.bestBidDown();
-            boolean armed = currentBid >= (pos.entryPrice() + 0.05);
-            activePosition.set(pos.withPriceObservation(currentBid, armed));
+        synchronized (strategyLock) {
+            activeStrategy.onOrderBookQuote(quote);
         }
-
-        activeStrategy.onOrderBookQuote(quote);
     }
 
     /**
@@ -1062,25 +1432,111 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     /**
      * Resets engine state and clears open positions.
      */
-    public synchronized void reset() {
-        openPositions.clear();
-        activePosition.set(null);
-        activeStrategy.reset();
-        activeCandleStart.set(0L);
-        activeCandleEnd.set(0L);
-        polyBoltMarketMsgCount.set(0L);
-        clobMarketMsgCount.set(0L);
-        lastEvaluatedMarketCycleStart.set(0L);
-        debugPolyBoltBatchCounter.set(0L);
-        debugClobBatchCounter.set(0L);
-        twapOpenPrice = 0.0;
-        currentSpotPrice = 0.0;
-        candleHigh = 0.0;
-        candleLow = 0.0;
-        currentTimestampSec = 0L;
-        latestQuote = null;
-        appliedUserTradeDeltas.clear();
+    public void reset() {
+        synchronized (strategyLock) {
+            openPositions.clear();
+            activePosition.set(null);
+            activeStrategy.reset();
+            activeCandleStart.set(0L);
+            activeCandleEnd.set(0L);
+            polyBoltMarketMsgCount.set(0L);
+            clobMarketMsgCount.set(0L);
+            lastEvaluatedMarketCycleStart.set(0L);
+            debugPolyBoltBatchCounter.set(0L);
+            debugClobBatchCounter.set(0L);
+            twapOpenPrice = 0.0;
+            currentSpotPrice = 0.0;
+            candleHigh = 0.0;
+            candleLow = 0.0;
+            currentTimestampSec = 0L;
+            latestOracleRecvTimestampMs = 0L;
+            latestQuote = null;
+            latestQuoteSlot.set(null);
+            orderExecutionQueue.clear();
+            executionReportQueue.clear();
+            if (currentBalance > 0.0) {
+                initialCapital = currentBalance;
+            }
+        }
+        synchronized (this) {
+            appliedUserTradeDeltas.clear();
+        }
         Log.info("Reset LiveTradingEngine internal state");
+    }
+
+    /**
+     * Builds a comprehensive point-in-time {@link LiveTelemetryDto} snapshot combining OS TCP buffers,
+     * JVM ZGC metrics, 4-core thread utilization, order execution latency, and WebSocket stream queues.
+     *
+     * @return current {@link LiveTelemetryDto}
+     */
+    public LiveTelemetryDto getTelemetry() {
+        SystemTelemetrySnapshot sys = telemetryMonitor.getLatestOrSample(buildMonitoredThreadSpecs());
+        List<WebSocketStreamTelemetry> streams = new ArrayList<>(4);
+        streams.addAll(clobWsClient.getStreamTelemetries());
+        streams.addAll(polyBoltClient.getStreamTelemetries());
+
+        return new LiveTelemetryDto(
+                sys.kernelRmemMaxBytes(),
+                sys.currentTcpRxQueueBytes(),
+                sys.maxTcpRxQueueBytes(),
+                sys.currentTcpTxQueueBytes(),
+                sys.maxTcpTxQueueBytes(),
+                sys.activeTcpSockets(),
+                sys.tcpRcvCollapsed(),
+                sys.tcpOfoQueue(),
+                sys.tcpBacklogDrop(),
+                sys.gcName(),
+                sys.processCpuLoadPct(),
+                sys.maxProcessCpuLoadPct(),
+                sys.systemCpuLoadPct(),
+                sys.gcCount(),
+                sys.totalGcPauseMs(),
+                sys.usedHeapMb(),
+                sys.maxHeapMb(),
+                ordersSubmitted.get(),
+                ordersFilled.get(),
+                ordersRejected.get(),
+                staleQuotesSkipped.get(),
+                conflatedQuotesCount.get(),
+                lastQuoteAgeMs.get(),
+                maxQuoteAgeMsObserved.get(),
+                lastOrderRttMs.get(),
+                maxOrderRttMs.get(),
+                sys.threads(),
+                streams
+        );
+    }
+
+    private List<MonitoredThreadSpec> buildMonitoredThreadSpecs() {
+        Thread ioReader = clobWsClient.getIoReaderThread();
+        if (ioReader == null) {
+            ioReader = polyBoltClient.getIoReaderThread();
+        }
+        return List.of(
+                new MonitoredThreadSpec("vCPU #1: I/O Reader", "vert.x-eventloop-thread-0", ioReader, -1L),
+                new MonitoredThreadSpec("vCPU #2: CLOB Book Worker", "clob-book-worker", clobBookWorkerThread, clobBookWorkerBusyNs.get()),
+                new MonitoredThreadSpec("vCPU #3: Strategy Calculator", "strategy-calculator-worker", strategyCalculatorThread, strategyWorkerBusyNs.get()),
+                new MonitoredThreadSpec("vCPU #4: Order & I/O Worker", "order-execution-io-worker", orderExecutionWorkerThread, orderExecutionWorkerBusyNs.get())
+        );
+    }
+
+    /**
+     * Returns the initial live bankroll in USD.
+     *
+     * @return initial capital in USD
+     */
+    public double getInitialCapital() {
+        return initialCapital;
+    }
+
+    /**
+     * Returns the current in-memory live balance in USD.
+     *
+     * @return current balance in USD
+     */
+    public double getCurrentBalance() {
+        return currentBalance;
     }
 
     /**
@@ -1173,7 +1629,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         return currentSpotPrice;
     }
 
-
     private String resolveClobTokenId(String strategyToken, boolean isDown) {
         PolymarketMarketInfo info = activeMarketInfo.get();
         if (info != null) {
@@ -1196,6 +1651,16 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             String msg = "Live Polymarket credentials (signerKey, apiKey, passphrase, secret, makerAddress) are not configured";
             Log.fatal(msg);
             throw new IllegalStateException(msg);
+        }
+    }
+
+    private static void updateMaxLong(AtomicLong holder, long candidate) {
+        long prev = holder.get();
+        while (candidate > prev) {
+            if (holder.compareAndSet(prev, candidate)) {
+                return;
+            }
+            prev = holder.get();
         }
     }
 }

@@ -9,9 +9,11 @@ import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketConnectOptions;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -19,37 +21,53 @@ import java.util.function.Supplier;
 
 /**
  * Resilient, non-blocking Vert.x WebSocket stream client with connection state monitoring,
- * periodic ping frames, automatic reconnection on disconnect or failure, immediate local timestamping,
- * and lock-free asynchronous message draining on a single persistent worker thread off the Netty I/O event loop.
+ * periodic ping frames, automatic reconnection on disconnect or failure, immediate local timestamping
+ * on the network I/O reader thread, and lock-free batch draining with real-time queue and latency telemetry.
  */
 public class ReconnectingWebSocketStream {
 
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
+    private static final int SOCKET_RECEIVE_BUFFER_BYTES = 8 * 1024 * 1024;
     private static final int MAX_HEARTBEAT_FRAME_LENGTH = 64;
     private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
+    private static final int DEFAULT_BATCH_LIMIT = 512;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 500L;
-
-    private record QueuedFrame(String rawText, long recvTs) {
-    }
 
     private final Vertx vertx;
     private final String streamName;
     private final String wsUrl;
     private final Supplier<List<String>> subscriptionMessagesSupplier;
     private final RawWebSocketListener messageListener;
+    private final RawWebSocketBatchListener batchListener;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
     private final String textPingPayload;
     private final HttpClient httpClient;
 
-    private final ConcurrentLinkedQueue<QueuedFrame> inboundQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<TimestampedFrame> inboundQueue = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean workerParked = new AtomicBoolean(false);
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
     private final AtomicLong reconnectCount = new AtomicLong(0L);
     private final AtomicLong debugReceivedFrameCounter = new AtomicLong(0L);
+
+    // Real-time stream & queue telemetry counters
+    private final AtomicInteger queueDepth = new AtomicInteger(0);
+    private final AtomicInteger maxQueueDepth = new AtomicInteger(0);
+    private final AtomicLong lastQueueLagMs = new AtomicLong(0L);
+    private final AtomicLong maxQueueLagMs = new AtomicLong(0L);
+    private final AtomicLong lastProcessTimeUs = new AtomicLong(0L);
+    private final AtomicLong maxProcessTimeUs = new AtomicLong(0L);
+    private final AtomicLong totalFramesReceived = new AtomicLong(0L);
+    private final AtomicLong coalescedFramesCount = new AtomicLong(0L);
+    private final AtomicInteger lastCloseCode = new AtomicInteger(0);
+    private final AtomicReference<String> lastCloseReason = new AtomicReference<>("");
+    private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
+
+    private volatile Thread ioReaderThread;
     private volatile Thread drainThread;
+    private volatile Thread externalWorkerThread;
     private volatile WebSocket currentWebSocket;
     private volatile long pingTimerId = -1L;
 
@@ -72,7 +90,7 @@ public class ReconnectingWebSocketStream {
             RawWebSocketListener messageListener,
             long reconnectDelayMs,
             long pingIntervalMs) {
-        this(vertx, streamName, wsUrl, subscriptionMessagesSupplier, messageListener, reconnectDelayMs, pingIntervalMs, null);
+        this(vertx, streamName, wsUrl, subscriptionMessagesSupplier, messageListener, null, reconnectDelayMs, pingIntervalMs, null);
     }
 
     /**
@@ -96,11 +114,38 @@ public class ReconnectingWebSocketStream {
             long reconnectDelayMs,
             long pingIntervalMs,
             String textPingPayload) {
+        this(vertx, streamName, wsUrl, subscriptionMessagesSupplier, messageListener, null, reconnectDelayMs, pingIntervalMs, textPingPayload);
+    }
+
+    /**
+     * Constructs a managed, auto-reconnecting WebSocket stream with batch listener support for burst coalescing.
+     *
+     * @param vertx                        Vert.x runtime instance
+     * @param streamName                   human-readable stream identifier for logging and diagnostics
+     * @param wsUrl                        target WebSocket URL (ws:// or wss://)
+     * @param subscriptionMessagesSupplier supplier returning initial subscription messages to send upon each connection
+     * @param messageListener              optional per-frame listener (used when {@code batchListener} is null)
+     * @param batchListener                optional batch listener invoked with all frames drained in a single pass
+     * @param reconnectDelayMs             delay in milliseconds before attempting reconnection after disconnect
+     * @param pingIntervalMs               interval in milliseconds for sending WebSocket ping frames (0 to disable)
+     * @param textPingPayload              optional application-level text ping payload (e.g. {@code "PING"}), or null if disabled
+     */
+    public ReconnectingWebSocketStream(
+            Vertx vertx,
+            String streamName,
+            String wsUrl,
+            Supplier<List<String>> subscriptionMessagesSupplier,
+            RawWebSocketListener messageListener,
+            RawWebSocketBatchListener batchListener,
+            long reconnectDelayMs,
+            long pingIntervalMs,
+            String textPingPayload) {
         this.vertx = vertx;
         this.streamName = streamName;
         this.wsUrl = wsUrl;
         this.subscriptionMessagesSupplier = subscriptionMessagesSupplier;
         this.messageListener = messageListener;
+        this.batchListener = batchListener;
         this.reconnectDelayMs = Math.max(50L, reconnectDelayMs);
         this.pingIntervalMs = pingIntervalMs;
         this.textPingPayload = textPingPayload;
@@ -109,21 +154,45 @@ public class ReconnectingWebSocketStream {
                 .setSsl(wsUrl.toLowerCase().startsWith("wss"))
                 .setTcpNoDelay(true)
                 .setKeepAlive(true)
-                .setTryUsePerMessageWebSocketCompression(true)
+                .setReceiveBufferSize(SOCKET_RECEIVE_BUFFER_BYTES)
+                .setTryUsePerMessageWebSocketCompression(false)
                 .setMaxWebSocketFrameSize(MAX_FRAME_SIZE_BYTES)
                 .setMaxWebSocketMessageSize(MAX_FRAME_SIZE_BYTES * 4);
         this.httpClient = vertx.createHttpClient(options);
     }
 
     /**
-     * Starts the persistent drain worker thread, WebSocket connection, and automatic reconnection loop.
+     * Binds this stream's lock-free {@code inboundQueue} wakeups to an externally managed dedicated platform thread
+     * (such as {@code clob-book-worker}, {@code strategy-calculator-worker}, or {@code order-execution-io-worker}).
+     * When bound, {@link #start()} will not spawn an internal drain thread; instead, the bound worker thread
+     * is unparked upon frame arrival and drains batches via {@link #drainAvailableBatch(List)}.
+     *
+     * @param workerThread dedicated platform thread responsible for draining this stream
+     */
+    public void bindExternalWorker(Thread workerThread) {
+        this.externalWorkerThread = workerThread;
+        Thread internal = this.drainThread;
+        this.drainThread = null;
+        if (internal != null) {
+            workerParked.set(false);
+            LockSupport.unpark(internal);
+        }
+    }
+
+    /**
+     * Starts the WebSocket connection, automatic reconnection loop, and (unless bound to an external worker via
+     * {@link #bindExternalWorker(Thread)}) a dedicated high-priority platform drain thread.
      */
     public void start() {
         if (running.compareAndSet(false, true)) {
             state.set(ConnectionState.CONNECTING);
-            this.drainThread = Thread.ofVirtual()
-                    .name("ws-drain-" + streamName)
-                    .start(this::drainLoop);
+            if (externalWorkerThread == null) {
+                this.drainThread = Thread.ofPlatform()
+                        .daemon(true)
+                        .priority(Thread.MAX_PRIORITY)
+                        .name("ws-drain-" + streamName)
+                        .start(this::drainLoop);
+            }
             connect();
         }
     }
@@ -135,11 +204,16 @@ public class ReconnectingWebSocketStream {
     public void stop() {
         running.set(false);
         inboundQueue.clear();
+        queueDepth.set(0);
         Thread worker = this.drainThread;
         this.drainThread = null;
         if (worker != null) {
             workerParked.set(false);
             LockSupport.unpark(worker);
+        }
+        Thread ext = this.externalWorkerThread;
+        if (ext != null) {
+            LockSupport.unpark(ext);
         }
         cancelPingTimer();
         state.set(ConnectionState.DISCONNECTED);
@@ -173,6 +247,96 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
+     * Drains all currently queued frames (up to {@code DEFAULT_BATCH_LIMIT}) from the lock-free {@code inboundQueue}
+     * into {@code scratchBatch}, updates queue depth, wait lag, and processing time telemetry, and dispatches the
+     * frames to the configured {@link RawWebSocketBatchListener} or {@link RawWebSocketListener}.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the calling worker thread
+     * @return number of frames drained and processed in this pass
+     */
+    public int drainAvailableBatch(List<TimestampedFrame> scratchBatch) {
+        scratchBatch.clear();
+        TimestampedFrame first = inboundQueue.poll();
+        if (first == null) {
+            return 0;
+        }
+        scratchBatch.add(first);
+        while (scratchBatch.size() < DEFAULT_BATCH_LIMIT) {
+            TimestampedFrame next = inboundQueue.poll();
+            if (next == null) {
+                break;
+            }
+            scratchBatch.add(next);
+        }
+
+        int drainedCount = scratchBatch.size();
+        int remaining = queueDepth.addAndGet(-drainedCount);
+        if (remaining < 0) {
+            queueDepth.set(0);
+        }
+
+        long drainStartMs = System.currentTimeMillis();
+        long oldestLagMs = Math.max(0L, drainStartMs - first.recvTs());
+        lastQueueLagMs.set(oldestLagMs);
+        updateMaxLong(maxQueueLagMs, oldestLagMs);
+
+        long procStartNs = System.nanoTime();
+        try {
+            if (batchListener != null) {
+                if (drainedCount > 1) {
+                    coalescedFramesCount.addAndGet(drainedCount - 1L);
+                }
+                batchListener.onMessageBatch(scratchBatch);
+            } else if (messageListener != null) {
+                for (int i = 0; i < drainedCount; i++) {
+                    TimestampedFrame frame = scratchBatch.get(i);
+                    messageListener.onMessage(frame.rawText(), frame.recvTs());
+                }
+            }
+        } catch (Exception e) {
+            Log.errorf("[%s] Unhandled exception in WebSocket message listener: %s",
+                    streamName, e.getMessage());
+        } finally {
+            long elapsedNs = Math.max(0L, System.nanoTime() - procStartNs);
+            totalBusyTimeNs.addAndGet(elapsedNs);
+            long elapsedUs = elapsedNs / 1_000L;
+            lastProcessTimeUs.set(elapsedUs);
+            updateMaxLong(maxProcessTimeUs, elapsedUs);
+            scratchBatch.clear();
+        }
+        return drainedCount;
+    }
+
+    /**
+     * Returns whether any frames are currently waiting in {@code inboundQueue}.
+     *
+     * @return {@code true} if {@code inboundQueue} is non-empty
+     */
+    public boolean hasQueuedFrames() {
+        return !inboundQueue.isEmpty();
+    }
+
+    /**
+     * Increments the coalesced/fast-forwarded frames counter by {@code delta}.
+     *
+     * @param delta number of additional coalesced frames
+     */
+    public void addCoalescedFrames(long delta) {
+        if (delta > 0L) {
+            coalescedFramesCount.addAndGet(delta);
+        }
+    }
+
+    /**
+     * Returns the human-readable stream identifier.
+     *
+     * @return stream name
+     */
+    public String getStreamName() {
+        return streamName;
+    }
+
+    /**
      * Returns the current connection state.
      *
      * @return current {@link ConnectionState}
@@ -197,6 +361,58 @@ public class ReconnectingWebSocketStream {
      */
     public long getReconnectCount() {
         return reconnectCount.get();
+    }
+
+    /**
+     * Returns the Netty I/O event-loop thread that most recently delivered frames for this stream, or {@code null}.
+     *
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        return ioReaderThread;
+    }
+
+    /**
+     * Returns the internal drain worker thread (or externally bound worker thread) for this stream.
+     *
+     * @return worker thread
+     */
+    public Thread getWorkerThread() {
+        Thread ext = this.externalWorkerThread;
+        return ext != null ? ext : this.drainThread;
+    }
+
+    /**
+     * Returns the cumulative nanosecond busy time spent processing frames from this stream.
+     *
+     * @return cumulative busy time in nanoseconds
+     */
+    public long getTotalBusyTimeNs() {
+        return totalBusyTimeNs.get();
+    }
+
+    /**
+     * Returns an immutable point-in-time snapshot of this stream's queue depth, latency, and connection telemetry.
+     *
+     * @return {@link WebSocketStreamTelemetry} snapshot
+     */
+    public WebSocketStreamTelemetry getTelemetrySnapshot() {
+        return new WebSocketStreamTelemetry(
+                streamName,
+                state.get(),
+                Math.max(0, queueDepth.get()),
+                maxQueueDepth.get(),
+                lastQueueLagMs.get(),
+                maxQueueLagMs.get(),
+                lastProcessTimeUs.get(),
+                maxProcessTimeUs.get(),
+                totalFramesReceived.get(),
+                coalescedFramesCount.get(),
+                reconnectCount.get(),
+                lastMessageTimestampMs.get(),
+                lastCloseCode.get(),
+                lastCloseReason.get()
+        );
     }
 
     private void connect() {
@@ -227,12 +443,14 @@ public class ReconnectingWebSocketStream {
                             }
                             return;
                         }
+                        this.ioReaderThread = Thread.currentThread();
                         this.currentWebSocket = ws;
                         this.state.set(ConnectionState.CONNECTED);
                         Log.infof("[%s] WebSocket connected to %s (reconnectCount=%d)",
                                 streamName, wsUrl, reconnectCount.get());
 
                         ws.textMessageHandler(rawText -> {
+                            this.ioReaderThread = Thread.currentThread();
                             long recvTs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(recvTs);
                             if (isHeartbeatFrame(rawText)) {
@@ -251,15 +469,23 @@ public class ReconnectingWebSocketStream {
                                             streamName, count, recvTs);
                                 }
                             }
-                            if (messageListener != null && rawText != null) {
-                                inboundQueue.offer(new QueuedFrame(rawText, recvTs));
-                                if (workerParked.get() && workerParked.compareAndSet(true, false)) {
+                            if ((messageListener != null || batchListener != null) && rawText != null) {
+                                inboundQueue.offer(new TimestampedFrame(rawText, recvTs));
+                                int depth = queueDepth.incrementAndGet();
+                                updateMaxInt(maxQueueDepth, depth);
+                                totalFramesReceived.incrementAndGet();
+
+                                Thread extWorker = this.externalWorkerThread;
+                                if (extWorker != null) {
+                                    LockSupport.unpark(extWorker);
+                                } else if (workerParked.get() && workerParked.compareAndSet(true, false)) {
                                     LockSupport.unpark(this.drainThread);
                                 }
                             }
                         });
 
                         ws.pongHandler(buf -> {
+                            this.ioReaderThread = Thread.currentThread();
                             long nowMs = System.currentTimeMillis();
                             lastMessageTimestampMs.set(nowMs);
                             if (Log.isTraceEnabled()) {
@@ -270,6 +496,8 @@ public class ReconnectingWebSocketStream {
                         ws.closeHandler(v -> {
                             short closeCode = ws.closeStatusCode() != null ? ws.closeStatusCode() : -1;
                             String closeReason = ws.closeReason() != null ? ws.closeReason() : "none";
+                            lastCloseCode.set(closeCode);
+                            lastCloseReason.set(closeReason);
                             if (running.get()) {
                                 Log.errorf("[%s] WebSocket connection closed unexpectedly (code=%d, reason=%s); scheduling reconnect in %d ms",
                                         streamName, closeCode, closeReason, reconnectDelayMs);
@@ -280,6 +508,7 @@ public class ReconnectingWebSocketStream {
                         });
 
                         ws.exceptionHandler(err -> {
+                            lastCloseReason.set(err.getMessage() != null ? err.getMessage() : "exception");
                             Log.errorf("[%s] WebSocket error: %s", streamName, err.getMessage());
                             onConnectionClosed(ws);
                         });
@@ -301,6 +530,7 @@ public class ReconnectingWebSocketStream {
                         startPingTimer();
                     })
                     .onFailure(err -> {
+                        lastCloseReason.set(err.getMessage() != null ? err.getMessage() : "connect_failed");
                         Log.errorf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
                         scheduleReconnect();
                     });
@@ -362,30 +592,44 @@ public class ReconnectingWebSocketStream {
     }
 
     private void drainLoop() {
-        while (running.get()) {
-            QueuedFrame frame = inboundQueue.poll();
-            if (frame != null) {
-                try {
-                    messageListener.onMessage(frame.rawText(), frame.recvTs());
-                } catch (Exception e) {
-                    Log.errorf("[%s] Unhandled exception in WebSocket message listener: %s",
-                            streamName, e.getMessage());
-                }
+        List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
+        while (running.get() && externalWorkerThread == null) {
+            int drained = drainAvailableBatch(scratchBatch);
+            if (drained > 0) {
                 continue;
             }
-            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && running.get() && inboundQueue.isEmpty(); spin++) {
+            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && running.get() && externalWorkerThread == null && inboundQueue.isEmpty(); spin++) {
                 Thread.onSpinWait();
             }
-            if (!running.get() || !inboundQueue.isEmpty()) {
+            if (!running.get() || externalWorkerThread != null || !inboundQueue.isEmpty()) {
                 continue;
             }
             workerParked.set(true);
-            if (running.get() && inboundQueue.isEmpty()) {
+            if (running.get() && externalWorkerThread == null && inboundQueue.isEmpty()) {
                 LockSupport.park(this);
             }
             workerParked.set(false);
         }
-        inboundQueue.clear();
+    }
+
+    private static void updateMaxInt(AtomicInteger maxHolder, int candidate) {
+        int prev = maxHolder.get();
+        while (candidate > prev) {
+            if (maxHolder.compareAndSet(prev, candidate)) {
+                return;
+            }
+            prev = maxHolder.get();
+        }
+    }
+
+    private static void updateMaxLong(AtomicLong maxHolder, long candidate) {
+        long prev = maxHolder.get();
+        while (candidate > prev) {
+            if (maxHolder.compareAndSet(prev, candidate)) {
+                return;
+            }
+            prev = maxHolder.get();
+        }
     }
 
     static boolean isHeartbeatFrame(String rawText) {

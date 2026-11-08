@@ -1,9 +1,7 @@
 package cz.polymarket.bot.live.web;
 
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
-import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.live.engine.LiveTradingEngine;
-import cz.polymarket.bot.live.storage.LiveTradeRepository;
 import io.quarkus.qute.Location;
 import io.quarkus.qute.Template;
 import io.quarkus.qute.TemplateInstance;
@@ -16,46 +14,37 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 
 /**
  * REST and Web resource for the Live Trading dashboard and monitoring APIs.
- * Exposes live execution status, active Polymarket market metadata, open positions, and trade history.
+ * Exposes live execution status, active Polymarket market metadata, open positions,
+ * and 4-core / OS / WebSocket telemetry.
  */
 @Path("/")
 @ApplicationScoped
 public class LiveDashboardResource {
 
     private final LiveTradingEngine engine;
-    private final LiveTradeRepository repository;
     private final Template dashboardTemplate;
 
     /**
      * Constructs the live dashboard REST resource.
      *
      * @param engine            live trading engine
-     * @param repository        persistent live trade repository
      * @param dashboardTemplate Qute HTML dashboard template
      */
     @Inject
     public LiveDashboardResource(
             LiveTradingEngine engine,
-            LiveTradeRepository repository,
             @Location("live-dashboard.html") Template dashboardTemplate) {
         if (engine == null) {
             throw new IllegalArgumentException("engine cannot be null");
-        }
-        if (repository == null) {
-            throw new IllegalArgumentException("repository cannot be null");
         }
         if (dashboardTemplate == null) {
             throw new IllegalArgumentException("dashboardTemplate cannot be null");
         }
         this.engine = engine;
-        this.repository = repository;
         this.dashboardTemplate = dashboardTemplate;
     }
 
@@ -67,8 +56,6 @@ public class LiveDashboardResource {
     @GET
     @Produces(MediaType.TEXT_HTML)
     public TemplateInstance getDashboard() {
-        List<TradeRecord> allTrades = new ArrayList<>(repository.getTrades());
-        Collections.reverse(allTrades);
         PolymarketMarketInfo market = engine.getActiveMarketInfo();
 
         return dashboardTemplate
@@ -76,11 +63,10 @@ public class LiveDashboardResource {
                 .data("status", engine.getStatus())
                 .data("orderType", engine.getOrderType())
                 .data("activeMarketSlug", market != null ? market.slug() : "DISCOVERING")
-                .data("initialCapital", repository.getInitialCapital())
-                .data("currentBalance", repository.getCurrentBalance())
-                .data("metrics", repository.getMetrics())
+                .data("initialCapital", engine.getInitialCapital())
+                .data("currentBalance", engine.getCurrentBalance())
                 .data("activePosition", engine.getActivePosition())
-                .data("trades", allTrades);
+                .data("telemetry", engine.getTelemetry());
     }
 
     /**
@@ -100,37 +86,25 @@ public class LiveDashboardResource {
                 market != null ? market.slug() : "",
                 market != null ? market.yesTokenId() : "",
                 market != null ? market.noTokenId() : "",
-                repository.getInitialCapital(),
-                repository.getCurrentBalance(),
-                repository.getTrades().size(),
+                engine.getInitialCapital(),
+                engine.getCurrentBalance(),
                 engine.getActivePosition(),
-                engine.getOpenPositions()
+                engine.getOpenPositions(),
+                engine.getTelemetry()
         );
         return Response.ok(status).build();
     }
 
     /**
-     * Returns the current aggregated live performance metrics.
+     * Returns the current OS, JVM ZGC, 4-core thread utilization, order execution, and WebSocket stream telemetry.
      *
-     * @return HTTP 200 with {@link cz.polymarket.bot.calculator.PerformanceMetrics}
+     * @return HTTP 200 with {@link LiveTelemetryDto}
      */
     @GET
-    @Path("/api/live/metrics")
+    @Path("/api/live/telemetry")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response getMetrics() {
-        return Response.ok(repository.getMetrics()).build();
-    }
-
-    /**
-     * Returns the list of all settled live trades.
-     *
-     * @return HTTP 200 with {@code List<TradeRecord>}
-     */
-    @GET
-    @Path("/api/live/trades")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response getTrades() {
-        return Response.ok(repository.getTrades()).build();
+    public Response getTelemetry() {
+        return Response.ok(engine.getTelemetry()).build();
     }
 
     /**
@@ -146,7 +120,7 @@ public class LiveDashboardResource {
     }
 
     /**
-     * Resets live trading metrics and trade history to initial capital.
+     * Resets live trading engine state and open positions.
      *
      * @return HTTP 200 confirmation payload
      */
@@ -155,12 +129,11 @@ public class LiveDashboardResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response reset() {
         engine.reset();
-        repository.reset();
         return Response.ok(Map.of(
                 "status", "SUCCESS",
-                "message", "Live trading history and metrics reset successfully",
-                "initialCapital", repository.getInitialCapital(),
-                "currentBalance", repository.getCurrentBalance()
+                "message", "Live trading engine state reset successfully",
+                "initialCapital", engine.getInitialCapital(),
+                "currentBalance", engine.getCurrentBalance()
         )).build();
     }
 }

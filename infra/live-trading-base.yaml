@@ -2,21 +2,13 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Polymarket Bot Live Trading Base Infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
   CloudWatch Logs group, least-privilege IAM role with SSM Session Manager and Secrets Manager access,
-  encrypted gp3 EBS volume for persistent live trade history, and a security group restricting inbound
-  HTTPS (port 443) strictly to authorized management IP (178.17.13.13/32).
+  and a security group restricting inbound HTTPS (port 443) strictly to authorized management IP (178.17.13.13/32).
 
 Metadata:
   AWSToolsMetrics:
     AWSAgentToolkit: aws-cloudformation@3
 
 Parameters:
-  EbsVolumeSizeGb:
-    Type: Number
-    Default: 30
-    MinValue: 20
-    MaxValue: 1000
-    Description: Size in GiB of the persistent gp3 EBS volume mounted at /mnt/ebs/polymarket-data.
-
   PolymarketSecretId:
     Type: String
     Default: polymarket-sniper/clob-credentials
@@ -154,12 +146,6 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                 Resource: !GetAtt LiveTradingLogGroup.Arn
-              - Sid: EbsAttachAndDescribe
-                Effect: Allow
-                Action:
-                  - ec2:DescribeVolumes
-                  - ec2:AttachVolume
-                Resource: '*'
 
   LiveTradingInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -170,24 +156,6 @@ Resources:
     Properties:
       Roles:
         - !Ref LiveTradingIamRole
-
-  LiveTradingEbsVolume:
-    Type: AWS::EC2::Volume
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Dedicated persistent gp3 EBS volume for storing live trades.jsonl and metrics.json separately from the root OS volume.
-        must: Must be encrypted, gp3, retained on stack deletion, and created in eu-west-1a.
-        mutability: immutable
-    Properties:
-      AvailabilityZone: !Sub "${AWS::Region}a"
-      VolumeType: gp3
-      Size: !Ref EbsVolumeSizeGb
-      Encrypted: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-ebs-live"
 
 Outputs:
   EcrRepositoryUri:
@@ -220,8 +188,3 @@ Outputs:
     Value: !Ref LiveTradingInstanceProfile
     Export:
       Name: !Sub "${AWS::StackName}-InstanceProfileName"
-  EbsVolumeId:
-    Description: Persistent gp3 EBS Volume ID mounted at /mnt/ebs/polymarket-data
-    Value: !Ref LiveTradingEbsVolume
-    Export:
-      Name: !Sub "${AWS::StackName}-EbsVolumeId"

@@ -3,12 +3,15 @@ package cz.polymarket.bot.connector.polymarket;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -91,6 +94,18 @@ public class PolymarketPolyBoltClient {
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
      */
     public synchronized void startTwapStream(String symbol, RawWebSocketListener listener) {
+        startTwapStream(symbol, listener, null);
+    }
+
+    /**
+     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream bound to an optional
+     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     *
+     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
+     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     */
+    public synchronized void startTwapStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
         stopTwapStream();
         String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
         String subscribeMsg = buildTwapSubscribeMessage(polyBoltSymbol);
@@ -100,6 +115,9 @@ public class PolymarketPolyBoltClient {
                 () -> this.twapStream,
                 listener
         );
+        if (externalWorker != null) {
+            newStream.bindExternalWorker(externalWorker);
+        }
         this.twapStream = newStream;
         newStream.start();
     }
@@ -113,6 +131,18 @@ public class PolymarketPolyBoltClient {
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
      */
     public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener) {
+        startCryptoPriceStream(symbol, listener, null);
+    }
+
+    /**
+     * Starts the PolyBolt {@code price.crypto} WebSocket stream bound to an optional
+     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     *
+     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
+     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     */
+    public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
         stopCryptoPriceStream();
         String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
         String subscribeMsg = buildCryptoPriceSubscribeMessage(polyBoltSymbol);
@@ -122,8 +152,45 @@ public class PolymarketPolyBoltClient {
                 () -> this.cryptoPriceStream,
                 listener
         );
+        if (externalWorker != null) {
+            newStream.bindExternalWorker(externalWorker);
+        }
         this.cryptoPriceStream = newStream;
         newStream.start();
+    }
+
+    /**
+     * Drains all currently queued frames from both PolyBolt streams ({@code TWAP} and {@code CRYPTO-PRICE})
+     * into {@code scratchBatch}. Called on the dedicated {@code strategy-calculator-worker} thread.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the caller
+     * @return total number of frames drained across both streams
+     */
+    public int drainStreams(List<TimestampedFrame> scratchBatch) {
+        int total = 0;
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            total += twap.drainAvailableBatch(scratchBatch);
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            total += spot.drainAvailableBatch(scratchBatch);
+        }
+        return total;
+    }
+
+    /**
+     * Returns whether either PolyBolt stream currently has frames waiting in its inbound queue.
+     *
+     * @return {@code true} if either PolyBolt queue is non-empty
+     */
+    public boolean hasQueuedFrames() {
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null && twap.hasQueuedFrames()) {
+            return true;
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        return spot != null && spot.hasQueuedFrames();
     }
 
     /**
@@ -174,6 +241,38 @@ public class PolymarketPolyBoltClient {
     public ConnectionState getCryptoPriceState() {
         ReconnectingWebSocketStream current = this.cryptoPriceStream;
         return current != null ? current.getState() : ConnectionState.DISCONNECTED;
+    }
+
+    /**
+     * Returns telemetry snapshots for active PolyBolt WebSocket streams.
+     *
+     * @return list of {@link WebSocketStreamTelemetry} snapshots
+     */
+    public List<WebSocketStreamTelemetry> getStreamTelemetries() {
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(2);
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            result.add(twap.getTelemetrySnapshot());
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            result.add(spot.getTelemetrySnapshot());
+        }
+        return result;
+    }
+
+    /**
+     * Returns the Netty I/O reader thread observed by either active PolyBolt stream, or {@code null}.
+     *
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null && spot.getIoReaderThread() != null) {
+            return spot.getIoReaderThread();
+        }
+        ReconnectingWebSocketStream twap = this.twapStream;
+        return twap != null ? twap.getIoReaderThread() : null;
     }
 
     /**

@@ -12,4 +12,4 @@ COPY target/quarkus-app/quarkus/ /work/quarkus/
 
 EXPOSE 8080
 
-ENTRYPOINT ["sh", "-c", "exec java -Dquarkus.http.host=0.0.0.0 -Dquarkus.http.port=${PORT:-8080} -Djava.util.logging.manager=org.jboss.logmanager.LogManager -jar /work/quarkus-run.jar"]
+ENTRYPOINT ["sh", "-c", "exec java -XX:+UseZGC -XX:+AlwaysPreTouch -Xms2g -Xmx4g -XX:+DisableExplicitGC -Dquarkus.http.host=0.0.0.0 -Dquarkus.http.port=${PORT:-8080} -Djava.util.logging.manager=org.jboss.logmanager.LogManager -jar /work/quarkus-run.jar"]

@@ -2,14 +2,18 @@ package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.RawWebSocketBatchListener;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,7 +25,7 @@ import java.util.stream.Collectors;
  * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
  * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
  * Manages per-market WebSocket connections and the authenticated User Channel stream,
- * cleanly disconnecting when a market resolves or on shutdown.
+ * supporting both standalone per-stream draining and external dedicated worker thread binding.
  */
 @ApplicationScoped
 public class PolymarketClobClient {
@@ -98,6 +102,46 @@ public class PolymarketClobClient {
     }
 
     /**
+     * Opens a dedicated CLOB WebSocket connection for a single market with batch-draining listener support,
+     * optionally bound to an external dedicated worker thread (e.g. {@code clob-book-worker}).
+     *
+     * @param marketSlug     Polymarket market slug
+     * @param tokenIds       CLOB asset token IDs belonging to the market
+     * @param batchListener  listener invoked with drained chronological frame batches
+     * @param externalWorker optional dedicated platform worker thread to unpark on frame arrival
+     */
+    public synchronized void openMarketStreamBatch(
+            String marketSlug,
+            List<String> tokenIds,
+            RawWebSocketBatchListener batchListener,
+            Thread externalWorker) {
+        if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
+            return;
+        }
+        if (marketStreams.containsKey(marketSlug)) {
+            return;
+        }
+        String subPayload = buildSubscriptionPayload(tokenIds);
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "POLYMARKET-CLOB-" + marketSlug,
+                wsUrl,
+                () -> List.of(subPayload),
+                null,
+                batchListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                "PING"
+        );
+        if (externalWorker != null) {
+            stream.bindExternalWorker(externalWorker);
+        }
+        marketStreams.put(marketSlug, stream);
+        Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d, batchMode=true)", marketSlug, tokenIds.size());
+        stream.start();
+    }
+
+    /**
      * Disconnects and removes the CLOB WebSocket stream for a market that has finished and resolved.
      *
      * @param marketSlug Polymarket market slug to disconnect
@@ -121,6 +165,21 @@ public class PolymarketClobClient {
      * @param listener    listener receiving raw JSON frames and receipt timestamps
      */
     public synchronized void openUserStream(PolymarketCredentials credentials, RawWebSocketListener listener) {
+        openUserStream(credentials, listener, null);
+    }
+
+    /**
+     * Opens an authenticated CLOB User Channel WebSocket stream ({@code /ws/user}) bound to an optional
+     * external worker thread (e.g. {@code order-execution-io-worker}).
+     *
+     * @param credentials    Polymarket Level 2 API credentials
+     * @param listener       listener receiving raw JSON frames and receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining user events
+     */
+    public synchronized void openUserStream(
+            PolymarketCredentials credentials,
+            RawWebSocketListener listener,
+            Thread externalWorker) {
         if (credentials == null || !credentials.hasL2Credentials()) {
             throw new IllegalArgumentException("Valid Polymarket L2 credentials are required for the CLOB user stream");
         }
@@ -141,6 +200,9 @@ public class PolymarketClobClient {
                 pingIntervalMs,
                 "PING"
         );
+        if (externalWorker != null) {
+            stream.bindExternalWorker(externalWorker);
+        }
         this.userStream = stream;
         Log.infof("Opening authenticated Polymarket CLOB User WebSocket stream (%s)", userWsUrl);
         stream.start();
@@ -169,6 +231,73 @@ public class PolymarketClobClient {
     }
 
     /**
+     * Drains all currently queued frames across active market CLOB streams into {@code scratchBatch}.
+     * Called on the dedicated {@code clob-book-worker} thread.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the caller
+     * @return total number of frames drained
+     */
+    public int drainMarketStreams(List<TimestampedFrame> scratchBatch) {
+        int total = 0;
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            total += stream.drainAvailableBatch(scratchBatch);
+        }
+        return total;
+    }
+
+    /**
+     * Drains all currently queued frames from the authenticated CLOB User stream into {@code scratchBatch}.
+     * Called on the dedicated {@code order-execution-io-worker} thread.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the caller
+     * @return number of frames drained
+     */
+    public int drainUserStream(List<TimestampedFrame> scratchBatch) {
+        ReconnectingWebSocketStream current = this.userStream;
+        return current != null ? current.drainAvailableBatch(scratchBatch) : 0;
+    }
+
+    /**
+     * Returns whether any active market CLOB stream currently has frames waiting in its inbound queue.
+     *
+     * @return {@code true} if any market stream queue is non-empty
+     */
+    public boolean hasQueuedMarketFrames() {
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            if (stream.hasQueuedFrames()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns whether the CLOB User stream currently has frames waiting in its inbound queue.
+     *
+     * @return {@code true} if the user stream queue is non-empty
+     */
+    public boolean hasQueuedUserFrames() {
+        ReconnectingWebSocketStream current = this.userStream;
+        return current != null && current.hasQueuedFrames();
+    }
+
+    /**
+     * Records additional fast-forwarded frames for the specified market slug.
+     *
+     * @param marketSlug market slug
+     * @param delta      number of additional fast-forwarded frames
+     */
+    public void addMarketCoalescedFrames(String marketSlug, long delta) {
+        if (marketSlug == null || delta <= 0L) {
+            return;
+        }
+        ReconnectingWebSocketStream stream = marketStreams.get(marketSlug);
+        if (stream != null) {
+            stream.addCoalescedFrames(delta);
+        }
+    }
+
+    /**
      * Returns an unmodifiable snapshot of the connection states of all active market and user CLOB streams.
      *
      * @return map of stream key to {@link ConnectionState}
@@ -181,6 +310,39 @@ public class PolymarketClobClient {
             states.put(USER_STREAM_KEY, currentUser.getState());
         }
         return Collections.unmodifiableMap(states);
+    }
+
+    /**
+     * Returns telemetry snapshots for all active market and user CLOB streams.
+     *
+     * @return list of {@link WebSocketStreamTelemetry} snapshots
+     */
+    public List<WebSocketStreamTelemetry> getStreamTelemetries() {
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(marketStreams.size() + 1);
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            result.add(stream.getTelemetrySnapshot());
+        }
+        ReconnectingWebSocketStream currentUser = this.userStream;
+        if (currentUser != null) {
+            result.add(currentUser.getTelemetrySnapshot());
+        }
+        return result;
+    }
+
+    /**
+     * Returns the Netty I/O reader thread observed by any active CLOB stream, or {@code null} if none connected yet.
+     *
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            Thread t = stream.getIoReaderThread();
+            if (t != null) {
+                return t;
+            }
+        }
+        ReconnectingWebSocketStream currentUser = this.userStream;
+        return currentUser != null ? currentUser.getIoReaderThread() : null;
     }
 
     private String buildSubscriptionPayload(List<String> tokenIds) {
@@ -198,8 +360,14 @@ public class PolymarketClobClient {
                 + "\"},\"markets\":[],\"type\":\"user\"}";
     }
 
-    private static String resolveUserWsUrl(String marketWsUrl) {
-        String trimmed = marketWsUrl != null ? marketWsUrl.trim() : "";
+    static String resolveUserWsUrl(String marketWsUrl) {
+        if (marketWsUrl == null || marketWsUrl.isBlank()) {
+            return "wss://ws-subscriptions-clob.polymarket.com/ws/user";
+        }
+        String trimmed = marketWsUrl.trim();
+        if (trimmed.endsWith("/ws/market")) {
+            return trimmed.substring(0, trimmed.length() - "/ws/market".length()) + "/ws/user";
+        }
         if (trimmed.endsWith("/market")) {
             return trimmed.substring(0, trimmed.length() - "/market".length()) + "/user";
         }

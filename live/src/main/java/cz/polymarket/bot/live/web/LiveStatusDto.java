@@ -15,9 +15,9 @@ import java.util.List;
  * @param noTokenId        Down (NO) conditional token ID for the active market
  * @param initialCapital   initial live bankroll in USD
  * @param currentBalance   current live balance in USD
- * @param totalTrades      total settled live trades
  * @param activePosition   most recent active position, or {@code null}
  * @param openPositions    list of all open positions in the active candle
+ * @param telemetry        system, 4-core thread, order execution, and WebSocket stream telemetry snapshot
  */
 public record LiveStatusDto(
         String strategyName,
@@ -28,8 +28,8 @@ public record LiveStatusDto(
         String noTokenId,
         double initialCapital,
         double currentBalance,
-        int totalTrades,
         LivePosition activePosition,
-        List<LivePosition> openPositions
+        List<LivePosition> openPositions,
+        LiveTelemetryDto telemetry
 ) {
 }

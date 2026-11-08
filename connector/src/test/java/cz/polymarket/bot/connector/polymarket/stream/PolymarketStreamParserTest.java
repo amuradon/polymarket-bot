@@ -274,4 +274,65 @@ class PolymarketStreamParserTest {
         assertThat(parser.parseUserTradeEvents("PONG")).isEmpty();
         assertThat(parser.parseUserTradeEvents("{\"event_type\":\"order\",\"id\":\"o1\"}")).isEmpty();
     }
+
+
+    @Test
+    void shouldFastForwardOlderFramesBeforeFullDualBookSnapshotInBatch() {
+        String yesToken = "token_up_batch";
+        String noToken = "token_down_batch";
+        PolymarketLocalBook localBook = new PolymarketLocalBook(yesToken, noToken);
+
+        cz.polymarket.bot.connector.ws.TimestampedFrame obsolete1 = new cz.polymarket.bot.connector.ws.TimestampedFrame(
+                "{\"event_type\":\"best_bid_ask\",\"asset_id\":\"token_up_batch\",\"best_bid\":\"0.20\",\"best_ask\":\"0.21\"}",
+                1000L
+        );
+        cz.polymarket.bot.connector.ws.TimestampedFrame obsolete2 = new cz.polymarket.bot.connector.ws.TimestampedFrame(
+                "{\"event_type\":\"best_bid_ask\",\"asset_id\":\"token_down_batch\",\"best_bid\":\"0.79\",\"best_ask\":\"0.80\"}",
+                1001L
+        );
+        cz.polymarket.bot.connector.ws.TimestampedFrame fullBookSnapshot = new cz.polymarket.bot.connector.ws.TimestampedFrame(
+                """
+                [
+                  {
+                    "event_type": "book",
+                    "asset_id": "token_up_batch",
+                    "bids": [{"price": "0.60", "size": "200"}],
+                    "asks": [{"price": "0.62", "size": "150"}]
+                  },
+                  {
+                    "event_type": "book",
+                    "asset_id": "token_down_batch",
+                    "bids": [{"price": "0.38", "size": "200"}],
+                    "asks": [{"price": "0.40", "size": "150"}]
+                  }
+                ]
+                """,
+                1002L
+        );
+        cz.polymarket.bot.connector.ws.TimestampedFrame postSnapshotDelta = new cz.polymarket.bot.connector.ws.TimestampedFrame(
+                """
+                {
+                  "event_type": "price_change",
+                  "price_changes": [
+                    {"asset_id": "token_up_batch", "price": "0.61", "size": "300", "side": "SELL", "best_bid": "0.60", "best_ask": "0.61"}
+                  ]
+                }
+                """,
+                1003L
+        );
+
+        PolymarketStreamParser.ClobBatchResult result = parser.applyClobFrameBatch(
+                List.of(obsolete1, obsolete2, fullBookSnapshot, postSnapshotDelta),
+                localBook
+        );
+
+        assertThat(result.fastForwardedFramesCount()).isEqualTo(2);
+        assertThat(result.appliedFramesCount()).isEqualTo(2);
+        assertThat(result.quote()).isPresent();
+        assertThat(result.quote().get().bestBidUp()).isCloseTo(0.60, within(1e-6));
+        assertThat(result.quote().get().bestAskUp()).isCloseTo(0.61, within(1e-6));
+        assertThat(result.quote().get().bestBidDown()).isCloseTo(0.38, within(1e-6));
+        assertThat(result.quote().get().bestAskDown()).isCloseTo(0.40, within(1e-6));
+        assertThat(result.quote().get().timestampMs()).isEqualTo(1003L);
+    }
 }
