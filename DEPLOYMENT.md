@@ -44,7 +44,7 @@ flowchart TD
    - Inbound HTTPS (port 443, redirected via host `iptables` to Quarkus port 8080) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
    - No public SSH (port 22) is open. Management and deployment are executed exclusively via **AWS Systems Manager (SSM)**.
 5. **SemVer & Maven Release**:
-   - Before deploying the Live Trading Engine, run `mvnw release:clean release:prepare` (or `mvnw release:clean release:prepare -DreleaseVersion=1.1.0`), which packages the release artifact `.\live\target\quarkus-app\app\live-{x.y.z}.jar`.
+   - Before deploying the Live Trading Engine, run `mvnw release:clean release:prepare` (or `mvnw release:clean release:prepare "-DreleaseVersion=1.1.0"`), which packages the release artifact `.\live\target\quarkus-app\app\live-{x.y.z}.jar`.
    - `infra/deploy-live.ps1` and `infra/deploy-live.sh` determine the version `{x.y.z}` directly from `.\live\target\quarkus-app\app\live-{x.y.z}.jar` and tag the Docker image with `{x.y.z}` (along with `latest`).
 
 ---
@@ -105,9 +105,9 @@ First, execute Maven release to build the release artifacts (including `.\live\t
 #### Windows 11 (PowerShell) - Primary:
 ```powershell
 # 1. Prepare Maven release (auto-increment patch version or specify releaseVersion):
-mvnw release:clean release:prepare
+.\mvnw -B release:clean release:prepare
 # or:
-mvnw release:clean release:prepare -DreleaseVersion=1.1.0
+.\mvnw -B release:clean release:prepare "-DreleaseVersion=1.1.0"
 
 # 2. Build Docker image, push to ECR, and deploy to EC2:
 .\infra\deploy-live.ps1
@@ -213,7 +213,7 @@ First, prepare the Maven release, and then run the deployment script:
 # Windows 11:
 .\mvnw -B release:clean release:prepare
 # or with explicit release version:
-.\mvnw -B release:clean release:prepare -DreleaseVersion=1.1.0
+.\mvnw -B release:clean release:prepare "-DreleaseVersion=1.1.0"
 
 .\infra\deploy-live.ps1
 
