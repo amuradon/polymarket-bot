@@ -923,6 +923,193 @@ class LiveTradingEngineTest {
         }
     }
 
+    @Test
+    void shouldNotTriggerBogusZeroMessagesRolloverOnStartupOrReconnectPolyBoltHistoricalSnapshot() {
+        List<LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
+        Logger engineLogger = Logger.getLogger(LiveTradingEngine.class.getName());
+        Handler testHandler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        engineLogger.addHandler(testHandler);
+        clobAutoRespond.set(false);
+
+        LiveTradingEngine engine = createTestEngine(250L);
+        try {
+            // 1. Startup 14s into Market 1 [1794239100, 1794240000]: PolyBolt sends 60s historical snapshot
+            // spanning previous candle (1794239055) through current candle (1794239100..1794239114)
+            long market1StartSec = 1_794_239_100L;
+            engine.discoverAndRotateMarket(market1StartSec + 14L);
+
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "snapshot": true,
+                      "payload": {
+                        "source": "chainlink",
+                        "symbol": "btcusd",
+                        "window_seconds": 60,
+                        "data": [
+                          {"full_accuracy_value": "90980.00", "value": 90980.00, "timestamp": 1794239055000},
+                          {"full_accuracy_value": "91000.00", "value": 91000.00, "timestamp": 1794239100000},
+                          {"full_accuracy_value": "91005.00", "value": 91005.00, "timestamp": 1794239114000}
+                        ]
+                      }
+                    }
+                    """, (market1StartSec + 14L) * 1000L);
+
+            engine.onRawClobFrame("""
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "timestamp": "1794239115000",
+                        "bids": [{"price": "0.54", "size": "250"}],
+                        "asks": [{"price": "0.55", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP), (market1StartSec + 15L) * 1000L);
+
+            assertThat(capturedLogs).noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
+            assertThat(engine.getPolyBoltMarketMessageCount()).isEqualTo(1L);
+            assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+
+            // 2. Rollover cleanly into Market 2 [1794240000, 1794240900]
+            long market2StartSec = 1_794_240_000L;
+            engine.discoverAndRotateMarket(market2StartSec);
+            capturedLogs.clear();
+
+            // Receive live messages during first 11s of Market 2
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "ts": 1794240000000,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "source": "chainlink",
+                        "window_seconds": 60,
+                        "value": 91020.00,
+                        "timestamp": 1794240000000
+                      }
+                    }
+                    """, market2StartSec * 1000L);
+            engine.onRawClobFrame("""
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "timestamp": "1794240005000",
+                        "bids": [{"price": "0.56", "size": "250"}],
+                        "asks": [{"price": "0.57", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP), (market2StartSec + 5L) * 1000L);
+
+            assertThat(engine.getPolyBoltMarketMessageCount()).isEqualTo(1L);
+            assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+
+            // 3. Exact production scenario (16:00:11 UTC): PolyBolt reconnects after code=4003 (draining)
+            // and delivers a 60s historical snapshot spanning 1794239952 (previous candle!) .. 1794240011
+            engine.onRawPolyBoltFrame("""
+                    {
+                      "channel": "price.crypto.twap",
+                      "snapshot": true,
+                      "payload": {
+                        "source": "chainlink",
+                        "symbol": "btcusd",
+                        "window_seconds": 60,
+                        "data": [
+                          {"full_accuracy_value": "90995.00", "value": 90995.00, "timestamp": 1794239952000},
+                          {"full_accuracy_value": "91020.00", "value": 91020.00, "timestamp": 1794240000000},
+                          {"full_accuracy_value": "91025.00", "value": 91025.00, "timestamp": 1794240011000}
+                        ]
+                      }
+                    }
+                    """, (market2StartSec + 11L) * 1000L + 797L);
+
+            // Counters MUST NOT be wiped to 0 and NO bogus SEVERE "missing WebSocket stream messages" error may fire
+            assertThat(capturedLogs).noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
+            assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+            assertThat(engine.getPolyBoltMarketMessageCount()).isGreaterThanOrEqualTo(1L);
+        } finally {
+            engineLogger.removeHandler(testHandler);
+            engine.onStop(null);
+        }
+    }
+
+    @Test
+    void shouldRecordPeerFailoverActiveOnSingleLegDisconnectAndErrorWhenBothStreamsDrop() {
+        List<LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
+        Logger engineLogger = Logger.getLogger(LiveTradingEngine.class.getName());
+        Handler testHandler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        engineLogger.addHandler(testHandler);
+
+        LiveTradingEngine engine = createTestEngine(250L);
+        try {
+            long marketStartSec = 1_794_240_900L;
+            engine.discoverAndRotateMarket(marketStartSec + 5L);
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(clobSockets).hasSizeGreaterThanOrEqualTo(2));
+
+            capturedLogs.clear();
+            // Close only socket #1 with code=1013 while socket #2 remains CONNECTED
+            clobSockets.getFirst().close((short) 1013, "slow consumer: send buffer full");
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        var disconnects = engine.getTelemetry().disconnectEvents();
+                        assertThat(disconnects).isNotEmpty();
+                        var event = disconnects.getFirst();
+                        assertThat(event.closeCode()).isEqualTo(1013);
+                        assertThat(event.failoverActive()).isTrue();
+                        assertThat(event.peerState()).isEqualTo("CONNECTED");
+                        assertThat(event.remoteAddress()).contains(":" + port);
+                    });
+
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().equals(Level.WARNING)
+                            && r.getMessage() != null
+                            && r.getMessage().contains("FAILOVER ACTIVE"));
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
+                            && r.getMessage() != null
+                            && r.getMessage().contains("BOTH CLOB STREAMS DOWN"));
+        } finally {
+            engineLogger.removeHandler(testHandler);
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(long maxQuoteAgeMs) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),

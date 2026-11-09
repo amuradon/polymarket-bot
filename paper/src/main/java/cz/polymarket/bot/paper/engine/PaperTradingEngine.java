@@ -427,8 +427,12 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         }
 
         long start = update.candleStart();
-        if (start != activeCandleStart.get()) {
-            if (activeCandleStart.get() > 0 && (currentSpotPrice > 0 || twapOpenPrice > 0)) {
+        long currentActiveStart = activeCandleStart.get();
+        if (currentActiveStart > 0L && start < currentActiveStart) {
+            return;
+        }
+        if (start != currentActiveStart) {
+            if (currentActiveStart > 0 && (currentSpotPrice > 0 || twapOpenPrice > 0)) {
                 double finalTwap = (update.point() != null && update.point().twap() != null)
                         ? update.point().twap().doubleValue()
                         : currentSpotPrice;
@@ -507,21 +511,26 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 ? activeStrategy.getTimeframe().getDurationSeconds()
                 : 900L;
         long candleStartSec = (effectiveTsMs / 1000L / durationSec) * durationSec;
+        long currentActiveStart = activeCandleStart.get();
+        if (currentActiveStart > 0L && candleStartSec < currentActiveStart) {
+            activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+            return;
+        }
 
-        if (activeCandleStart.get() > 0 && candleStartSec != activeCandleStart.get()) {
+        if (currentActiveStart > 0L && candleStartSec > currentActiveStart) {
             if (twapOpenPrice > 0.0) {
                 TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
                 resolveCandle(outcome, twapPrice);
             } else {
                 Log.warnf("Skipping candle resolution for interval %d: target price was missing from PolyBolt 60s TWAP stream",
-                        activeCandleStart.get());
+                        currentActiveStart);
                 openPositions.clear();
                 activePosition.set(null);
             }
             activeCandleStart.set(candleStartSec);
             activeCandleEnd.set(candleStartSec + durationSec);
             twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-        } else if (activeCandleStart.get() == 0) {
+        } else if (currentActiveStart == 0L) {
             activeCandleStart.set(candleStartSec);
             activeCandleEnd.set(candleStartSec + durationSec);
             twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;

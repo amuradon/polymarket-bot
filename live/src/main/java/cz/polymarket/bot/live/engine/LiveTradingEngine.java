@@ -110,6 +110,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicLong polyBoltMarketMsgCount = new AtomicLong(0L);
     private final AtomicLong clobMarketMsgCount = new AtomicLong(0L);
     private final AtomicLong lastEvaluatedMarketCycleStart = new AtomicLong(0L);
+    private final AtomicLong lastTwapOracleTimestampMs = new AtomicLong(0L);
+    private final AtomicLong lastCryptoPriceOracleTimestampMs = new AtomicLong(0L);
     private final AtomicLong debugPolyBoltBatchCounter = new AtomicLong(0L);
     private final AtomicLong debugClobBatchCounter = new AtomicLong(0L);
     private final AtomicBoolean balanceSyncRequested = new AtomicBoolean(false);
@@ -723,6 +725,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             }
 
             activeMarketInfo.set(nextMarket);
+            if (activeCandleStart.compareAndSet(0L, nextMarket.startSec())) {
+                activeCandleEnd.set(nextMarket.endSec());
+            }
             activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
             this.latestQuote = null;
             this.latestQuoteSlot.set(null);
@@ -805,6 +810,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         }
         for (PolyBoltTick tick : ticks) {
             if (tick.isTwap()) {
+                if (!tryAdvanceOracleTimestamp(lastTwapOracleTimestampMs, tick.oracleTimestampMs())) {
+                    continue;
+                }
                 onPolymarketCryptoTwap60s(
                         tick.timestampMs(),
                         tick.symbol(),
@@ -814,6 +822,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                         tick.oracleTimestampMs()
                 );
             } else {
+                if (!tryAdvanceOracleTimestamp(lastCryptoPriceOracleTimestampMs, tick.oracleTimestampMs())) {
+                    continue;
+                }
                 onPolymarketCryptoPrice(
                         tick.timestampMs(),
                         tick.symbol(),
@@ -821,6 +832,29 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                         tick.price(),
                         tick.oracleTimestampMs()
                 );
+            }
+        }
+    }
+
+    /**
+     * Atomically advances the monotonic oracle timestamp high-water mark for a PolyBolt feed,
+     * rejecting duplicate or out-of-order historical snapshot ticks delivered after reconnects.
+     *
+     * @param tracker           per-feed high-water mark atomic timestamp
+     * @param oracleTimestampMs incoming Chainlink oracle timestamp in epoch milliseconds
+     * @return {@code true} if the tick strictly advances the high-water mark (or has no timestamp), {@code false} if stale/duplicate
+     */
+    private static boolean tryAdvanceOracleTimestamp(AtomicLong tracker, long oracleTimestampMs) {
+        if (oracleTimestampMs <= 0L) {
+            return true;
+        }
+        while (true) {
+            long prev = tracker.get();
+            if (oracleTimestampMs <= prev) {
+                return false;
+            }
+            if (tracker.compareAndSet(prev, oracleTimestampMs)) {
+                return true;
             }
         }
     }
@@ -1379,10 +1413,15 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         long candleStartSec = (effectiveTsMs / 1000L / durationSeconds) * durationSeconds;
 
         synchronized (strategyLock) {
-            if (activeCandleStart.get() > 0L && candleStartSec != activeCandleStart.get()) {
-                long prevCandleStart = activeCandleStart.get();
+            long currentCandleStart = activeCandleStart.get();
+            if (currentCandleStart > 0L && candleStartSec < currentCandleStart) {
+                activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+                return;
+            }
+            if (currentCandleStart > 0L && candleStartSec > currentCandleStart) {
+                long prevCandleStart = currentCandleStart;
                 PolymarketMarketInfo currentMarket = activeMarketInfo.get();
-                String marketLabel = currentMarket != null
+                String marketLabel = (currentMarket != null && currentMarket.startSec() == prevCandleStart)
                         ? currentMarket.slug()
                         : PolymarketMarketInfo.buildMarketSlug(this.symbol, this.timeframe, prevCandleStart);
                 evaluateCompletedMarketStreamActivity(marketLabel, prevCandleStart);
@@ -1399,7 +1438,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 activeCandleStart.set(candleStartSec);
                 activeCandleEnd.set(candleStartSec + durationSeconds);
                 twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-            } else if (activeCandleStart.get() == 0L) {
+            } else if (currentCandleStart == 0L) {
                 activeCandleStart.set(candleStartSec);
                 activeCandleEnd.set(candleStartSec + durationSeconds);
                 twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
@@ -1524,6 +1563,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             polyBoltMarketMsgCount.set(0L);
             clobMarketMsgCount.set(0L);
             lastEvaluatedMarketCycleStart.set(0L);
+            lastTwapOracleTimestampMs.set(0L);
+            lastCryptoPriceOracleTimestampMs.set(0L);
             debugPolyBoltBatchCounter.set(0L);
             debugClobBatchCounter.set(0L);
             twapOpenPrice = 0.0;
@@ -1617,13 +1658,23 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         SystemTelemetrySnapshot sys = telemetryMonitor.getLatestOrSample(buildMonitoredThreadSpecs());
         double ioReaderCpu = extractThreadCpuPct(sys.threads(), 0);
         double clobWorkerCpu = extractThreadCpuPct(sys.threads(), 1);
+        PolymarketClobClient.MarketStreamRedundancyStatus redundancy =
+                clobWsClient.describeMarketStreamRedundancy(streamSnap.streamName());
+        String remoteLabel = streamSnap.remoteAddress() != null && !streamSnap.remoteAddress().isEmpty()
+                ? streamSnap.remoteAddress()
+                : "unknown";
+        String peerStateLabel = redundancy.dualMarketStream() ? redundancy.peerState().name() : "SINGLE_STREAM";
 
         WebSocketDisconnectEvent event = new WebSocketDisconnectEvent(
                 System.currentTimeMillis(),
                 streamSnap.streamName(),
+                streamSnap.remoteAddress() != null ? streamSnap.remoteAddress() : "",
                 streamSnap.lastCloseCode(),
                 streamSnap.lastCloseReason(),
                 streamSnap.reconnectCount(),
+                redundancy.peerStreamName(),
+                peerStateLabel,
+                redundancy.failoverActive(),
                 streamSnap.queueDepth(),
                 streamSnap.maxQueueDepth(),
                 streamSnap.lastQueueLagMs(),
@@ -1637,21 +1688,64 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 clobWorkerCpu
         );
         telemetryMonitor.recordDisconnectEvent(event);
-        Log.warnf("[%s] Recorded WebSocket disconnect forensics (code=%d, reason=%s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
-                event.streamName(),
-                event.closeCode(),
-                event.closeReason(),
-                event.queueDepthAtDisconnect(),
-                event.maxQueueDepth(),
-                event.lastQueueLagMs(),
-                event.maxQueueLagMs(),
-                event.lastProcessTimeUs(),
-                event.maxProcessTimeUs(),
-                event.tcpRxQueueBytes(),
-                event.tcpRcvCollapsed(),
-                event.processCpuLoadPct(),
-                event.ioReaderCpuPct(),
-                event.clobBookWorkerCpuPct());
+        if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
+            String peerRemote = redundancy.peerRemoteAddress().isEmpty() ? "unknown" : redundancy.peerRemoteAddress();
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, FAILOVER ACTIVE: peerStream=%s is %s @ %s — 0 ms stream outage, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+                    event.streamName(),
+                    remoteLabel,
+                    event.closeCode(),
+                    event.closeReason(),
+                    event.peerStreamName(),
+                    event.peerState(),
+                    peerRemote,
+                    event.queueDepthAtDisconnect(),
+                    event.maxQueueDepth(),
+                    event.lastQueueLagMs(),
+                    event.maxQueueLagMs(),
+                    event.lastProcessTimeUs(),
+                    event.maxProcessTimeUs(),
+                    event.tcpRxQueueBytes(),
+                    event.tcpRcvCollapsed(),
+                    event.processCpuLoadPct(),
+                    event.ioReaderCpuPct(),
+                    event.clobBookWorkerCpuPct());
+        } else if (redundancy.dualMarketStream()) {
+            Log.errorf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, BOTH CLOB STREAMS DOWN: peerStream=%s is %s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+                    event.streamName(),
+                    remoteLabel,
+                    event.closeCode(),
+                    event.closeReason(),
+                    event.peerStreamName(),
+                    event.peerState(),
+                    event.queueDepthAtDisconnect(),
+                    event.maxQueueDepth(),
+                    event.lastQueueLagMs(),
+                    event.maxQueueLagMs(),
+                    event.lastProcessTimeUs(),
+                    event.maxProcessTimeUs(),
+                    event.tcpRxQueueBytes(),
+                    event.tcpRcvCollapsed(),
+                    event.processCpuLoadPct(),
+                    event.ioReaderCpuPct(),
+                    event.clobBookWorkerCpuPct());
+        } else {
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, mode=SINGLE_STREAM, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+                    event.streamName(),
+                    remoteLabel,
+                    event.closeCode(),
+                    event.closeReason(),
+                    event.queueDepthAtDisconnect(),
+                    event.maxQueueDepth(),
+                    event.lastQueueLagMs(),
+                    event.maxQueueLagMs(),
+                    event.lastProcessTimeUs(),
+                    event.maxProcessTimeUs(),
+                    event.tcpRxQueueBytes(),
+                    event.tcpRcvCollapsed(),
+                    event.processCpuLoadPct(),
+                    event.ioReaderCpuPct(),
+                    event.clobBookWorkerCpuPct());
+        }
     }
 
     private void recordTelemetryHistorySnapshot(

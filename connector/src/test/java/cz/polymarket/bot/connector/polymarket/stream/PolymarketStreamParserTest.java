@@ -442,4 +442,33 @@ class PolymarketStreamParserTest {
         assertThat(parser.applyClobFrame("PING".getBytes(java.nio.charset.StandardCharsets.UTF_8), 2001L, localBook)).isEmpty();
         assertThat(parser.applyClobFrame("  pong  ".getBytes(java.nio.charset.StandardCharsets.UTF_8), 2002L, localBook)).isEmpty();
     }
+
+    @Test
+    void shouldSortPolyBoltSnapshotDataChronologicallyWhenDeliveredNewestFirst() {
+        String descendingSnapshotJson = """
+                {
+                  "channel": "price.crypto.twap",
+                  "snapshot": true,
+                  "payload": {
+                    "source": "chainlink",
+                    "symbol": "btcusd",
+                    "window_seconds": 60,
+                    "data": [
+                      {"full_accuracy_value": "91015.00000000", "value": 91015.00, "timestamp": 1794240011000},
+                      {"full_accuracy_value": "91005.00000000", "value": 91005.00, "timestamp": 1794240000000},
+                      {"full_accuracy_value": "90990.00000000", "value": 90990.00, "timestamp": 1794239952000}
+                    ]
+                  }
+                }
+                """;
+
+        List<PolyBoltTick> ticks = parser.parsePolyBoltFrame(descendingSnapshotJson, 1794240011797L);
+        assertThat(ticks).hasSize(3);
+        assertThat(ticks)
+                .extracting(PolyBoltTick::oracleTimestampMs)
+                .containsExactly(1794239952000L, 1794240000000L, 1794240011000L);
+        assertThat(ticks)
+                .extracting(PolyBoltTick::price)
+                .containsExactly(90990.00, 91005.00, 91015.00);
+    }
 }

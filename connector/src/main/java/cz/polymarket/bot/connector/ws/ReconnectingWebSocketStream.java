@@ -71,6 +71,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicLong coalescedFramesCount = new AtomicLong(0L);
     private final AtomicInteger lastCloseCode = new AtomicInteger(0);
     private final AtomicReference<String> lastCloseReason = new AtomicReference<>("");
+    private final AtomicReference<String> lastRemoteAddress = new AtomicReference<>("");
     private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
 
     private volatile String dedicatedIoThreadName;
@@ -485,6 +486,15 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
+     * Returns the remote endpoint address ({@code IP:port}) of the current or most recent connection, or {@code ""}.
+     *
+     * @return remote socket address string
+     */
+    public String getRemoteAddress() {
+        return lastRemoteAddress.get();
+    }
+
+    /**
      * Returns an immutable point-in-time snapshot of this stream's queue depth, latency, and connection telemetry.
      *
      * @return {@link WebSocketStreamTelemetry} snapshot
@@ -497,6 +507,7 @@ public class ReconnectingWebSocketStream {
         return new WebSocketStreamTelemetry(
                 streamName,
                 state.get(),
+                lastRemoteAddress.get(),
                 Math.max(0, inboundQueue.size()),
                 maxQueueDepth.get(),
                 lastQueueLagMs.get(),
@@ -544,9 +555,11 @@ public class ReconnectingWebSocketStream {
                         applyDedicatedIoThreadTuning(currentThread);
                         this.ioReaderThread = currentThread;
                         this.currentWebSocket = ws;
+                        String remote = ws.remoteAddress() != null ? ws.remoteAddress().toString() : "";
+                        this.lastRemoteAddress.set(remote);
                         this.state.set(ConnectionState.CONNECTED);
-                        Log.infof("[%s] WebSocket connected to %s on thread %s (reconnectCount=%d)",
-                                streamName, wsUrl, currentThread.getName(), reconnectCount.get());
+                        Log.infof("[%s] WebSocket connected to %s (remote=%s) on thread %s (reconnectCount=%d)",
+                                streamName, wsUrl, remote.isEmpty() ? "unknown" : remote, currentThread.getName(), reconnectCount.get());
 
                         final Buffer[] continuationBuffer = new Buffer[1];
 
@@ -604,8 +617,9 @@ public class ReconnectingWebSocketStream {
                                 long nextDelayMs = computeNextReconnectDelayMs(
                                         consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
                                 WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
-                                Log.errorf("[%s] WebSocket connection closed unexpectedly (code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
-                                        streamName, closeCode, closeReason,
+                                String remoteLabel = eventSnapshot.remoteAddress().isEmpty() ? "unknown" : eventSnapshot.remoteAddress();
+                                Log.errorf("[%s] WebSocket connection closed unexpectedly (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                                        streamName, remoteLabel, closeCode, closeReason,
                                         eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
                                         eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
                                         eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),

@@ -12,6 +12,7 @@ import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
+import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -82,7 +83,11 @@ public class PolymarketClobClient {
         this.sharedVertx = vertx;
         this.clobMarketVertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true));
+                .setPreferNativeTransport(true)
+                .setAddressResolverOptions(new AddressResolverOptions()
+                        .setRoundRobinInetAddress(true)
+                        .setRotateServers(true)
+                        .setCacheMaxTimeToLive(60)));
         if (!this.clobMarketVertx.isNativeTransportEnabled()) {
             Log.warnf("Native Linux Epoll transport is unavailable on clobMarketVertx (os=%s); falling back to JDK NIO EventLoop",
                     System.getProperty("os.name", "unknown"));
@@ -494,6 +499,63 @@ public class PolymarketClobClient {
             result.add(currentUser.getTelemetrySnapshot());
         }
         return result;
+    }
+
+    /**
+     * Describes the real-time failover state of the peer WebSocket connection when one leg of a dual
+     * Active-Active CLOB market stream disconnects.
+     *
+     * @param dualMarketStream  {@code true} if the stream belongs to a dual Active-Active market subscription
+     * @param peerStreamName    identifier of the peer stream (or {@code ""} if single-leg stream)
+     * @param peerState         current connection state of the peer stream
+     * @param peerRemoteAddress remote endpoint address ({@code IP:port}) of the peer stream
+     * @param failoverActive    {@code true} if the peer stream is currently {@link ConnectionState#CONNECTED}
+     */
+    public record MarketStreamRedundancyStatus(
+            boolean dualMarketStream,
+            String peerStreamName,
+            ConnectionState peerState,
+            String peerRemoteAddress,
+            boolean failoverActive
+    ) {
+        /**
+         * Sentinel status for single-leg streams (such as {@code USER} or PolyBolt streams) without a dual peer.
+         */
+        public static final MarketStreamRedundancyStatus NONE = new MarketStreamRedundancyStatus(
+                false, "", ConnectionState.DISCONNECTED, "", false
+        );
+    }
+
+    /**
+     * Evaluates the live connection state of the peer leg for a dual Active-Active market WebSocket stream
+     * (e.g. {@code POLYMARKET-CLOB-<slug>} vs {@code POLYMARKET-CLOB-<slug>-BACKUP}).
+     *
+     * @param streamName identifier of the stream that disconnected
+     * @return {@link MarketStreamRedundancyStatus} describing whether the peer stream is actively covering failover
+     */
+    public MarketStreamRedundancyStatus describeMarketStreamRedundancy(String streamName) {
+        if (streamName == null || !streamName.startsWith("POLYMARKET-CLOB-") || "POLYMARKET-CLOB-USER".equals(streamName)) {
+            return MarketStreamRedundancyStatus.NONE;
+        }
+        String suffix = streamName.substring("POLYMARKET-CLOB-".length());
+        ReconnectingWebSocketStream peer;
+        if (suffix.endsWith("-BACKUP")) {
+            String marketSlug = suffix.substring(0, suffix.length() - "-BACKUP".length());
+            peer = marketStreams.get(marketSlug);
+        } else {
+            peer = backupMarketStreams.get(suffix);
+        }
+        if (peer == null) {
+            return MarketStreamRedundancyStatus.NONE;
+        }
+        ConnectionState peerState = peer.getState();
+        return new MarketStreamRedundancyStatus(
+                true,
+                peer.getStreamName(),
+                peerState,
+                peer.getRemoteAddress(),
+                peerState == ConnectionState.CONNECTED
+        );
     }
 
     /**

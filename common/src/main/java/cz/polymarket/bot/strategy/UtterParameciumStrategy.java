@@ -324,13 +324,17 @@ public class UtterParameciumStrategy implements TradingStrategy {
         if (price <= 0.0 || timestampMs <= 0L) {
             return;
         }
+        if (lastChainlinkTickMs > 0L && timestampMs <= lastChainlinkTickMs) {
+            return;
+        }
         ensureActiveCandle(timestampMs);
         maybeRefreshBalanceBeforeActivation(timestampMs);
         long priceCents = Math.round(price * 100.0);
         recordChainlinkSample(timestampMs, priceCents);
 
-        if (latestValidQuote != null) {
-            evaluateEntry(timestampMs, latestValidQuote);
+        OrderBookQuote quote = this.latestValidQuote;
+        if (quote != null && (quote.timestampMs() <= 0L || timestampMs + 2_000L >= quote.timestampMs())) {
+            evaluateEntry(timestampMs, quote);
         }
     }
 

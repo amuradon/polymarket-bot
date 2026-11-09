@@ -551,4 +551,38 @@ class PaperTradingEngineTest {
 
         assertThat(engine.getOpenPositions()).hasSize(1);
     }
+
+    @Test
+    void shouldIgnoreOutOfOrderOlderCandleTwapTicksWithoutRollingActiveCandleBackwards() {
+        PaperTradingEngine engine = new PaperTradingEngine(
+                registry,
+                repository,
+                null,
+                priceCache,
+                "utter_paramecium",
+                0L,
+                vertx,
+                binanceHistoricalClient
+        );
+
+        long activeStartSec = 1_794_240_000L;
+        long activeStartMs = activeStartSec * 1000L;
+
+        engine.onPolymarketCryptoTwap60s(activeStartMs, "btcusd", "chainlink", 85_000.0, 60, activeStartMs);
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(85_000.0);
+
+        engine.submitOrder(new OrderCommand(
+                "up-hold-1", "0xMarket15m", "BTC-UP",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.55), BigDecimal.valueOf(20.0)
+        ));
+        assertThat(engine.getOpenPositions()).hasSize(1);
+
+        long priorCandleTickMs = (activeStartSec - 48L) * 1000L;
+        engine.onPolymarketCryptoTwap60s(priorCandleTickMs, "btcusd", "chainlink", 84_950.0, 60, priorCandleTickMs);
+        engine.onPolymarketCryptoTwap60s(activeStartMs + 11_000L, "btcusd", "chainlink", 85_010.0, 60, activeStartMs + 11_000L);
+
+        assertThat(engine.getOpenPositions()).hasSize(1);
+        assertThat(repository.getTrades()).isEmpty();
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(85_000.0);
+    }
 }

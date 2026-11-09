@@ -422,6 +422,7 @@
                     <tr>
                         <th>Stream Name</th>
                         <th>State</th>
+                        <th>Remote Edge</th>
                         <th>Queue Depth (Cur / Max)</th>
                         <th>Queue Lag (Cur / Max)</th>
                         <th>Batch Process (Cur / Max)</th>
@@ -437,6 +438,9 @@
                             <td><strong>{s.streamName}</strong></td>
                             <td>
                                 <span class="badge {#if s.state == 'CONNECTED'}badge-up{#else}badge-armed{/if}">{s.state}</span>
+                            </td>
+                            <td style="color: var(--text-secondary);">
+                                {#if s.remoteAddress.isEmpty}—{#else}{s.remoteAddress}{/if}
                             </td>
                             <td class="{#if s.queueDepth > 50}text-red{#else if s.maxQueueDepth > 100}text-orange{#else}text-green{/if}">
                                 {s.queueDepth} / {s.maxQueueDepth}
@@ -475,7 +479,9 @@
                     <tr>
                         <th>Timestamp (ms)</th>
                         <th>Stream Name</th>
+                        <th>Remote Edge</th>
                         <th>Close Code &amp; Reason</th>
+                        <th>Failover Status</th>
                         <th>Reconnects</th>
                         <th>Queue Depth (At Close / Max)</th>
                         <th>Queue Lag (Last / Max)</th>
@@ -489,8 +495,20 @@
                         <tr>
                             <td>{d.timestampMs}</td>
                             <td><strong>{d.streamName}</strong></td>
+                            <td style="color: var(--text-secondary);">
+                                {#if d.remoteAddress.isEmpty}—{#else}{d.remoteAddress}{/if}
+                            </td>
                             <td class="{#if d.closeCode == 1013}text-red{#else}text-orange{/if}">
                                 {d.closeCode} ({d.closeReason})
+                            </td>
+                            <td>
+                                {#if d.failoverActive}
+                                    <span class="badge badge-up">FAILOVER ACTIVE ({d.peerState})</span>
+                                {#else if d.peerState == 'SINGLE_STREAM'}
+                                    <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-secondary);">SINGLE STREAM</span>
+                                {#else}
+                                    <span class="badge badge-down">BOTH DOWN ({d.peerState})</span>
+                                {/if}
                             </td>
                             <td>{d.reconnectCount}</td>
                             <td>{d.queueDepthAtDisconnect} / {d.maxQueueDepth}</td>

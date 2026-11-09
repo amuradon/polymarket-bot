@@ -9,6 +9,7 @@ import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
+import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -75,7 +76,11 @@ public class PolymarketPolyBoltClient {
             long pingIntervalMs) {
         this.polyBoltVertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true));
+                .setPreferNativeTransport(true)
+                .setAddressResolverOptions(new AddressResolverOptions()
+                        .setRoundRobinInetAddress(true)
+                        .setRotateServers(true)
+                        .setCacheMaxTimeToLive(60)));
         if (!this.polyBoltVertx.isNativeTransportEnabled()) {
             Log.warnf("Native Linux Epoll transport is unavailable on polyBoltVertx (os=%s); falling back to JDK NIO EventLoop",
                     System.getProperty("os.name", "unknown"));

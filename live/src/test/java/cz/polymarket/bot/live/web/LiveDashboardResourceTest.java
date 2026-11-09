@@ -64,6 +64,7 @@ class LiveDashboardResourceTest {
         engine.onStreamUnexpectedDisconnect(new WebSocketStreamTelemetry(
                 "POLYMARKET-CLOB-btc-updown-15m-1794207600",
                 ConnectionState.RECONNECTING,
+                "198.51.100.47:443",
                 4,
                 150,
                 1L,
@@ -94,8 +95,18 @@ class LiveDashboardResourceTest {
                 .body("history", hasSize(greaterThanOrEqualTo(1)))
                 .body("disconnectEvents", hasSize(greaterThanOrEqualTo(1)))
                 .body("disconnectEvents[0].streamName", equalTo("POLYMARKET-CLOB-btc-updown-15m-1794207600"))
+                .body("disconnectEvents[0].remoteAddress", equalTo("198.51.100.47:443"))
                 .body("disconnectEvents[0].closeCode", equalTo(1013))
-                .body("disconnectEvents[0].closeReason", equalTo("slow consumer: send buffer full"));
+                .body("disconnectEvents[0].closeReason", equalTo("slow consumer: send buffer full"))
+                .body("disconnectEvents[0].peerState", notNullValue());
+
+        given()
+                .when().get("/")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.HTML)
+                .body(containsString("Failover Status"))
+                .body(containsString("198.51.100.47:443"));
     }
 
     @Test

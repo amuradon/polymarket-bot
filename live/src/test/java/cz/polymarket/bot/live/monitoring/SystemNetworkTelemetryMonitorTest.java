@@ -136,9 +136,13 @@ class SystemNetworkTelemetryMonitorTest {
             monitor.recordDisconnectEvent(new WebSocketDisconnectEvent(
                     1_700_000_000_000L + i * 1_000L,
                     "POLYMARKET-CLOB-btc-updown-15m-" + i,
+                    "198.51.100.10:443",
                     1013,
                     "slow consumer: send buffer full",
                     i + 1L,
+                    "POLYMARKET-CLOB-btc-updown-15m-" + i + "-BACKUP",
+                    "CONNECTED",
+                    true,
                     3,
                     150,
                     1L,

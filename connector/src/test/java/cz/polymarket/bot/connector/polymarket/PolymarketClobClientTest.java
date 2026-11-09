@@ -212,10 +212,26 @@ class PolymarketClobClientTest {
 
         List<WebSocketStreamTelemetry> telemetries = client.getStreamTelemetries();
         assertThat(telemetries).hasSize(2);
+        assertThat(telemetries)
+                .allSatisfy(snap -> assertThat(snap.remoteAddress()).contains(":" + port));
         long totalCoalescedOrDeduped = telemetries.stream()
                 .mapToLong(WebSocketStreamTelemetry::coalescedFramesCount)
                 .sum();
         assertThat(totalCoalescedOrDeduped).isGreaterThanOrEqualTo(1L);
+
+        // Verify peer redundancy lookup while BACKUP is CONNECTED
+        PolymarketClobClient.MarketStreamRedundancyStatus primaryRedundancy =
+                client.describeMarketStreamRedundancy("POLYMARKET-CLOB-" + slug);
+        assertThat(primaryRedundancy.dualMarketStream()).isTrue();
+        assertThat(primaryRedundancy.peerStreamName()).isEqualTo("POLYMARKET-CLOB-" + slug + "-BACKUP");
+        assertThat(primaryRedundancy.peerState()).isEqualTo(ConnectionState.CONNECTED);
+        assertThat(primaryRedundancy.peerRemoteAddress()).contains(":" + port);
+        assertThat(primaryRedundancy.failoverActive()).isTrue();
+
+        assertThat(client.describeMarketStreamRedundancy("POLYMARKET-CLOB-USER"))
+                .isEqualTo(PolymarketClobClient.MarketStreamRedundancyStatus.NONE);
+        assertThat(client.describeMarketStreamRedundancy("POLYMARKET-POLYBOLT-TWAP"))
+                .isEqualTo(PolymarketClobClient.MarketStreamRedundancyStatus.NONE);
 
         // Closing the market stream and opening a new market must not leak reconnectCount into the new market
         client.closeMarketStream(slug);

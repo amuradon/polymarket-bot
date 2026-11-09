@@ -479,4 +479,37 @@ class UtterParameciumStrategyTest {
         OrderCommand zCappedOrder = submittedOrders.get(1);
         assertThat(zCappedOrder.price()).isEqualByComparingTo("0.790");
     }
+
+    @Test
+    @DisplayName("Should ignore duplicate or older crypto price ticks and block historical snapshot evaluation against newer live quote")
+    void shouldIgnoreDuplicateOrOlderCryptoPriceTicksAndBlockHistoricalSnapshotEvaluation() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        long tau20Ms = CANDLE_END_MS - 20_000L;
+        long tau50Ms = CANDLE_END_MS - 50_000L;
+        long tau49Ms = CANDLE_END_MS - 49_000L;
+        long tau48Ms = CANDLE_END_MS - 48_000L;
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.52, 0.50, 0.52, 0.50, 500.0, 500.0, 0.51, 0.51, tau20Ms
+        ));
+        strategy.onPolymarketCryptoPrice(tau50Ms, "btcusd", "chainlink", 90_080.00, tau50Ms);
+        assertThat(strategy.getLastChainlinkPriceCents()).isEqualTo(9_008_000L);
+        assertThat(submittedOrders).isEmpty();
+
+        strategy.onPolymarketCryptoPrice(tau49Ms, "btcusd", "chainlink", 89_920.00, tau49Ms);
+        strategy.onPolymarketCryptoPrice(tau48Ms, "btcusd", "chainlink", 90_000.00, tau48Ms);
+        strategy.onPolymarketCryptoPrice(tau20Ms, "btcusd", "chainlink", 90_000.00, tau20Ms);
+        assertThat(strategy.getLastChainlinkPriceCents()).isEqualTo(9_000_000L);
+        assertThat(submittedOrders).isEmpty();
+
+        long tau35Ms = CANDLE_END_MS - 35_000L;
+        strategy.onPolymarketCryptoPrice(tau35Ms, "btcusd", "chainlink", 90_095.00, tau35Ms);
+        strategy.onPolymarketCryptoPrice(tau20Ms, "btcusd", "chainlink", 90_095.00, tau20Ms);
+        assertThat(strategy.getLastChainlinkPriceCents()).isEqualTo(9_000_000L);
+        assertThat(submittedOrders).isEmpty();
+
+        long tau19Ms = CANDLE_END_MS - 19_000L;
+        strategy.onPolymarketCryptoPrice(tau19Ms, "btcusd", "chainlink", 90_080.00, tau19Ms);
+        assertThat(submittedOrders).hasSize(1);
+    }
 }
