@@ -109,8 +109,9 @@ Resources:
 
               # Tune Linux kernel TCP receive buffer auto-tuning for high-frequency Polymarket CLOB WebSocket bursts
               cat << 'EOF' > /etc/sysctl.d/99-polymarket-network.conf
+              net.core.rmem_default = 16777216
               net.core.rmem_max = 33554432
-              net.ipv4.tcp_rmem = 4096 262144 33554432
+              net.ipv4.tcp_rmem = 4096 16777216 33554432
               net.ipv4.tcp_moderate_rcvbuf = 1
               EOF
               sysctl --system || true

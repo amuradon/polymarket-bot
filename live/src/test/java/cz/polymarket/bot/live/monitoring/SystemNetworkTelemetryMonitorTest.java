@@ -82,6 +82,32 @@ class SystemNetworkTelemetryMonitorTest {
     }
 
     @Test
+    void shouldResetBaselineWhenMonitoredThreadTransitionsFromNullToLiveThreadWithoutFalse100PercentSpike() throws Exception {
+        SystemNetworkTelemetryMonitor monitor = new SystemNetworkTelemetryMonitor();
+        Thread current = Thread.currentThread();
+
+        // Sample 1: I/O Reader thread is not yet assigned (null)
+        List<MonitoredThreadSpec> beforeConnect = List.of(
+                new MonitoredThreadSpec("vCPU #1: I/O Reader", "clob-ws-io-reader", null, -1L)
+        );
+        monitor.sample(beforeConnect);
+
+        Thread.sleep(60L);
+
+        // Sample 2: I/O Reader thread transitions from null to current thread (which already has cumulative CPU & busy time)
+        List<MonitoredThreadSpec> onConnect = List.of(
+                new MonitoredThreadSpec("vCPU #1: I/O Reader", "clob-ws-io-reader", current, 5_000_000_000L)
+        );
+        SystemTelemetrySnapshot afterTransition = monitor.sample(onConnect);
+
+        // Must establish baseline on transition rather than dividing 5s cumulative busy time by 60ms wall time (which would latch 100%)
+        assertThat(afterTransition.threads().getFirst().cpuUtilizationPct()).isZero();
+        assertThat(afterTransition.threads().getFirst().maxCpuUtilizationPct()).isZero();
+        assertThat(afterTransition.threads().getFirst().busyDutyCyclePct()).isZero();
+        assertThat(afterTransition.threads().getFirst().maxBusyDutyCyclePct()).isZero();
+    }
+
+    @Test
     void shouldMaintainBoundedRingBuffersForHistoryPointsAndDisconnectEvents() {
         SystemNetworkTelemetryMonitor monitor = new SystemNetworkTelemetryMonitor();
 

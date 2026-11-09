@@ -2,8 +2,11 @@ package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.ServerWebSocket;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +16,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -139,6 +143,91 @@ class PolymarketClobClientTest {
 
         client.closeUserStream();
         assertThat(client.getConnectionStates()).doesNotContainKey(PolymarketClobClient.USER_STREAM_KEY);
+        client.stopAll();
+    }
+
+    @Test
+    void shouldMaintainDualActiveActiveStreamsWithDeduplicationAndZeroInterruptionOnPrimaryDisconnect() throws Exception {
+        List<ServerWebSocket> activeServerSockets = new CopyOnWriteArrayList<>();
+        AtomicInteger subscribedSocketCount = new AtomicInteger(0);
+
+        String duplicateFrame1 = """
+                {"event_type":"price_change","price_changes":[{"asset_id":"token_up_1","price":"0.52","size":"100","side":"BUY"}],"timestamp":"1794221100100"}
+                """.strip();
+        String backupOnlyFrame2 = """
+                {"event_type":"price_change","price_changes":[{"asset_id":"token_up_1","price":"0.54","size":"150","side":"BUY"}],"timestamp":"1794221100200"}
+                """.strip();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    activeServerSockets.add(ws);
+                    ws.textMessageHandler(msg -> {
+                        if (msg.contains("token_up_1")) {
+                            int count = subscribedSocketCount.incrementAndGet();
+                            // Both PRIMARY and BACKUP streams receive the exact same initial frame
+                            ws.writeTextMessage(duplicateFrame1);
+                            if (count == 2) {
+                                // Simulate upstream 1013 disconnect on socket #1 while socket #2 keeps streaming
+                                ServerWebSocket primaryWs = activeServerSockets.get(0);
+                                ServerWebSocket backupWs = activeServerSockets.get(1);
+                                vertx.setTimer(30L, id -> {
+                                    primaryWs.close((short) 1013, "slow consumer: send buffer full");
+                                    backupWs.writeTextMessage(backupOnlyFrame2);
+                                });
+                            }
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                "ws://localhost:" + port + "/ws/market",
+                3000L,
+                0L
+        );
+
+        String slug = "btc-updown-15m-1794221100";
+        List<String> deliveredUniquePayloads = new CopyOnWriteArrayList<>();
+        client.openMarketStreamBatch(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                batch -> {
+                    for (TimestampedFrame frame : batch) {
+                        deliveredUniquePayloads.add(frame.rawText());
+                    }
+                },
+                null
+        );
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(subscribedSocketCount.get()).isGreaterThanOrEqualTo(2);
+                    // Market state stays CONNECTED seamlessly via BACKUP stream
+                    assertThat(client.getConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+                    // Duplicate frame 1 must be delivered ONLY ONCE, followed by backupOnlyFrame2
+                    assertThat(deliveredUniquePayloads).containsExactly(duplicateFrame1, backupOnlyFrame2);
+                });
+
+        List<WebSocketStreamTelemetry> telemetries = client.getStreamTelemetries();
+        assertThat(telemetries).hasSize(2);
+        long totalCoalescedOrDeduped = telemetries.stream()
+                .mapToLong(WebSocketStreamTelemetry::coalescedFramesCount)
+                .sum();
+        assertThat(totalCoalescedOrDeduped).isGreaterThanOrEqualTo(1L);
+
+        // Closing the market stream and opening a new market must not leak reconnectCount into the new market
+        client.closeMarketStream(slug);
+        String nextSlug = "btc-updown-15m-1794222000";
+        client.openMarketStreamBatch(nextSlug, List.of("token_up_2", "token_down_2"), batch -> {
+        }, null);
+
+        for (WebSocketStreamTelemetry nextSnap : client.getStreamTelemetries()) {
+            assertThat(nextSnap.reconnectCount()).isZero();
+            assertThat(nextSnap.lastCloseCode()).isZero();
+        }
+
         client.stopAll();
     }
 }

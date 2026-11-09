@@ -53,16 +53,10 @@ public class PolymarketClobClient {
     private final long pingIntervalMs;
 
     private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
+    private final Map<String, ReconnectingWebSocketStream> backupMarketStreams = new ConcurrentHashMap<>();
+    private final Map<String, PayloadDeduplicator> marketDeduplicators = new ConcurrentHashMap<>();
     private volatile ReconnectingWebSocketStream userStream;
     private volatile WebSocketDisconnectListener disconnectListener;
-
-    // Cumulative telemetry preserved across 15m market stream rotations
-    private long historicalMarketReconnects = 0L;
-    private int lastMarketCloseCode = 0;
-    private String lastMarketCloseReason = "";
-    private int historicalMaxQueueDepth = 0;
-    private long historicalMaxQueueLagMs = 0L;
-    private long historicalMaxProcessTimeUs = 0L;
 
     /**
      * Constructs the Polymarket CLOB WebSocket client with a dedicated 1-thread Vert.x instance
@@ -135,6 +129,9 @@ public class PolymarketClobClient {
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             stream.setDisconnectListener(disconnectListener);
         }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            backup.setDisconnectListener(disconnectListener);
+        }
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
             currentUser.setDisconnectListener(disconnectListener);
@@ -173,26 +170,22 @@ public class PolymarketClobClient {
         );
         stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
         stream.setDisconnectListener(this.disconnectListener);
-        stream.seedHistoricalTelemetry(
-                historicalMarketReconnects,
-                lastMarketCloseCode,
-                lastMarketCloseReason,
-                historicalMaxQueueDepth,
-                historicalMaxQueueLagMs,
-                historicalMaxProcessTimeUs
-        );
         marketStreams.put(marketSlug, stream);
         Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
         stream.start();
     }
 
     /**
-     * Opens a dedicated CLOB WebSocket connection for a single market with batch-draining listener support,
-     * optionally bound to an external dedicated worker thread (e.g. {@code clob-book-worker}).
+     * Opens a dual Active-Active pair of CLOB WebSocket connections ({@code PRIMARY} and {@code BACKUP})
+     * for a single market with pre-parse {@code rawUtf8Bytes} fingerprint deduplication and batch-draining
+     * listener support, optionally bound to an external dedicated worker thread (e.g. {@code clob-book-worker}).
+     * <p>
+     * Maintaining two independent WebSocket connections ensures {@code 0 ms} orderbook interruption if one
+     * connection experiences an upstream CDN/proxy micro-stall or {@code code=1013} disconnect.
      *
      * @param marketSlug     Polymarket market slug
      * @param tokenIds       CLOB asset token IDs belonging to the market
-     * @param batchListener  listener invoked with drained chronological frame batches
+     * @param batchListener  listener invoked with deduplicated chronological frame batches
      * @param externalWorker optional dedicated platform worker thread to unpark on frame arrival
      */
     public synchronized void openMarketStreamBatch(
@@ -207,38 +200,79 @@ public class PolymarketClobClient {
             return;
         }
         String subPayload = buildSubscriptionPayload(tokenIds);
-        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+        PayloadDeduplicator deduplicator = new PayloadDeduplicator();
+        marketDeduplicators.put(marketSlug, deduplicator);
+
+        ReconnectingWebSocketStream[] primaryHolder = new ReconnectingWebSocketStream[1];
+        ReconnectingWebSocketStream[] backupHolder = new ReconnectingWebSocketStream[1];
+
+        RawWebSocketBatchListener primaryDedupListener = batch ->
+                dispatchDeduplicatedBatch(batch, primaryHolder[0], deduplicator, batchListener);
+        RawWebSocketBatchListener backupDedupListener = batch ->
+                dispatchDeduplicatedBatch(batch, backupHolder[0], deduplicator, batchListener);
+
+        ReconnectingWebSocketStream primaryStream = new ReconnectingWebSocketStream(
                 clobMarketVertx,
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
                 null,
-                batchListener,
+                primaryDedupListener,
                 reconnectDelayMs,
                 pingIntervalMs,
                 "PING"
         );
-        stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
-        stream.setDisconnectListener(this.disconnectListener);
-        stream.seedHistoricalTelemetry(
-                historicalMarketReconnects,
-                lastMarketCloseCode,
-                lastMarketCloseReason,
-                historicalMaxQueueDepth,
-                historicalMaxQueueLagMs,
-                historicalMaxProcessTimeUs
+        primaryHolder[0] = primaryStream;
+        primaryStream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        primaryStream.setDisconnectListener(this.disconnectListener);
+
+        ReconnectingWebSocketStream backupStream = new ReconnectingWebSocketStream(
+                clobMarketVertx,
+                "POLYMARKET-CLOB-" + marketSlug + "-BACKUP",
+                wsUrl,
+                () -> List.of(subPayload),
+                null,
+                backupDedupListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                "PING"
         );
+        backupHolder[0] = backupStream;
+        backupStream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        backupStream.setDisconnectListener(this.disconnectListener);
+
         if (externalWorker != null) {
-            stream.bindExternalWorker(externalWorker);
+            primaryStream.bindExternalWorker(externalWorker);
+            backupStream.bindExternalWorker(externalWorker);
         }
-        marketStreams.put(marketSlug, stream);
-        Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d, batchMode=true)", marketSlug, tokenIds.size());
-        stream.start();
+        marketStreams.put(marketSlug, primaryStream);
+        backupMarketStreams.put(marketSlug, backupStream);
+        Log.infof("Opening dual Active-Active Polymarket CLOB WebSocket streams for market %s (tokens=%d, batchMode=true)",
+                marketSlug, tokenIds.size());
+        primaryStream.start();
+        backupStream.start();
+    }
+
+    private static void dispatchDeduplicatedBatch(
+            List<TimestampedFrame> batch,
+            ReconnectingWebSocketStream sourceStream,
+            PayloadDeduplicator deduplicator,
+            RawWebSocketBatchListener delegate) {
+        if (delegate == null || batch == null || batch.isEmpty()) {
+            return;
+        }
+        List<TimestampedFrame> uniqueBatch = deduplicator.filterUnique(batch);
+        int duplicatesSkipped = batch.size() - uniqueBatch.size();
+        if (duplicatesSkipped > 0 && sourceStream != null) {
+            sourceStream.addCoalescedFrames(duplicatesSkipped);
+        }
+        if (!uniqueBatch.isEmpty()) {
+            delegate.onMessageBatch(uniqueBatch);
+        }
     }
 
     /**
-     * Disconnects and removes the CLOB WebSocket stream for a market that has finished and resolved,
-     * preserving its high-water mark and reconnect telemetry for subsequent market rotations.
+     * Disconnects and removes both primary and backup CLOB WebSocket streams for a market that has finished.
      *
      * @param marketSlug Polymarket market slug to disconnect
      */
@@ -246,22 +280,17 @@ public class PolymarketClobClient {
         if (marketSlug == null) {
             return;
         }
-        ReconnectingWebSocketStream stream = marketStreams.remove(marketSlug);
-        if (stream != null) {
-            WebSocketStreamTelemetry snap = stream.getTelemetrySnapshot();
-            historicalMarketReconnects = Math.max(historicalMarketReconnects, snap.reconnectCount());
-            if (snap.lastCloseCode() != 0 && (snap.lastCloseCode() != -1 || lastMarketCloseCode == 0)) {
-                lastMarketCloseCode = snap.lastCloseCode();
-            }
-            if (snap.lastCloseReason() != null && !snap.lastCloseReason().isEmpty()
-                    && (!"none".equals(snap.lastCloseReason()) || lastMarketCloseReason.isEmpty())) {
-                lastMarketCloseReason = snap.lastCloseReason();
-            }
-            historicalMaxQueueDepth = Math.max(historicalMaxQueueDepth, snap.maxQueueDepth());
-            historicalMaxQueueLagMs = Math.max(historicalMaxQueueLagMs, snap.maxQueueLagMs());
-            historicalMaxProcessTimeUs = Math.max(historicalMaxProcessTimeUs, snap.maxProcessTimeUs());
-            Log.infof("Closing Polymarket CLOB WebSocket stream for market %s", marketSlug);
-            stream.stop();
+        marketDeduplicators.remove(marketSlug);
+        ReconnectingWebSocketStream primary = marketStreams.remove(marketSlug);
+        ReconnectingWebSocketStream backup = backupMarketStreams.remove(marketSlug);
+        if (primary != null || backup != null) {
+            Log.infof("Closing Polymarket CLOB WebSocket stream(s) for market %s", marketSlug);
+        }
+        if (primary != null) {
+            primary.stop();
+        }
+        if (backup != null) {
+            backup.stop();
         }
     }
 
@@ -340,7 +369,7 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Drains all currently queued frames across active market CLOB streams into {@code scratchBatch}.
+     * Drains all currently queued frames across active primary and backup market CLOB streams into {@code scratchBatch}.
      * Called on the dedicated {@code clob-book-worker} thread.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
@@ -350,6 +379,9 @@ public class PolymarketClobClient {
         int total = 0;
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             total += stream.drainAvailableBatch(scratchBatch);
+        }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            total += backup.drainAvailableBatch(scratchBatch);
         }
         return total;
     }
@@ -367,13 +399,18 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns whether any active market CLOB stream currently has frames waiting in its inbound queue.
+     * Returns whether any active primary or backup market CLOB stream currently has frames waiting in its inbound queue.
      *
      * @return {@code true} if any market stream queue is non-empty
      */
     public boolean hasQueuedMarketFrames() {
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             if (stream.hasQueuedFrames()) {
+                return true;
+            }
+        }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            if (backup.hasQueuedFrames()) {
                 return true;
             }
         }
@@ -408,12 +445,27 @@ public class PolymarketClobClient {
 
     /**
      * Returns an unmodifiable snapshot of the connection states of all active market and user CLOB streams.
+     * For dual Active-Active market streams, reports {@link ConnectionState#CONNECTED} as long as either
+     * the primary or backup connection is active.
      *
      * @return map of stream key to {@link ConnectionState}
      */
     public Map<String, ConnectionState> getConnectionStates() {
         Map<String, ConnectionState> states = new LinkedHashMap<>();
-        marketStreams.forEach((slug, stream) -> states.put(slug, stream.getState()));
+        marketStreams.forEach((slug, primary) -> {
+            ConnectionState primaryState = primary.getState();
+            ConnectionState effectiveState = primaryState;
+            if (primaryState != ConnectionState.CONNECTED) {
+                ReconnectingWebSocketStream backup = backupMarketStreams.get(slug);
+                if (backup != null) {
+                    ConnectionState backupState = backup.getState();
+                    if (backupState == ConnectionState.CONNECTED || primaryState == ConnectionState.DISCONNECTED) {
+                        effectiveState = backupState;
+                    }
+                }
+            }
+            states.put(slug, effectiveState);
+        });
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
             states.put(USER_STREAM_KEY, currentUser.getState());
@@ -422,14 +474,17 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns telemetry snapshots for all active market and user CLOB streams.
+     * Returns telemetry snapshots for all active primary, backup, and user CLOB streams.
      *
      * @return list of {@link WebSocketStreamTelemetry} snapshots
      */
     public List<WebSocketStreamTelemetry> getStreamTelemetries() {
-        List<WebSocketStreamTelemetry> result = new ArrayList<>(marketStreams.size() + 1);
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(marketStreams.size() + backupMarketStreams.size() + 1);
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             result.add(stream.getTelemetrySnapshot());
+        }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            result.add(backup.getTelemetrySnapshot());
         }
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
@@ -447,6 +502,12 @@ public class PolymarketClobClient {
     public Thread getIoReaderThread() {
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             Thread t = stream.getIoReaderThread();
+            if (t != null) {
+                return t;
+            }
+        }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            Thread t = backup.getIoReaderThread();
             if (t != null) {
                 return t;
             }
@@ -485,5 +546,62 @@ public class PolymarketClobClient {
             return trimmed.substring(0, trimmed.length() - "/clob".length()) + "/user";
         }
         return trimmed.endsWith("/") ? (trimmed + "user") : (trimmed + "/user");
+    }
+
+    /**
+     * Fast, fixed-footprint 16-way set-associative FIFO fingerprint cache (256 sets x 16 ways = 4,096 slots)
+     * that deduplicates identical raw UTF-8 WebSocket frames across the primary and backup market streams
+     * before {@link String} decoding or Jackson JSON parsing.
+     */
+    static final class PayloadDeduplicator {
+
+        private static final int SET_COUNT = 256;
+        private static final int SET_MASK = SET_COUNT - 1;
+        private static final int WAYS_SHIFT = 4;
+        private static final int WAYS_PER_SET = 1 << WAYS_SHIFT;
+        private static final int WAY_MASK = WAYS_PER_SET - 1;
+
+        private final long[] cache = new long[SET_COUNT * WAYS_PER_SET];
+        private final byte[] wayCursors = new byte[SET_COUNT];
+        private final List<TimestampedFrame> uniqueScratch = new ArrayList<>(64);
+
+        synchronized List<TimestampedFrame> filterUnique(List<TimestampedFrame> batch) {
+            uniqueScratch.clear();
+            for (int i = 0, n = batch.size(); i < n; i++) {
+                TimestampedFrame frame = batch.get(i);
+                long fp = computeFingerprint(frame.rawUtf8Bytes());
+                if (fp == 0L || !isDuplicateAndRecord(fp)) {
+                    uniqueScratch.add(frame);
+                }
+            }
+            return uniqueScratch;
+        }
+
+        private boolean isDuplicateAndRecord(long fp) {
+            int setIdx = ((int) (fp ^ (fp >>> 32))) & SET_MASK;
+            int baseOffset = setIdx << WAYS_SHIFT;
+            for (int w = 0; w < WAYS_PER_SET; w++) {
+                if (cache[baseOffset + w] == fp) {
+                    return true;
+                }
+            }
+            int nextWay = wayCursors[setIdx] & WAY_MASK;
+            cache[baseOffset + nextWay] = fp;
+            wayCursors[setIdx] = (byte) ((nextWay + 1) & WAY_MASK);
+            return false;
+        }
+
+        static long computeFingerprint(byte[] bytes) {
+            if (bytes == null || bytes.length == 0) {
+                return 0L;
+            }
+            long h = 0xcbf29ce484222325L;
+            for (byte b : bytes) {
+                h ^= (b & 0xFFL);
+                h *= 0x100000001b3L;
+            }
+            long fp = h ^ ((long) bytes.length << 48);
+            return fp != 0L ? fp : 1L;
+        }
     }
 }

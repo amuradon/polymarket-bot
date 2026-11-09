@@ -335,4 +335,71 @@ class PolymarketStreamParserTest {
         assertThat(result.quote().get().bestAskDown()).isCloseTo(0.40, within(1e-6));
         assertThat(result.quote().get().timestampMs()).isEqualTo(1003L);
     }
+
+    @Test
+    void shouldRejectOutOfOrderClobFrameWithOlderServerTimestampFromLaggingStream() {
+        String yesToken = "token_up_dual";
+        String noToken = "token_down_dual";
+        PolymarketLocalBook localBook = new PolymarketLocalBook(yesToken, noToken);
+
+        String initialBook = """
+                [
+                  {
+                    "event_type": "book",
+                    "asset_id": "token_up_dual",
+                    "bids": [{"price": "0.50", "size": "100"}],
+                    "asks": [{"price": "0.52", "size": "100"}],
+                    "timestamp": "1794221100100"
+                  },
+                  {
+                    "event_type": "book",
+                    "asset_id": "token_down_dual",
+                    "bids": [{"price": "0.48", "size": "100"}],
+                    "asks": [{"price": "0.50", "size": "100"}],
+                    "timestamp": "1794221100100"
+                  }
+                ]
+                """;
+        Optional<PolymarketBboQuote> q1 = parser.applyClobFrame(initialBook, 1000L, localBook);
+        assertThat(q1).isPresent();
+        assertThat(localBook.getLastServerTimestampMs()).isEqualTo(1794221100100L);
+
+        // Newer update arrives on stream #1 (server timestamp = 1794221100500)
+        String newerUpdate = """
+                {
+                  "event_type": "price_change",
+                  "price_changes": [
+                    {"asset_id": "token_up_dual", "price": "0.55", "size": "250", "side": "BUY", "best_bid": "0.55", "best_ask": "0.57"},
+                    {"asset_id": "token_down_dual", "price": "0.43", "size": "250", "side": "BUY", "best_bid": "0.43", "best_ask": "0.45"}
+                  ],
+                  "timestamp": "1794221100500"
+                }
+                """;
+        Optional<PolymarketBboQuote> q2 = parser.applyClobFrame(newerUpdate, 1050L, localBook);
+        assertThat(q2).isPresent();
+        assertThat(q2.get().bestBidUp()).isCloseTo(0.55, within(1e-6));
+        assertThat(q2.get().bestAskUp()).isCloseTo(0.57, within(1e-6));
+        assertThat(localBook.getLastServerTimestampMs()).isEqualTo(1794221100500L);
+
+        // Delayed older update arrives later on stream #2 (server timestamp = 1794221100300 < 1794221100500)
+        String delayedStaleUpdate = """
+                {
+                  "event_type": "price_change",
+                  "price_changes": [
+                    {"asset_id": "token_up_dual", "price": "0.51", "size": "200", "side": "BUY", "best_bid": "0.51", "best_ask": "0.53"},
+                    {"asset_id": "token_down_dual", "price": "0.47", "size": "200", "side": "BUY", "best_bid": "0.47", "best_ask": "0.49"}
+                  ],
+                  "timestamp": "1794221100300"
+                }
+                """;
+        Optional<PolymarketBboQuote> staleResult = parser.applyClobFrame(delayedStaleUpdate, 1080L, localBook);
+        assertThat(staleResult).isEmpty();
+
+        // Book state must remain at the newer 0.55 / 0.57 levels and not regress
+        Optional<PolymarketBboQuote> currentQuote = localBook.snapshotQuote(1090L);
+        assertThat(currentQuote).isPresent();
+        assertThat(currentQuote.get().bestBidUp()).isCloseTo(0.55, within(1e-6));
+        assertThat(currentQuote.get().bestAskUp()).isCloseTo(0.57, within(1e-6));
+        assertThat(localBook.getLastServerTimestampMs()).isEqualTo(1794221100500L);
+    }
 }

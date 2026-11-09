@@ -310,6 +310,10 @@ public class PolymarketStreamParser {
         if (!containsRelevantClobEvent(rawJson)) {
             return false;
         }
+        long eventTimestampMs = extractEventTimestampMs(rawJson);
+        if (eventTimestampMs > 0L && eventTimestampMs < localBook.getLastServerTimestampMs()) {
+            return false;
+        }
 
         try (JsonParser parser = objectMapper.createParser(rawJson)) {
             JsonToken firstToken = parser.nextToken();
@@ -328,11 +332,44 @@ public class PolymarketStreamParser {
             } else if (firstToken == JsonToken.START_OBJECT) {
                 updated = streamSingleClobEvent(parser, localBook);
             }
+            if (updated && eventTimestampMs > 0L) {
+                localBook.updateServerTimestampMs(eventTimestampMs);
+            }
             return updated;
         } catch (Exception e) {
             Log.warnf("Failed to parse CLOB WS frame: %s", e.getMessage());
             return false;
         }
+    }
+
+    static long extractEventTimestampMs(String rawJson) {
+        int idx = rawJson.lastIndexOf("\"timestamp\"");
+        if (idx < 0) {
+            return 0L;
+        }
+        int pos = idx + 11;
+        int len = rawJson.length();
+        while (pos < len) {
+            char c = rawJson.charAt(pos);
+            if (c == ':' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"') {
+                pos++;
+            } else {
+                break;
+            }
+        }
+        long value = 0L;
+        int digits = 0;
+        while (pos < len) {
+            char c = rawJson.charAt(pos);
+            if (c >= '0' && c <= '9') {
+                value = value * 10L + (c - '0');
+                digits++;
+                pos++;
+            } else {
+                break;
+            }
+        }
+        return digits > 0 ? value : 0L;
     }
 
     private static boolean isFullDualBookSnapshot(String rawJson, String yesTokenId, String noTokenId) {

@@ -27,6 +27,7 @@ public class PolymarketLocalBook {
     private int bestYesAskMc = BOOK_LEVELS;
     private int bestNoBidMc = 0;
     private int bestNoAskMc = BOOK_LEVELS;
+    private long lastServerTimestampMs = 0L;
 
     /**
      * Constructs a local orderbook tracker for the given Up ({@code yesTokenId}) and Down ({@code noTokenId}) tokens.
@@ -55,6 +56,27 @@ public class PolymarketLocalBook {
      */
     public String getNoTokenId() {
         return noTokenId;
+    }
+
+    /**
+     * Returns the most recent server-side event timestamp (in epoch milliseconds) applied to this orderbook,
+     * or {@code 0} if no timestamped event has been applied yet.
+     *
+     * @return last server event timestamp in epoch milliseconds
+     */
+    public long getLastServerTimestampMs() {
+        return lastServerTimestampMs;
+    }
+
+    /**
+     * Updates the high-water mark server event timestamp if {@code serverTimestampMs} is newer.
+     *
+     * @param serverTimestampMs server event timestamp in epoch milliseconds
+     */
+    public void updateServerTimestampMs(long serverTimestampMs) {
+        if (serverTimestampMs > this.lastServerTimestampMs) {
+            this.lastServerTimestampMs = serverTimestampMs;
+        }
     }
 
     /**

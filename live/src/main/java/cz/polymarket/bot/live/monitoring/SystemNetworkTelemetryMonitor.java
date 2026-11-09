@@ -139,6 +139,7 @@ public class SystemNetworkTelemetryMonitor {
     }
 
     private static final class ThreadHistory {
+        long lastThreadId = -1L;
         long lastSampleWallNs;
         long lastCpuTimeNs;
         long lastBusyTimeNs;
@@ -329,12 +330,13 @@ public class SystemNetworkTelemetryMonitor {
         List<ThreadUtilizationTelemetry> result = new ArrayList<>(specs.size());
         for (MonitoredThreadSpec spec : specs) {
             Thread t = spec.thread();
+            long currentThreadId = t != null ? t.threadId() : -1L;
             String threadName = t != null ? t.getName() : spec.fallbackName();
             String stateStr = t != null ? t.getState().name() : "INACTIVE";
             long cpuNs = 0L;
             if (t != null && t.isAlive() && threadMxBean.isThreadCpuTimeSupported()) {
                 try {
-                    long raw = threadMxBean.getThreadCpuTime(t.threadId());
+                    long raw = threadMxBean.getThreadCpuTime(currentThreadId);
                     if (raw > 0L) {
                         cpuNs = raw;
                     }
@@ -345,25 +347,32 @@ public class SystemNetworkTelemetryMonitor {
 
             ThreadHistory hist = threadHistories.computeIfAbsent(spec.role(), k -> new ThreadHistory());
             synchronized (hist) {
-                long elapsedWallNs = nowNs - hist.lastSampleWallNs;
-                if (hist.lastSampleWallNs > 0L && elapsedWallNs >= 50_000_000L) {
-                    long deltaCpuNs = Math.max(0L, cpuNs - hist.lastCpuTimeNs);
-                    long deltaBusyNs = Math.max(0L, busyNs - hist.lastBusyTimeNs);
-                    hist.lastCpuPct = roundOneDecimal(Math.min(100.0, (deltaCpuNs * 100.0) / elapsedWallNs));
-                    hist.lastBusyPct = roundOneDecimal(Math.min(100.0, (deltaBusyNs * 100.0) / elapsedWallNs));
-                    if (hist.lastCpuPct > hist.maxCpuPct) {
-                        hist.maxCpuPct = hist.lastCpuPct;
-                    }
-                    if (hist.lastBusyPct > hist.maxBusyPct) {
-                        hist.maxBusyPct = hist.lastBusyPct;
-                    }
+                if (currentThreadId != hist.lastThreadId) {
+                    hist.lastThreadId = currentThreadId;
                     hist.lastSampleWallNs = nowNs;
                     hist.lastCpuTimeNs = cpuNs;
                     hist.lastBusyTimeNs = busyNs;
-                } else if (hist.lastSampleWallNs == 0L) {
-                    hist.lastSampleWallNs = nowNs;
-                    hist.lastCpuTimeNs = cpuNs;
-                    hist.lastBusyTimeNs = busyNs;
+                } else {
+                    long elapsedWallNs = nowNs - hist.lastSampleWallNs;
+                    if (hist.lastSampleWallNs > 0L && elapsedWallNs >= 50_000_000L) {
+                        long deltaCpuNs = Math.max(0L, cpuNs - hist.lastCpuTimeNs);
+                        long deltaBusyNs = Math.max(0L, busyNs - hist.lastBusyTimeNs);
+                        hist.lastCpuPct = roundOneDecimal(Math.min(100.0, (deltaCpuNs * 100.0) / elapsedWallNs));
+                        hist.lastBusyPct = roundOneDecimal(Math.min(100.0, (deltaBusyNs * 100.0) / elapsedWallNs));
+                        if (hist.lastCpuPct > hist.maxCpuPct) {
+                            hist.maxCpuPct = hist.lastCpuPct;
+                        }
+                        if (hist.lastBusyPct > hist.maxBusyPct) {
+                            hist.maxBusyPct = hist.lastBusyPct;
+                        }
+                        hist.lastSampleWallNs = nowNs;
+                        hist.lastCpuTimeNs = cpuNs;
+                        hist.lastBusyTimeNs = busyNs;
+                    } else if (hist.lastSampleWallNs == 0L) {
+                        hist.lastSampleWallNs = nowNs;
+                        hist.lastCpuTimeNs = cpuNs;
+                        hist.lastBusyTimeNs = busyNs;
+                    }
                 }
                 result.add(new ThreadUtilizationTelemetry(
                         spec.role(),

@@ -36,6 +36,7 @@ public class ReconnectingWebSocketStream {
     private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
     private static final int DEFAULT_BATCH_LIMIT = 512;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 500L;
+    static final long INITIAL_FAST_RECONNECT_DELAY_MS = 50L;
 
     private final Vertx vertx;
     private final String streamName;
@@ -57,6 +58,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
     private final AtomicLong reconnectCount = new AtomicLong(0L);
+    private final AtomicInteger consecutiveReconnectAttempts = new AtomicInteger(0);
     private final AtomicLong debugReceivedFrameCounter = new AtomicLong(0L);
 
     // Real-time stream & queue telemetry counters
@@ -154,7 +156,7 @@ public class ReconnectingWebSocketStream {
         this.subscriptionMessagesSupplier = subscriptionMessagesSupplier;
         this.messageListener = messageListener;
         this.batchListener = batchListener;
-        this.reconnectDelayMs = Math.max(50L, reconnectDelayMs);
+        this.reconnectDelayMs = Math.max(10L, reconnectDelayMs);
         this.pingIntervalMs = pingIntervalMs;
         this.textPingPayload = textPingPayload;
 
@@ -232,41 +234,26 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
-     * Seeds historical high-water mark and reconnect telemetry counters carried over from a previously
-     * rotated market stream so 15-minute market rotations do not wipe out historical diagnostics.
+     * Returns the current consecutive reconnect attempt counter (reset to {@code 0} upon receiving a valid frame).
      *
-     * @param priorReconnectCount cumulative reconnect count from prior market streams
-     * @param priorCloseCode      last observed close status code from prior market streams
-     * @param priorCloseReason    last observed close reason from prior market streams
-     * @param priorMaxQueueDepth  historical peak inbound queue depth
-     * @param priorMaxQueueLagMs  historical peak queue wait latency in milliseconds
-     * @param priorMaxProcessUs   historical peak batch processing time in microseconds
+     * @return consecutive reconnect attempts since last valid inbound frame
      */
-    public void seedHistoricalTelemetry(
-            long priorReconnectCount,
-            int priorCloseCode,
-            String priorCloseReason,
-            int priorMaxQueueDepth,
-            long priorMaxQueueLagMs,
-            long priorMaxProcessUs) {
-        if (priorReconnectCount > 0L) {
-            reconnectCount.addAndGet(priorReconnectCount);
-        }
-        if (priorCloseCode != 0 && lastCloseCode.get() == 0) {
-            lastCloseCode.set(priorCloseCode);
-        }
-        if (priorCloseReason != null && !priorCloseReason.isEmpty() && lastCloseReason.get().isEmpty()) {
-            lastCloseReason.set(priorCloseReason);
-        }
-        if (priorMaxQueueDepth > 0) {
-            updateMaxInt(maxQueueDepth, priorMaxQueueDepth);
-        }
-        if (priorMaxQueueLagMs > 0L) {
-            updateMaxLong(maxQueueLagMs, priorMaxQueueLagMs);
-        }
-        if (priorMaxProcessUs > 0L) {
-            updateMaxLong(maxProcessTimeUs, priorMaxProcessUs);
-        }
+    int getConsecutiveReconnectAttempts() {
+        return consecutiveReconnectAttempts.get();
+    }
+
+    /**
+     * Computes the exponential backoff reconnect delay in milliseconds for the given 1-based attempt number,
+     * starting at {@link #INITIAL_FAST_RECONNECT_DELAY_MS} ({@code 50 ms}) and capped at {@code maxDelayMs}.
+     *
+     * @param attempt    1-based consecutive reconnect attempt counter
+     * @param maxDelayMs maximum configured reconnect delay in milliseconds
+     * @return reconnect delay in milliseconds
+     */
+    static long computeNextReconnectDelayMs(int attempt, long maxDelayMs) {
+        int shift = Math.clamp(attempt - 1, 0, 16);
+        long backoffMs = INITIAL_FAST_RECONNECT_DELAY_MS << shift;
+        return Math.min(maxDelayMs, backoffMs);
     }
 
     /**
@@ -614,6 +601,8 @@ public class ReconnectingWebSocketStream {
                                 lastCloseReason.set(closeReason);
                             }
                             if (running.get()) {
+                                long nextDelayMs = computeNextReconnectDelayMs(
+                                        consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
                                 WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
                                 Log.errorf("[%s] WebSocket connection closed unexpectedly (code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
                                         streamName, closeCode, closeReason,
@@ -621,7 +610,7 @@ public class ReconnectingWebSocketStream {
                                         eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
                                         eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
                                         eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
-                                        eventSnapshot.reconnectCount(), reconnectDelayMs);
+                                        eventSnapshot.reconnectCount(), nextDelayMs);
                                 if (this.currentWebSocket == ws) {
                                     notifyDisconnectListener(eventSnapshot);
                                 }
@@ -715,6 +704,9 @@ public class ReconnectingWebSocketStream {
             }
         }
         if (messageListener != null || batchListener != null) {
+            if (consecutiveReconnectAttempts.getOpaque() != 0) {
+                consecutiveReconnectAttempts.set(0);
+            }
             byte[] rawUtf8Bytes = payloadBuffer.getBytes();
             if (Log.isTraceEnabled()) {
                 Log.tracef("[%s] Received WebSocket frame at %d ms (%d bytes)", streamName, recvTs, rawUtf8Bytes.length);
@@ -779,7 +771,9 @@ public class ReconnectingWebSocketStream {
         }
         state.set(ConnectionState.RECONNECTING);
         reconnectCount.incrementAndGet();
-        vertx.setTimer(reconnectDelayMs, timerId -> {
+        int attempt = consecutiveReconnectAttempts.incrementAndGet();
+        long delayMs = computeNextReconnectDelayMs(attempt, reconnectDelayMs);
+        vertx.setTimer(delayMs, timerId -> {
             if (running.get()) {
                 connect();
             }

@@ -310,7 +310,7 @@ class ReconnectingWebSocketStreamTest {
     }
 
     @Test
-    void shouldApplyDedicatedIoThreadNameAndSeedHistoricalTelemetry() throws Exception {
+    void shouldApplyDedicatedIoThreadName() throws Exception {
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> ws.textMessageHandler(msg -> ws.writeTextMessage("{\"event_type\":\"book\"}")));
 
@@ -334,7 +334,6 @@ class ReconnectingWebSocketStreamTest {
                 null
         );
         stream.setDedicatedIoThreadName("clob-ws-io-reader");
-        stream.seedHistoricalTelemetry(2L, 1013, "slow consumer: send buffer full", 42, 18L, 350L);
 
         stream.start();
 
@@ -343,15 +342,70 @@ class ReconnectingWebSocketStreamTest {
                 .untilAsserted(() -> {
                     WebSocketStreamTelemetry snap = stream.getTelemetrySnapshot();
                     assertThat(snap.totalFramesReceived()).isEqualTo(1L);
-                    assertThat(snap.reconnectCount()).isEqualTo(2L);
-                    assertThat(snap.lastCloseCode()).isEqualTo(1013);
-                    assertThat(snap.lastCloseReason()).isEqualTo("slow consumer: send buffer full");
-                    assertThat(snap.maxQueueDepth()).isGreaterThanOrEqualTo(42);
-                    assertThat(snap.maxQueueLagMs()).isGreaterThanOrEqualTo(18L);
-                    assertThat(snap.maxProcessTimeUs()).isGreaterThanOrEqualTo(350L);
+                    assertThat(snap.reconnectCount()).isZero();
                     assertThat(stream.getIoReaderThread()).isNotNull();
                     assertThat(stream.getIoReaderThread().getName()).isEqualTo("clob-ws-io-reader");
                 });
+
+        stream.stop();
+    }
+
+    @Test
+    void shouldFastReconnectWithinFiftyMillisecondsAndUseExponentialBackoffBeforeResetOnValidFrame() throws Exception {
+        assertThat(ReconnectingWebSocketStream.computeNextReconnectDelayMs(1, 3000L)).isEqualTo(50L);
+        assertThat(ReconnectingWebSocketStream.computeNextReconnectDelayMs(2, 3000L)).isEqualTo(100L);
+        assertThat(ReconnectingWebSocketStream.computeNextReconnectDelayMs(3, 3000L)).isEqualTo(200L);
+        assertThat(ReconnectingWebSocketStream.computeNextReconnectDelayMs(4, 3000L)).isEqualTo(400L);
+        assertThat(ReconnectingWebSocketStream.computeNextReconnectDelayMs(7, 3000L)).isEqualTo(3000L);
+
+        AtomicInteger connectionCount = new AtomicInteger(0);
+        AtomicLong closeTimestampMs = new AtomicLong(0L);
+        AtomicLong secondConnectTimestampMs = new AtomicLong(0L);
+        List<String> receivedFrames = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    int attempt = connectionCount.incrementAndGet();
+                    if (attempt == 1) {
+                        ws.textMessageHandler(msg -> {
+                            ws.writeTextMessage("{\"conn\":1}");
+                            vertx.setTimer(20L, id -> {
+                                closeTimestampMs.set(System.currentTimeMillis());
+                                ws.close((short) 1013, "slow consumer: send buffer full");
+                            });
+                        });
+                    } else {
+                        secondConnectTimestampMs.compareAndSet(0L, System.currentTimeMillis());
+                        ws.textMessageHandler(msg -> ws.writeTextMessage("{\"conn\":" + attempt + "}"));
+                    }
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/fast-reconnect-test";
+
+        // Configure max reconnectDelayMs = 3000 ms; first reconnect must still happen at ~50 ms
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "FAST-RECONNECT-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> receivedFrames.add(rawJson),
+                3000L,
+                0L
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> {
+                    assertThat(connectionCount.get()).isGreaterThanOrEqualTo(2);
+                    assertThat(receivedFrames).contains("{\"conn\":1}", "{\"conn\":2}");
+                    assertThat(stream.getConsecutiveReconnectAttempts()).isZero();
+                });
+
+        long reconnectElapsedMs = secondConnectTimestampMs.get() - closeTimestampMs.get();
+        assertThat(reconnectElapsedMs).isBetween(25L, 600L);
 
         stream.stop();
     }
