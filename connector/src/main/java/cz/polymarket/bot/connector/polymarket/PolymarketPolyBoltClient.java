@@ -8,6 +8,8 @@ import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -20,14 +22,20 @@ import java.util.function.Supplier;
 /**
  * Resilient WebSocket client for Polymarket PolyBolt v2 ({@code wss://ws-live-v2.polymarket.com/ws}).
  * Manages dedicated authenticated streams for {@code price.crypto.twap} (60-second TWAP) and
- * {@code price.crypto} (spot reference price), performing the mandatory {@code op: "auth"} ->
+ * {@code price.crypto} (spot reference price) on an isolated 1-thread Netty EventLoop
+ * ({@code polybolt-ws-io-reader}), performing the mandatory {@code op: "auth"} ->
  * {@code op: "authed"} -> {@code op: "subscribe"} handshake before subscribing to any channel and
  * forwarding raw WebSocket JSON messages without parsing overhead.
  */
 @ApplicationScoped
 public class PolymarketPolyBoltClient {
 
-    private final Vertx vertx;
+    /**
+     * Dedicated thread name for the isolated Netty EventLoop servicing PolyBolt v2 oracle streams.
+     */
+    public static final String DEDICATED_POLYBOLT_IO_THREAD_NAME = "polybolt-ws-io-reader";
+
+    private final Vertx polyBoltVertx;
     private final String wsUrl;
     private volatile String apiKey;
     private volatile String secret;
@@ -42,7 +50,7 @@ public class PolymarketPolyBoltClient {
     /**
      * CDI constructor for the Polymarket PolyBolt WebSocket client.
      *
-     * @param vertx            Vert.x runtime instance
+     * @param vertx            shared Vert.x runtime instance
      * @param wsUrl            Polymarket PolyBolt v2 WebSocket endpoint URL
      * @param apiKey           Polymarket CLOB API key required for gated PolyBolt channels
      * @param secret           Polymarket CLOB API secret required for gated PolyBolt channels
@@ -65,9 +73,11 @@ public class PolymarketPolyBoltClient {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
-        this.vertx = vertx;
-        if (!this.vertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on shared Vertx (os=%s); falling back to JDK NIO EventLoop",
+        this.polyBoltVertx = Vertx.vertx(new VertxOptions()
+                .setEventLoopPoolSize(1)
+                .setPreferNativeTransport(true));
+        if (!this.polyBoltVertx.isNativeTransportEnabled()) {
+            Log.warnf("Native Linux Epoll transport is unavailable on polyBoltVertx (os=%s); falling back to JDK NIO EventLoop",
                     System.getProperty("os.name", "unknown"));
         }
         this.wsUrl = wsUrl;
@@ -76,6 +86,15 @@ public class PolymarketPolyBoltClient {
         this.passphrase = passphrase.map(String::trim).orElse("");
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+    }
+
+    @PreDestroy
+    void destroy() {
+        stop();
+        try {
+            polyBoltVertx.close();
+        } catch (Exception ignored) {
+        }
     }
 
     /**
@@ -325,8 +344,8 @@ public class PolymarketPolyBoltClient {
         }
         String initialMessage = buildAuthMessage();
 
-        return new ReconnectingWebSocketStream(
-                vertx,
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                polyBoltVertx,
                 streamName,
                 wsUrl,
                 () -> List.of(initialMessage),
@@ -376,6 +395,8 @@ public class PolymarketPolyBoltClient {
                 pingIntervalMs,
                 "{\"op\":\"ping\"}"
         );
+        stream.setDedicatedIoThreadName(DEDICATED_POLYBOLT_IO_THREAD_NAME);
+        return stream;
     }
 
     private String buildAuthMessage() {

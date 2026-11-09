@@ -894,6 +894,35 @@ class LiveTradingEngineTest {
         assertThat(engine.getTelemetry().lastQuoteAgeMs()).isEqualTo(50L);
     }
 
+    @Test
+    void shouldPrefetchUpcomingMarketDuringLookaheadWindowAndRotateImmediatelyAtBoundary() {
+        LiveTradingEngine engine = createTestEngine(200L);
+        try {
+            long market1StartSec = 1792741500L;
+            long market2StartSec = 1792742400L; // +900s (next 15m candle)
+
+            // 1. Early in Market 1 (t = +100s, 800s before boundary): lookahead pre-fetch should not trigger yet
+            engine.discoverAndRotateMarket(market1StartSec + 100L);
+            assertThat(engine.getActiveMarketInfo()).isNotNull();
+            assertThat(engine.getActiveMarketInfo().slug()).isEqualTo("btc-updown-15m-1792741500");
+            assertThat(engine.getPrefetchedNextMarketInfo()).isNull();
+
+            // 2. Inside final 60s lookahead window (t = +860s, 40s before boundary): pre-fetches Market 2
+            engine.discoverAndRotateMarket(market1StartSec + 860L);
+            assertThat(engine.getActiveMarketInfo().slug()).isEqualTo("btc-updown-15m-1792741500");
+            assertThat(engine.getPrefetchedNextMarketInfo()).isNotNull();
+            assertThat(engine.getPrefetchedNextMarketInfo().slug()).isEqualTo("btc-updown-15m-1792742400");
+
+            // 3. At the exact candle boundary (t = 1792742400), rotation consumes the pre-fetched market immediately
+            engine.discoverAndRotateMarket(market2StartSec);
+            assertThat(engine.getActiveMarketInfo()).isNotNull();
+            assertThat(engine.getActiveMarketInfo().slug()).isEqualTo("btc-updown-15m-1792742400");
+            assertThat(engine.getPrefetchedNextMarketInfo()).isNull();
+        } finally {
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(long maxQuoteAgeMs) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),

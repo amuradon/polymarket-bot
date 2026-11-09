@@ -81,6 +81,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
     private static final long REALTIME_CLOCK_WINDOW_MS = 3_600_000L;
     private static final long STALE_QUOTE_WARN_INTERVAL_MS = 1_000L;
+    private static final long MARKET_PREFETCH_LOOKAHEAD_SEC = 60L;
 
     private final HourlyPriceCache priceCache;
     private final PolymarketSecretsResolver secretsResolver;
@@ -104,6 +105,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicLong activeCandleStart = new AtomicLong(0L);
     private final AtomicLong activeCandleEnd = new AtomicLong(0L);
     private final AtomicReference<PolymarketMarketInfo> activeMarketInfo = new AtomicReference<>();
+    private final AtomicReference<PolymarketMarketInfo> prefetchedNextMarketInfo = new AtomicReference<>();
     private final AtomicReference<PolymarketLocalBook> activeLocalBook = new AtomicReference<>();
     private final AtomicLong polyBoltMarketMsgCount = new AtomicLong(0L);
     private final AtomicLong clobMarketMsgCount = new AtomicLong(0L);
@@ -123,6 +125,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private volatile Thread clobBookWorkerThread;
     private volatile Thread strategyCalculatorThread;
     private volatile Thread orderExecutionWorkerThread;
+    private volatile Thread telemetryMaintenanceThread;
     private final AtomicLong clobBookWorkerBusyNs = new AtomicLong(0L);
     private final AtomicLong strategyWorkerBusyNs = new AtomicLong(0L);
     private final AtomicLong orderExecutionWorkerBusyNs = new AtomicLong(0L);
@@ -282,6 +285,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         clobBookWorkerThread = null;
         strategyCalculatorThread = null;
         orderExecutionWorkerThread = null;
+        telemetryMaintenanceThread = null;
     }
 
     /**
@@ -302,9 +306,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Starts the 3 dedicated application worker threads ({@code clob-book-worker}, {@code strategy-calculator-worker},
-     * {@code order-execution-io-worker}), binds the authenticated PolyBolt v2 and CLOB User streams to their respective
-     * dedicated threads, and discovers/subscribes the current Polymarket 15m market.
+     * Starts the dedicated application worker threads ({@code clob-book-worker}, {@code strategy-calculator-worker},
+     * {@code order-execution-io-worker}, and low-priority {@code telemetry-maintenance-worker}), binds the authenticated
+     * PolyBolt v2 and CLOB User streams to their respective dedicated threads, and discovers/subscribes the current
+     * Polymarket 15m market.
      *
      * @param nowEpochSec current epoch timestamp in seconds
      */
@@ -323,8 +328,14 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     .start(this::strategyCalculatorLoop);
             this.orderExecutionWorkerThread = Thread.ofPlatform()
                     .daemon(true)
+                    .priority(Thread.MAX_PRIORITY)
                     .name("order-execution-io-worker")
                     .start(this::orderExecutionWorkerLoop);
+            this.telemetryMaintenanceThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .priority(Thread.MIN_PRIORITY)
+                    .name("telemetry-maintenance-worker")
+                    .start(this::telemetryMaintenanceLoop);
         }
 
         polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
@@ -407,13 +418,12 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Dedicated loop for vCPU #4 ({@code order-execution-io-worker}): executes EIP-712 signing,
-     * HTTP {@code POST /order} calls, CLOB User channel balance updates, and 1s OS/thread telemetry sampling.
+     * Dedicated loop for vCPU #4 ({@code order-execution-io-worker}): exclusively executes EIP-712 signing,
+     * HTTP {@code POST /order} calls, and in-memory CLOB User channel trade balance updates without
+     * head-of-line blocking from `/proc/net/tcp` telemetry or REST balance queries.
      */
     private void orderExecutionWorkerLoop() {
         List<TimestampedFrame> scratchBatch = new ArrayList<>(32);
-        long lastTelemetrySampleNs = 0L;
-        long lastHistoryRecordNs = 0L;
         while (workersRunning.get()) {
             boolean didWork = false;
             long startNs = System.nanoTime();
@@ -429,8 +439,34 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 didWork = true;
             }
 
+            if (didWork) {
+                orderExecutionWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+                continue;
+            }
+
+            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get()
+                    && orderExecutionQueue.isEmpty()
+                    && !clobWsClient.hasQueuedUserFrames(); spin++) {
+                Thread.onSpinWait();
+            }
+            if (!workersRunning.get()
+                    || !orderExecutionQueue.isEmpty()
+                    || clobWsClient.hasQueuedUserFrames()) {
+                continue;
+            }
+            LockSupport.parkNanos(this, 50_000_000L);
+        }
+    }
+
+    /**
+     * Low-priority background maintenance loop for 1s `/proc/net/tcp` telemetry sampling and
+     * pre-activation `GET /balance-allowance` REST synchronization, isolated from `order-execution-io-worker`.
+     */
+    private void telemetryMaintenanceLoop() {
+        long lastTelemetrySampleNs = 0L;
+        long lastHistoryRecordNs = 0L;
+        while (workersRunning.get()) {
             if (balanceSyncRequested.compareAndSet(true, false)) {
-                didWork = true;
                 try {
                     syncAccountBalanceFromClob();
                 } finally {
@@ -440,7 +476,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
             long nowNs = System.nanoTime();
             if (nowNs - lastTelemetrySampleNs >= 1_000_000_000L) {
-                didWork = true;
                 lastTelemetrySampleNs = nowNs;
                 SystemTelemetrySnapshot sysSnap = telemetryMonitor.sample(buildMonitoredThreadSpecs());
                 if (lastHistoryRecordNs == 0L || nowNs - lastHistoryRecordNs >= 10_000_000_000L) {
@@ -449,11 +484,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 }
             }
 
-            if (didWork) {
-                orderExecutionWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+            if (!workersRunning.get() || balanceSyncRequested.get()) {
                 continue;
             }
-
             LockSupport.parkNanos(this, 100_000_000L);
         }
     }
@@ -470,6 +503,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         Thread t4 = this.orderExecutionWorkerThread;
         if (t4 != null) {
             LockSupport.unpark(t4);
+        }
+        Thread tm = this.telemetryMaintenanceThread;
+        if (tm != null) {
+            LockSupport.unpark(tm);
         }
     }
 
@@ -594,10 +631,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (!balanceSyncInFlight.compareAndSet(false, true)) {
             return;
         }
-        Thread ioWorker = this.orderExecutionWorkerThread;
-        if (workersRunning.get() && ioWorker != null) {
+        Thread maintWorker = this.telemetryMaintenanceThread;
+        if (workersRunning.get() && maintWorker != null) {
             balanceSyncRequested.set(true);
-            LockSupport.unpark(ioWorker);
+            LockSupport.unpark(maintWorker);
         } else {
             Thread.ofPlatform()
                     .daemon(true)
@@ -637,6 +674,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     /**
      * Discovers the active market for the cycle containing {@code nowEpochSec} via {@code GET /markets/slug/{slug}}
      * and rotates the CLOB WebSocket subscription if the cycle has changed.
+     * <p>
+     * During the final {@code 60} seconds of the active cycle, pre-fetches the upcoming cycle's market metadata into
+     * {@code prefetchedNextMarketInfo} so that boundary rotation completes instantaneously in memory.
      *
      * @param nowEpochSec current epoch timestamp in seconds
      * @return discovered {@link PolymarketMarketInfo} if found
@@ -647,10 +687,22 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
         PolymarketMarketInfo current = activeMarketInfo.get();
         if (current != null && expectedSlug.equals(current.slug())) {
+            long nextCycleStartSec = cycleStartSec + durationSeconds;
+            if (nowEpochSec >= nextCycleStartSec - MARKET_PREFETCH_LOOKAHEAD_SEC) {
+                prefetchUpcomingMarket(nextCycleStartSec);
+            }
             return Optional.of(current);
         }
 
-        Optional<PolymarketMarketInfo> discovered = gammaClient.fetchMarketBySlug(expectedSlug, durationSeconds);
+        Optional<PolymarketMarketInfo> discovered;
+        PolymarketMarketInfo prefetched = prefetchedNextMarketInfo.get();
+        if (prefetched != null && expectedSlug.equals(prefetched.slug())) {
+            prefetchedNextMarketInfo.compareAndSet(prefetched, null);
+            discovered = Optional.of(prefetched);
+        } else {
+            discovered = gammaClient.fetchMarketBySlug(expectedSlug, durationSeconds);
+        }
+
         if (discovered.isEmpty()) {
             if (Log.isDebugEnabled()) {
                 Log.debugf("Market %s not yet available on Gamma API", expectedSlug);
@@ -689,9 +741,29 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             LockSupport.unpark(bookWorker);
         }
 
+        long nextCycleStartSec = cycleStartSec + durationSeconds;
+        if (nowEpochSec >= nextCycleStartSec - MARKET_PREFETCH_LOOKAHEAD_SEC) {
+            prefetchUpcomingMarket(nextCycleStartSec);
+        }
+
         Log.infof("Subscribed to live Polymarket market %s (conditionId=%s, yesToken=%s, noToken=%s)",
                 nextMarket.slug(), nextMarket.conditionId(), nextMarket.yesTokenId(), nextMarket.noTokenId());
         return Optional.of(nextMarket);
+    }
+
+    private void prefetchUpcomingMarket(long nextCycleStartSec) {
+        String nextSlug = PolymarketMarketInfo.buildMarketSlug(symbol, timeframe, nextCycleStartSec);
+        PolymarketMarketInfo existing = prefetchedNextMarketInfo.get();
+        if (existing != null && nextSlug.equals(existing.slug())) {
+            return;
+        }
+        Optional<PolymarketMarketInfo> fetched = gammaClient.fetchMarketBySlug(nextSlug, durationSeconds);
+        if (fetched.isPresent()) {
+            PolymarketMarketInfo nextInfo = fetched.get();
+            prefetchedNextMarketInfo.set(nextInfo);
+            Log.infof("Pre-fetched upcoming Polymarket market %s (yesToken=%s, noToken=%s) ahead of cycle rollover",
+                    nextInfo.slug(), nextInfo.yesTokenId(), nextInfo.noTokenId());
+        }
     }
 
     private void evaluateCompletedMarketStreamActivity(String marketLabel, long marketStartSec) {
@@ -1462,6 +1534,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = 0L;
             latestQuote = null;
             latestQuoteSlot.set(null);
+            prefetchedNextMarketInfo.set(null);
             orderExecutionQueue.clear();
             executionReportQueue.clear();
             if (currentBalance > 0.0) {
@@ -1702,6 +1775,15 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     public PolymarketMarketInfo getActiveMarketInfo() {
         return activeMarketInfo.get();
+    }
+
+    /**
+     * Returns the pre-fetched upcoming Polymarket market metadata when inside the lookahead window, or {@code null}.
+     *
+     * @return pre-fetched upcoming {@link PolymarketMarketInfo} or {@code null}
+     */
+    public PolymarketMarketInfo getPrefetchedNextMarketInfo() {
+        return prefetchedNextMarketInfo.get();
     }
 
     /**

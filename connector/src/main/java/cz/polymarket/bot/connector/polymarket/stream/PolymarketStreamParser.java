@@ -11,7 +11,9 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -19,10 +21,29 @@ import java.util.Optional;
 /**
  * Low-latency JSON frame parser for Polymarket PolyBolt v2 ({@code price.crypto} and {@code price.crypto.twap})
  * and Polymarket CLOB Market WebSocket streams ({@code book}, {@code price_change}, {@code best_bid_ask}).
- * Uses streaming Jackson {@link JsonParser} on both PolyBolt and CLOB hot paths to eliminate DOM tree allocations.
+ * Uses streaming Jackson {@link JsonParser} directly over UTF-8 {@code byte[]} buffers and zero-allocation
+ * {@code char[]} number parsing on hot paths to eliminate DOM tree and per-level {@link String} allocations.
  */
 @ApplicationScoped
 public class PolymarketStreamParser {
+
+    private static final byte[] BYTES_BIDS = "\"bids\"".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_ASKS = "\"asks\"".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_PRICE_CHANGES = "\"price_changes\"".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_BEST_BID_ASK = "best_bid_ask".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_PRICE_CHANGE = "price_change".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_BOOK = "\"book\"".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_LAST_TRADE_PRICE = "last_trade_price".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_TICK_SIZE_CHANGE = "tick_size_change".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BYTES_TIMESTAMP = "\"timestamp\"".getBytes(StandardCharsets.UTF_8);
+
+    private static final double[] POW10 = {
+            1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+            1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18
+    };
+
+    private static final ThreadLocal<DeferredBookBuffers> DEFERRED_BUFFERS =
+            ThreadLocal.withInitial(DeferredBookBuffers::new);
 
     private final ObjectMapper objectMapper;
     private final String defaultSymbol;
@@ -225,11 +246,38 @@ public class PolymarketStreamParser {
         return items;
     }
 
+    /**
+     * Applies a single raw CLOB WebSocket JSON text frame to {@code localBook} and returns the updated BBO snapshot.
+     *
+     * @param rawJson         raw CLOB JSON text frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param localBook       stateful local orderbook
+     * @return updated {@link PolymarketBboQuote} if the frame modified the book
+     */
     public Optional<PolymarketBboQuote> applyClobFrame(
             String rawJson,
             long recvTimestampMs,
             PolymarketLocalBook localBook) {
-        if (!applyClobFrameToBookOnly(rawJson, localBook)) {
+        if (rawJson == null || rawJson.isEmpty()) {
+            return Optional.empty();
+        }
+        return applyClobFrame(rawJson.getBytes(StandardCharsets.UTF_8), recvTimestampMs, localBook);
+    }
+
+    /**
+     * Applies a single raw UTF-8 CLOB WebSocket frame directly from {@code rawUtf8Bytes} to {@code localBook}
+     * without allocating a {@link String} or {@link java.io.StringReader}.
+     *
+     * @param rawUtf8Bytes    raw UTF-8 bytes of the CLOB WebSocket frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param localBook       stateful local orderbook
+     * @return updated {@link PolymarketBboQuote} if the frame modified the book
+     */
+    public Optional<PolymarketBboQuote> applyClobFrame(
+            byte[] rawUtf8Bytes,
+            long recvTimestampMs,
+            PolymarketLocalBook localBook) {
+        if (!applyClobFrameToBookOnly(rawUtf8Bytes, localBook)) {
             return Optional.empty();
         }
         return localBook.snapshotQuote(recvTimestampMs);
@@ -252,9 +300,10 @@ public class PolymarketStreamParser {
     /**
      * Applies a chronological batch of raw Polymarket CLOB WebSocket frames to {@code localBook} in a single pass.
      * <p>
-     * If a newer frame in the batch is a full dual-asset {@code book} snapshot, all earlier frames in the batch
-     * are fast-forwarded (skipped without JSON parsing). Intermediate frames mutate {@code localBook} in place,
-     * and {@link PolymarketLocalBook#snapshotQuote(long)} is invoked only once at the end of the batch.
+     * Operates directly on {@link TimestampedFrame#rawUtf8Bytes()} without allocating intermediate {@link String}
+     * instances. If a newer frame in the batch is a full dual-asset {@code book} snapshot, all earlier frames in
+     * the batch are fast-forwarded (skipped without JSON parsing). Intermediate frames mutate {@code localBook}
+     * in place, and {@link PolymarketLocalBook#snapshotQuote(long)} is invoked only once at the end of the batch.
      *
      * @param frames    chronological batch of raw CLOB frames
      * @param localBook stateful local orderbook owned by the CLOB book worker thread
@@ -268,12 +317,12 @@ public class PolymarketStreamParser {
         }
         int size = frames.size();
         int startIndex = 0;
-        String yesToken = localBook.getYesTokenId();
-        String noToken = localBook.getNoTokenId();
-        if (size > 1 && !yesToken.isEmpty() && !noToken.isEmpty()) {
+        byte[] yesTokenBytes = localBook.getYesTokenBytes();
+        byte[] noTokenBytes = localBook.getNoTokenBytes();
+        if (size > 1 && yesTokenBytes.length > 0 && noTokenBytes.length > 0) {
             for (int i = size - 1; i > 0; i--) {
-                String raw = frames.get(i).rawText();
-                if (isFullDualBookSnapshot(raw, yesToken, noToken)) {
+                byte[] rawBytes = frames.get(i).rawUtf8Bytes();
+                if (isFullDualBookSnapshot(rawBytes, yesTokenBytes, noTokenBytes)) {
                     startIndex = i;
                     break;
                 }
@@ -285,7 +334,7 @@ public class PolymarketStreamParser {
         long lastUpdatedRecvTs = 0L;
         for (int i = startIndex; i < size; i++) {
             TimestampedFrame frame = frames.get(i);
-            if (applyClobFrameToBookOnly(frame.rawText(), localBook)) {
+            if (applyClobFrameToBookOnly(frame.rawUtf8Bytes(), localBook)) {
                 appliedCount++;
                 lastUpdatedRecvTs = frame.recvTs();
             }
@@ -297,25 +346,22 @@ public class PolymarketStreamParser {
         return new ClobBatchResult(localBook.snapshotQuote(lastUpdatedRecvTs), appliedCount, fastForwarded);
     }
 
-    private boolean applyClobFrameToBookOnly(String rawJson, PolymarketLocalBook localBook) {
-        if (rawJson == null || rawJson.isBlank() || localBook == null) {
+    private boolean applyClobFrameToBookOnly(byte[] rawBytes, PolymarketLocalBook localBook) {
+        if (rawBytes == null || rawBytes.length == 0 || localBook == null) {
             return false;
         }
-        if (rawJson.length() <= 16) {
-            String trimmed = rawJson.trim();
-            if ("PING".equalsIgnoreCase(trimmed) || "PONG".equalsIgnoreCase(trimmed)) {
-                return false;
-            }
-        }
-        if (!containsRelevantClobEvent(rawJson)) {
+        if (rawBytes.length <= 16 && isPingOrPongOrBlank(rawBytes)) {
             return false;
         }
-        long eventTimestampMs = extractEventTimestampMs(rawJson);
+        if (!containsRelevantClobEvent(rawBytes)) {
+            return false;
+        }
+        long eventTimestampMs = extractEventTimestampMs(rawBytes);
         if (eventTimestampMs > 0L && eventTimestampMs < localBook.getLastServerTimestampMs()) {
             return false;
         }
 
-        try (JsonParser parser = objectMapper.createParser(rawJson)) {
+        try (JsonParser parser = objectMapper.createParser(rawBytes)) {
             JsonToken firstToken = parser.nextToken();
             if (firstToken == null) {
                 return false;
@@ -342,16 +388,39 @@ public class PolymarketStreamParser {
         }
     }
 
-    static long extractEventTimestampMs(String rawJson) {
-        int idx = rawJson.lastIndexOf("\"timestamp\"");
+    private static boolean isPingOrPongOrBlank(byte[] rawBytes) {
+        int start = 0;
+        int end = rawBytes.length;
+        while (start < end && rawBytes[start] <= ' ') {
+            start++;
+        }
+        while (end > start && rawBytes[end - 1] <= ' ') {
+            end--;
+        }
+        int len = end - start;
+        if (len == 0) {
+            return true;
+        }
+        if (len == 4) {
+            int b0 = rawBytes[start] | 0x20;
+            int b1 = rawBytes[start + 1] | 0x20;
+            int b2 = rawBytes[start + 2] | 0x20;
+            int b3 = rawBytes[start + 3] | 0x20;
+            return b0 == 'p' && (b1 == 'i' || b1 == 'o') && b2 == 'n' && b3 == 'g';
+        }
+        return false;
+    }
+
+    static long extractEventTimestampMs(byte[] rawBytes) {
+        int idx = lastIndexOfBytes(rawBytes, BYTES_TIMESTAMP);
         if (idx < 0) {
             return 0L;
         }
-        int pos = idx + 11;
-        int len = rawJson.length();
+        int pos = idx + BYTES_TIMESTAMP.length;
+        int len = rawBytes.length;
         while (pos < len) {
-            char c = rawJson.charAt(pos);
-            if (c == ':' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"') {
+            byte b = rawBytes[pos];
+            if (b == ':' || b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '"') {
                 pos++;
             } else {
                 break;
@@ -360,9 +429,9 @@ public class PolymarketStreamParser {
         long value = 0L;
         int digits = 0;
         while (pos < len) {
-            char c = rawJson.charAt(pos);
-            if (c >= '0' && c <= '9') {
-                value = value * 10L + (c - '0');
+            byte b = rawBytes[pos];
+            if (b >= '0' && b <= '9') {
+                value = value * 10L + (b - '0');
                 digits++;
                 pos++;
             } else {
@@ -372,29 +441,77 @@ public class PolymarketStreamParser {
         return digits > 0 ? value : 0L;
     }
 
-    private static boolean isFullDualBookSnapshot(String rawJson, String yesTokenId, String noTokenId) {
-        if (rawJson == null || rawJson.length() < 64) {
+    private static boolean isFullDualBookSnapshot(byte[] rawBytes, byte[] yesTokenBytes, byte[] noTokenBytes) {
+        if (rawBytes == null || rawBytes.length < 64) {
             return false;
         }
-        return rawJson.contains("\"bids\"")
-                && rawJson.contains("\"asks\"")
-                && rawJson.contains(yesTokenId)
-                && rawJson.contains(noTokenId);
+        return indexOfBytes(rawBytes, BYTES_BIDS, 0) >= 0
+                && indexOfBytes(rawBytes, BYTES_ASKS, 0) >= 0
+                && indexOfBytes(rawBytes, yesTokenBytes, 0) >= 0
+                && indexOfBytes(rawBytes, noTokenBytes, 0) >= 0;
     }
 
-    private static boolean containsRelevantClobEvent(String rawJson) {
-        int len = rawJson.length();
+    private static boolean containsRelevantClobEvent(byte[] rawBytes) {
+        int len = rawBytes.length;
         int tailStart = Math.max(0, len - 64);
-        if (rawJson.indexOf("last_trade_price", tailStart) >= 0
-                || rawJson.indexOf("tick_size_change", tailStart) >= 0) {
+        if (indexOfBytes(rawBytes, BYTES_LAST_TRADE_PRICE, tailStart) >= 0
+                || indexOfBytes(rawBytes, BYTES_TICK_SIZE_CHANGE, tailStart) >= 0) {
             return false;
         }
-        return rawJson.contains("\"price_changes\"")
-                || rawJson.contains("\"bids\"")
-                || rawJson.contains("\"asks\"")
-                || rawJson.contains("best_bid_ask")
-                || rawJson.contains("price_change")
-                || rawJson.contains("\"book\"");
+        return indexOfBytes(rawBytes, BYTES_PRICE_CHANGES, 0) >= 0
+                || indexOfBytes(rawBytes, BYTES_BIDS, 0) >= 0
+                || indexOfBytes(rawBytes, BYTES_ASKS, 0) >= 0
+                || indexOfBytes(rawBytes, BYTES_BEST_BID_ASK, 0) >= 0
+                || indexOfBytes(rawBytes, BYTES_PRICE_CHANGE, 0) >= 0
+                || indexOfBytes(rawBytes, BYTES_BOOK, 0) >= 0;
+    }
+
+    private static int indexOfBytes(byte[] haystack, byte[] needle, int fromIndex) {
+        int nLen = needle.length;
+        if (nLen == 0) {
+            return fromIndex;
+        }
+        int max = haystack.length - nLen;
+        byte first = needle[0];
+        for (int i = Math.max(0, fromIndex); i <= max; i++) {
+            if (haystack[i] != first) {
+                while (++i <= max && haystack[i] != first) {
+                    // fast scan to first matching byte
+                }
+                if (i > max) {
+                    break;
+                }
+            }
+            int j = 1;
+            while (j < nLen && haystack[i + j] == needle[j]) {
+                j++;
+            }
+            if (j == nLen) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int lastIndexOfBytes(byte[] haystack, byte[] needle) {
+        int nLen = needle.length;
+        int max = haystack.length - nLen;
+        if (nLen == 0 || max < 0) {
+            return -1;
+        }
+        byte first = needle[0];
+        for (int i = max; i >= 0; i--) {
+            if (haystack[i] == first) {
+                int j = 1;
+                while (j < nLen && haystack[i + j] == needle[j]) {
+                    j++;
+                }
+                if (j == nLen) {
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 
     private boolean streamSingleClobEvent(JsonParser parser, PolymarketLocalBook localBook) throws IOException {
@@ -405,8 +522,7 @@ public class PolymarketStreamParser {
         boolean bookCleared = false;
         boolean hasBookLevels = false;
         boolean priceChanged = false;
-        List< double[] > deferredBids = null;
-        List< double[] > deferredAsks = null;
+        DeferredBookBuffers deferred = null;
 
         while (parser.nextToken() != JsonToken.END_OBJECT) {
             String fieldName = parser.currentName();
@@ -418,21 +534,10 @@ public class PolymarketStreamParser {
                 case "event_type" -> eventType = parser.getValueAsString("");
                 case "asset_id" -> {
                     assetId = parser.getValueAsString("");
-                    if (!assetId.isEmpty() && (deferredBids != null || deferredAsks != null)) {
+                    if (!assetId.isEmpty() && deferred != null && (deferred.bidsLen > 0 || deferred.asksLen > 0)) {
                         localBook.clearAssetBook(assetId);
                         bookCleared = true;
-                        if (deferredBids != null) {
-                            for (double[] lvl : deferredBids) {
-                                localBook.updateLevel(assetId, true, lvl[0], lvl[1]);
-                            }
-                            deferredBids = null;
-                        }
-                        if (deferredAsks != null) {
-                            for (double[] lvl : deferredAsks) {
-                                localBook.updateLevel(assetId, false, lvl[0], lvl[1]);
-                            }
-                            deferredAsks = null;
-                        }
+                        deferred.flushTo(assetId, localBook);
                     }
                 }
                 case "bids" -> {
@@ -445,7 +550,11 @@ public class PolymarketStreamParser {
                             }
                             streamBookLevels(parser, assetId, true, localBook);
                         } else {
-                            deferredBids = readDeferredBookLevels(parser);
+                            if (deferred == null) {
+                                deferred = DEFERRED_BUFFERS.get();
+                                deferred.reset();
+                            }
+                            readDeferredBookLevels(parser, deferred, true);
                         }
                     } else {
                         parser.skipChildren();
@@ -461,7 +570,11 @@ public class PolymarketStreamParser {
                             }
                             streamBookLevels(parser, assetId, false, localBook);
                         } else {
-                            deferredAsks = readDeferredBookLevels(parser);
+                            if (deferred == null) {
+                                deferred = DEFERRED_BUFFERS.get();
+                                deferred.reset();
+                            }
+                            readDeferredBookLevels(parser, deferred, false);
                         }
                     } else {
                         parser.skipChildren();
@@ -480,18 +593,9 @@ public class PolymarketStreamParser {
             }
         }
 
-        if (hasBookLevels && (deferredBids != null || deferredAsks != null)) {
+        if (hasBookLevels && deferred != null && (deferred.bidsLen > 0 || deferred.asksLen > 0)) {
             localBook.clearAssetBook(assetId);
-            if (deferredBids != null) {
-                for (double[] lvl : deferredBids) {
-                    localBook.updateLevel(assetId, true, lvl[0], lvl[1]);
-                }
-            }
-            if (deferredAsks != null) {
-                for (double[] lvl : deferredAsks) {
-                    localBook.updateLevel(assetId, false, lvl[0], lvl[1]);
-                }
-            }
+            deferred.flushTo(assetId, localBook);
         }
 
         if ("book".equals(eventType) || (eventType.isEmpty() && hasBookLevels)) {
@@ -541,8 +645,10 @@ public class PolymarketStreamParser {
         }
     }
 
-    private static List<double[]> readDeferredBookLevels(JsonParser parser) throws IOException {
-        List<double[]> levels = new ArrayList<>();
+    private static void readDeferredBookLevels(
+            JsonParser parser,
+            DeferredBookBuffers buffers,
+            boolean isBid) throws IOException {
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             if (parser.currentToken() == JsonToken.START_OBJECT) {
                 double price = 0.0;
@@ -559,13 +665,51 @@ public class PolymarketStreamParser {
                     }
                 }
                 if (price > 0.0 && size > 0.0) {
-                    levels.add(new double[]{price, size});
+                    buffers.addLevel(isBid, price, size);
                 }
             } else {
                 parser.skipChildren();
             }
         }
-        return levels;
+    }
+
+    private static final class DeferredBookBuffers {
+        private double[] bids = new double[512];
+        private double[] asks = new double[512];
+        private int bidsLen = 0;
+        private int asksLen = 0;
+
+        void reset() {
+            bidsLen = 0;
+            asksLen = 0;
+        }
+
+        void addLevel(boolean isBid, double price, double size) {
+            if (isBid) {
+                if (bidsLen + 2 > bids.length) {
+                    bids = Arrays.copyOf(bids, bids.length << 1);
+                }
+                bids[bidsLen++] = price;
+                bids[bidsLen++] = size;
+            } else {
+                if (asksLen + 2 > asks.length) {
+                    asks = Arrays.copyOf(asks, asks.length << 1);
+                }
+                asks[asksLen++] = price;
+                asks[asksLen++] = size;
+            }
+        }
+
+        void flushTo(String assetId, PolymarketLocalBook localBook) {
+            for (int i = 0; i < bidsLen; i += 2) {
+                localBook.updateLevel(assetId, true, bids[i], bids[i + 1]);
+            }
+            for (int i = 0; i < asksLen; i += 2) {
+                localBook.updateLevel(assetId, false, asks[i], asks[i + 1]);
+            }
+            bidsLen = 0;
+            asksLen = 0;
+        }
     }
 
     private static boolean streamPriceChangesArray(
@@ -640,16 +784,81 @@ public class PolymarketStreamParser {
             return parser.getDoubleValue();
         }
         if (token == JsonToken.VALUE_STRING) {
-            String text = parser.getText();
-            if (text != null && !text.isEmpty()) {
-                try {
-                    return Double.parseDouble(text.trim());
-                } catch (NumberFormatException ignored) {
-                    return 0.0;
-                }
-            }
+            char[] buf = parser.getTextCharacters();
+            int offset = parser.getTextOffset();
+            int len = parser.getTextLength();
+            return parseFastDouble(buf, offset, len);
         }
         return 0.0;
+    }
+
+    static double parseFastDouble(char[] buf, int offset, int len) {
+        if (buf == null || len <= 0) {
+            return 0.0;
+        }
+        int start = offset;
+        int end = offset + len;
+        while (start < end && buf[start] <= ' ') {
+            start++;
+        }
+        while (end > start && buf[end - 1] <= ' ') {
+            end--;
+        }
+        if (start >= end) {
+            return 0.0;
+        }
+
+        int pos = start;
+        boolean negative = false;
+        char first = buf[pos];
+        if (first == '-') {
+            negative = true;
+            pos++;
+        } else if (first == '+') {
+            pos++;
+        }
+        if (pos >= end) {
+            return 0.0;
+        }
+
+        long mantissa = 0L;
+        int fracScale = 0;
+        boolean seenDot = false;
+        int digits = 0;
+        while (pos < end) {
+            char c = buf[pos];
+            if (c >= '0' && c <= '9') {
+                int d = c - '0';
+                if (digits < 18) {
+                    mantissa = mantissa * 10L + d;
+                    if (seenDot) {
+                        fracScale++;
+                    }
+                    digits++;
+                } else {
+                    return parseDoubleFallback(buf, start, end - start);
+                }
+            } else if (c == '.' && !seenDot) {
+                seenDot = true;
+            } else {
+                return parseDoubleFallback(buf, start, end - start);
+            }
+            pos++;
+        }
+
+        if (digits == 0) {
+            return 0.0;
+        }
+        double value = fracScale > 0 ? (mantissa / POW10[fracScale]) : (double) mantissa;
+        return negative ? -value : value;
+    }
+
+    private static double parseDoubleFallback(char[] buf, int start, int len) {
+        try {
+            return Double.parseDouble(new String(buf, start, len));
+        } catch (NumberFormatException ignored) {
+            return 0.0;
+        }
     }
 
     /**

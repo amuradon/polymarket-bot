@@ -13,9 +13,9 @@ The deployment architecture is split into clean, single-responsibility units for
 ```mermaid
 flowchart TD
     subgraph LiveTrading["Live Trading Application"]
-        LT_Base["1. infra/live-trading-base.yaml<br/>(ECR Repo, LogGroup, IAM Role, SG: 443 from 178.17.13.13/32)"]
-        LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8gn.xlarge 4-vCPU Host, --network host, Non-Blocking awslogs)"]
-        LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Buildx ARM64, ECR Push, SSM Deploy)"]
+        LT_Base["1. infra/live-trading-base.yaml<br/>(S3 Artifact Bucket, LogGroup, IAM Role, SG: 443 from 178.17.13.13/32)"]
+        LT_EC2["2. infra/live-trading-ec2.yaml<br/>(24/7 c8gn.xlarge 4-vCPU Host, Bare-OS Temurin 25 systemd, CloudWatch Agent)"]
+        LT_Script["3. infra/deploy-live.ps1 / .sh<br/>(Package tar.gz, S3 Upload, SSM Deploy)"]
         LT_Base --> LT_EC2
         LT_EC2 --> LT_Script
     end
@@ -35,24 +35,25 @@ flowchart TD
 1. **AWS Region**: `eu-west-1` (Ireland / Dublin) for physical proximity (~5-8 ms RTT over AWS backbone) to Polymarket CLOB in London (`eu-west-2`).
 2. **Compute & 4-Core Pipeline**:
    - Dedicated, non-throttled **`c8gn.xlarge`** (4 vCPU Graviton4 ARM64, 8 GiB RAM, 30 Gbps Enhanced Networking / Nitro v5) for Live Trading.
-   - Each of the 4 physical Neoverse-V2 cores is mapped to a dedicated lock-free thread (`ws-io-reader`, `clob-book-worker`, `strategy-calculator-worker`, `order-execution-io-worker`) running under Java 25 **Generational ZGC** (`-XX:+UseZGC -XX:+AlwaysPreTouch`).
+   - Each of the 4 physical Neoverse-V2 cores is mapped to a dedicated lock-free thread (`clob-ws-io-reader`, `clob-book-worker`, `strategy-calculator-worker`, `order-execution-io-worker`) running under Java 25 **Generational ZGC** (`-XX:+UseZGC -XX:+AlwaysPreTouch -XX:+UseTransparentHugePages -XX:+UseThreadPriorities -Xms6g -Xmx6g`).
    - `t4g.small` with **Unlimited CPU Credits** and persistent gp3 EBS volume for the Data Collector (`data`).
-3. **Zero-Overhead Container Runtime**:
-   - The Live Trading Docker container executes with **`--network host`** (eliminating `docker0` NAT bridge overhead and exposing host `/proc/net/tcp` directly to the telemetry monitor) and **`--log-opt mode=non-blocking --log-opt max-buffer-size=16m`** (preventing CloudWatch Logs flushes from stalling JVM threads).
+3. **Bare-OS Direct Execution (Zero Docker / Zero NAT Overhead for `live`)**:
+   - The Live Trading application runs directly on Amazon Linux 2023 via **`systemd`** (`polymarket-live.service`) with `AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK` and `Nice=-20`—completely eliminating `dockerd`, `containerd`, `seccomp-bpf` syscall filtering, and `iptables` NAT (`nf_conntrack`).
+   - Application logs are appended to `/var/log/polymarket-live/live-trading.log` and streamed asynchronously by the Amazon CloudWatch Agent to `/polymarket-bot/polymarket-bot-live-base/live-trading`.
    - Live trading statistics are read externally from the Polymarket REST API; no secondary EBS volume or disk I/O is attached to the `live` instance.
 4. **Network & Security**:
-   - Inbound HTTPS (port 443, redirected via host `iptables` to Quarkus port 8080) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
+   - Inbound port 443 (bound directly by Quarkus via `net.ipv4.ip_unprivileged_port_start=443`) access is restricted strictly to authorized IP **`178.17.13.13/32`**.
    - No public SSH (port 22) is open. Management and deployment are executed exclusively via **AWS Systems Manager (SSM)**.
 5. **SemVer & Maven Release**:
    - Before deploying the Live Trading Engine, run `mvnw release:clean release:prepare` (or `mvnw release:clean release:prepare "-DreleaseVersion=1.1.0"`), which packages the release artifact `.\live\target\quarkus-app\app\live-{x.y.z}.jar`.
-   - `infra/deploy-live.ps1` and `infra/deploy-live.sh` determine the version `{x.y.z}` directly from `.\live\target\quarkus-app\app\live-{x.y.z}.jar` and tag the Docker image with `{x.y.z}` (along with `latest`).
+   - `infra/deploy-live.ps1` and `infra/deploy-live.sh` determine the version `{x.y.z}` directly from `.\live\target\quarkus-app\app\live-{x.y.z}.jar`, package `quarkus-app` into `live-{x.y.z}.tar.gz`, upload it to the encrypted S3 artifact bucket, and deploy via SSM.
 
 ---
 
 ## 2. Live Trading Application Deployment
 
 ### Step 2.1: Deploy Base Infrastructure Stack (`infra/live-trading-base.yaml`)
-Provisions the ECR repository (`polymarket-bot-live-base-repo`), CloudWatch Logs group, IAM role with SSM/SecretsManager access, and the security group allowing inbound port 443 access strictly from `178.17.13.13/32`.
+Provisions the private encrypted S3 artifact bucket (`LiveTradingArtifactBucket`), CloudWatch Logs group, IAM role with SSM/S3/SecretsManager access, and the security group allowing inbound port 443 access strictly from `178.17.13.13/32`.
 
 #### Windows 11 (PowerShell):
 ```powershell
@@ -77,7 +78,7 @@ aws cloudformation deploy \
 ---
 
 ### Step 2.2: Deploy Compute Infrastructure Stack (`infra/live-trading-ec2.yaml`)
-Provisions the 24/7 `c8gn.xlarge` (4 vCPU Graviton4) EC2 instance referencing the base stack outputs. UserData tunes kernel TCP receive buffers (`rmem_max = 33554432`), configures `iptables` port 443 → 8080 redirection, and creates `/usr/local/bin/start-polymarket-live.sh` with `--network host` and non-blocking `awslogs`.
+Provisions the 24/7 `c8gn.xlarge` (4 vCPU Graviton4) EC2 instance referencing the base stack outputs. UserData installs ARM64 Eclipse Temurin 25, tunes kernel TCP receive buffers (`rmem_default = 16777216`, `rmem_max = 33554432`, `busy_read = 50`, `busy_poll = 50`, `ip_unprivileged_port_start = 443`), configures the CloudWatch Agent, and creates `/etc/systemd/system/polymarket-live.service` and `/usr/local/bin/deploy-polymarket-live.sh`.
 
 #### Windows 11 (PowerShell):
 ```powershell
@@ -100,7 +101,7 @@ aws cloudformation deploy \
 ---
 
 ### Step 2.3: Build & Deploy Live Trading Application
-First, execute Maven release to build the release artifacts (including `.\live\target\quarkus-app\app\live-{x.y.z}.jar`), then run the deployment script to build the multi-arch `linux/arm64` container image via Docker Buildx, push it to ECR, and trigger container launch on EC2 via AWS Systems Manager (SSM).
+First, execute Maven release to build the release artifacts (including `.\live\target\quarkus-app\app\live-{x.y.z}.jar`), then run the deployment script to package `live-{x.y.z}.tar.gz`, upload it to S3, and trigger atomic `systemd` deployment on EC2 via AWS Systems Manager (SSM).
 
 #### Windows 11 (PowerShell) - Primary:
 ```powershell
@@ -109,7 +110,7 @@ First, execute Maven release to build the release artifacts (including `.\live\t
 # or:
 .\mvnw -B release:clean release:prepare "-DreleaseVersion=1.1.0"
 
-# 2. Build Docker image, push to ECR, and deploy to EC2:
+# 2. Package archive, upload to S3, and deploy systemd service to EC2:
 .\infra\deploy-live.ps1
 ```
 
@@ -120,7 +121,7 @@ First, execute Maven release to build the release artifacts (including `.\live\t
 # or:
 ./mvnw release:clean release:prepare -DreleaseVersion=1.1.0
 
-# 2. Build Docker image, push to ECR, and deploy to EC2:
+# 2. Package archive, upload to S3, and deploy systemd service to EC2:
 ./infra/deploy-live.sh
 ```
 
@@ -224,7 +225,7 @@ First, prepare the Maven release, and then run the deployment script:
 
 ./infra/deploy-live.sh
 ```
-The deployment script determines the Docker image version from `.\live\target\quarkus-app\app\live-{x.y.z}.jar`, builds and pushes the new `linux/arm64` image to ECR, and instructs the running EC2 instance via AWS SSM to pull the new image and restart the container within seconds—without downtime of the underlying server.
+The deployment script determines the release version from `.\live\target\quarkus-app\app\live-{x.y.z}.jar`, packages `live\target\quarkus-app` into `live-{x.y.z}.tar.gz`, uploads it to the encrypted S3 artifact bucket (`LiveTradingArtifactBucket`), and instructs the running EC2 instance via AWS SSM (`/usr/local/bin/deploy-polymarket-live.sh`) to extract the release and restart `polymarket-live.service` within seconds—without downtime of the underlying server.
 
 ### Updating the Telegram Alert Lambda:
 Simply run the alert deployment script:
@@ -253,12 +254,12 @@ Because inbound port 443 is strictly whitelisted for IP `178.17.13.13/32`:
     --target $InstanceId `
     --region eu-west-1 `
     --document-name AWS-StartPortForwardingSession `
-    --parameters "portNumber=8080,localPortNumber=8080"
+    --parameters "portNumber=443,localPortNumber=8080"
   ```
   Then navigate to `http://localhost:8080` or `http://localhost:8080/api/live/telemetry`.
 
 ### 5.2 Verifying CloudWatch Logs
-Tail live container logs directly from CloudWatch:
+Tail live application logs directly from CloudWatch:
 ```powershell
 aws logs tail "/polymarket-bot/polymarket-bot-live-base/live-trading" --region eu-west-1 --follow
 ```

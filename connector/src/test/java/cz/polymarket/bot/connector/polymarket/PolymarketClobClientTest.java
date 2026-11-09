@@ -230,4 +230,38 @@ class PolymarketClobClientTest {
 
         client.stopAll();
     }
+
+    @Test
+    void shouldComputeDistinct64BitFingerprintsForShortAndLargePayloads() {
+        byte[] empty = new byte[0];
+        assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(null)).isZero();
+        assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(empty)).isZero();
+
+        // Short payloads (< 8 bytes and non-multiple of 8 bytes)
+        byte[] shortA = "PING".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] shortB = "PONG".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] oddLen = "{\"event_type\":\"book\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(shortA))
+                .isNotZero()
+                .isNotEqualTo(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(shortB));
+        assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(oddLen)).isNotZero();
+
+        // Large 16 KB orderbook snapshot payload with single-byte mutation near the tail
+        byte[] large1 = new byte[16_387];
+        for (int i = 0; i < large1.length; i++) {
+            large1[i] = (byte) ('0' + (i % 10));
+        }
+        byte[] large2 = large1.clone();
+        large2[large2.length - 1] = 'X';
+        byte[] large3 = large1.clone();
+        large3[8_192] = 'Y';
+
+        long fp1 = PolymarketClobClient.PayloadDeduplicator.computeFingerprint(large1);
+        long fp2 = PolymarketClobClient.PayloadDeduplicator.computeFingerprint(large2);
+        long fp3 = PolymarketClobClient.PayloadDeduplicator.computeFingerprint(large3);
+        assertThat(fp1).isNotZero();
+        assertThat(fp1).isNotEqualTo(fp2);
+        assertThat(fp1).isNotEqualTo(fp3);
+        assertThat(fp2).isNotEqualTo(fp3);
+    }
 }

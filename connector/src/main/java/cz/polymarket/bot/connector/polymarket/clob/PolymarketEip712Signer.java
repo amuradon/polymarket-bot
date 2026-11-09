@@ -79,6 +79,15 @@ public final class PolymarketEip712Signer {
     private final BigInteger privateKeyScalar;
     private final String signerEoaAddress;
 
+    private volatile String cachedMakerInput;
+    private volatile String cachedMakerChecksummed;
+    private volatile byte[] cachedMakerBytes;
+
+    private volatile String cachedTokenId1;
+    private volatile byte[] cachedTokenWord1;
+    private volatile String cachedTokenId2;
+    private volatile byte[] cachedTokenWord2;
+
     /**
      * Constructs a new {@link PolymarketEip712Signer} from a 32-byte hex-encoded secp256k1 private key.
      *
@@ -240,7 +249,7 @@ public final class PolymarketEip712Signer {
             String orderType,
             long salt,
             long timestampMs) {
-        String checksummedMaker = toEip55ChecksumAddress(makerAddress);
+        String checksummedMaker = resolveChecksummedMaker(makerAddress);
         ClobOrderPayload unsignedOrder = new ClobOrderPayload(
                 salt,
                 checksummedMaker,
@@ -284,7 +293,7 @@ public final class PolymarketEip712Signer {
      */
     public String signOrder(ClobOrderPayload order) {
         byte[] contentsHash = computeOrderStructHash(order);
-        byte[] signerAddrBytes = decodeHexStrict(order.signer(), 20, "order.signer");
+        byte[] signerAddrBytes = resolveAddressBytes(order.signer(), "order.signer");
 
         // TypedDataSign(Order contents,string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)
         byte[] typedDataBuf = new byte[7 * 32];
@@ -292,7 +301,7 @@ public final class PolymarketEip712Signer {
         System.arraycopy(contentsHash, 0, typedDataBuf, 32, 32);
         System.arraycopy(DEPOSIT_WALLET_NAME_HASH, 0, typedDataBuf, 64, 32);
         System.arraycopy(DEPOSIT_WALLET_VERSION_HASH, 0, typedDataBuf, 96, 32);
-        encodeUint256(BigInteger.valueOf(POLYGON_CHAIN_ID), typedDataBuf, 128);
+        encodeUint64(POLYGON_CHAIN_ID, typedDataBuf, 128);
         encodeAddressWord(signerAddrBytes, typedDataBuf, 160);
         // offset 192..224 is bytes32(0)
 
@@ -429,31 +438,122 @@ public final class PolymarketEip712Signer {
         return keccak256(buf);
     }
 
-    private static byte[] computeOrderStructHash(ClobOrderPayload order) {
-        byte[] makerBytes = decodeHexStrict(order.maker(), 20, "order.maker");
-        byte[] signerBytes = decodeHexStrict(order.signer(), 20, "order.signer");
-        BigInteger tokenId = new BigInteger(order.tokenId().trim());
-        BigInteger makerAmount = new BigInteger(order.makerAmount().trim());
-        BigInteger takerAmount = new BigInteger(order.takerAmount().trim());
-        BigInteger timestamp = new BigInteger(order.timestamp().trim());
+    private byte[] computeOrderStructHash(ClobOrderPayload order) {
+        byte[] makerBytes = resolveAddressBytes(order.maker(), "order.maker");
+        byte[] signerBytes = order.maker().equals(order.signer())
+                ? makerBytes
+                : resolveAddressBytes(order.signer(), "order.signer");
+        byte[] tokenWord = resolveTokenWord(order.tokenId());
         int sideCode = "BUY".equalsIgnoreCase(order.side()) ? 0 : 1;
-        byte[] metadataBytes = decodeHexStrict(order.metadata(), 32, "order.metadata");
-        byte[] builderBytes = decodeHexStrict(order.builder(), 32, "order.builder");
 
         byte[] buf = new byte[12 * 32];
         System.arraycopy(ORDER_TYPE_HASH, 0, buf, 0, 32);
-        encodeUint256(BigInteger.valueOf(order.salt()), buf, 32);
+        encodeUint64(order.salt(), buf, 32);
         encodeAddressWord(makerBytes, buf, 64);
         encodeAddressWord(signerBytes, buf, 96);
-        encodeUint256(tokenId, buf, 128);
-        encodeUint256(makerAmount, buf, 160);
-        encodeUint256(takerAmount, buf, 192);
-        encodeUint256(BigInteger.valueOf(sideCode), buf, 224);
-        encodeUint256(BigInteger.valueOf(order.signatureType()), buf, 256);
-        encodeUint256(timestamp, buf, 288);
-        System.arraycopy(metadataBytes, 0, buf, 320, 32);
-        System.arraycopy(builderBytes, 0, buf, 352, 32);
+        System.arraycopy(tokenWord, 0, buf, 128, 32);
+        encodeDecimalUint256(order.makerAmount(), buf, 160);
+        encodeDecimalUint256(order.takerAmount(), buf, 192);
+        encodeUint64(sideCode, buf, 224);
+        encodeUint64(order.signatureType(), buf, 256);
+        encodeDecimalUint256(order.timestamp(), buf, 288);
+        if (!BYTES32_ZERO.equals(order.metadata())) {
+            byte[] metadataBytes = decodeHexStrict(order.metadata(), 32, "order.metadata");
+            System.arraycopy(metadataBytes, 0, buf, 320, 32);
+        }
+        if (!BYTES32_ZERO.equals(order.builder())) {
+            byte[] builderBytes = decodeHexStrict(order.builder(), 32, "order.builder");
+            System.arraycopy(builderBytes, 0, buf, 352, 32);
+        }
         return keccak256(buf);
+    }
+
+    private String resolveChecksummedMaker(String makerAddress) {
+        if (makerAddress != null && makerAddress.equals(this.cachedMakerInput)) {
+            String cached = this.cachedMakerChecksummed;
+            if (cached != null) {
+                return cached;
+            }
+        }
+        String checksummed = toEip55ChecksumAddress(makerAddress);
+        byte[] bytes = decodeHexStrict(checksummed, 20, "makerAddress");
+        this.cachedMakerBytes = bytes;
+        this.cachedMakerChecksummed = checksummed;
+        this.cachedMakerInput = makerAddress;
+        return checksummed;
+    }
+
+    private byte[] resolveAddressBytes(String addressHex, String fieldName) {
+        if (addressHex != null
+                && (addressHex.equals(this.cachedMakerChecksummed) || addressHex.equals(this.cachedMakerInput))) {
+            byte[] cached = this.cachedMakerBytes;
+            if (cached != null) {
+                return cached;
+            }
+        }
+        return decodeHexStrict(addressHex, 20, fieldName);
+    }
+
+    private byte[] resolveTokenWord(String tokenId) {
+        String clean = tokenId.trim();
+        if (clean.equals(this.cachedTokenId1)) {
+            byte[] word = this.cachedTokenWord1;
+            if (word != null) {
+                return word;
+            }
+        }
+        if (clean.equals(this.cachedTokenId2)) {
+            byte[] word = this.cachedTokenWord2;
+            if (word != null) {
+                return word;
+            }
+        }
+        byte[] word = new byte[32];
+        encodeUint256(new BigInteger(clean), word, 0);
+        this.cachedTokenId2 = this.cachedTokenId1;
+        this.cachedTokenWord2 = this.cachedTokenWord1;
+        this.cachedTokenId1 = clean;
+        this.cachedTokenWord1 = word;
+        return word;
+    }
+
+    private static void encodeDecimalUint256(String decimalStr, byte[] dest, int offset) {
+        String clean = decimalStr.trim();
+        int len = clean.length();
+        if (len > 0 && len <= 18 && clean.charAt(0) != '-') {
+            long val = 0L;
+            boolean allDigits = true;
+            for (int i = 0; i < len; i++) {
+                char c = clean.charAt(i);
+                if (c >= '0' && c <= '9') {
+                    val = val * 10L + (c - '0');
+                } else {
+                    allDigits = false;
+                    break;
+                }
+            }
+            if (allDigits) {
+                encodeUint64(val, dest, offset);
+                return;
+            }
+        }
+        encodeUint256(new BigInteger(clean), dest, offset);
+    }
+
+    private static void encodeUint64(long value, byte[] dest, int offset) {
+        if (value < 0L) {
+            encodeUint256(BigInteger.valueOf(value), dest, offset);
+            return;
+        }
+        int base = offset + 24;
+        dest[base] = (byte) ((value >>> 56) & 0xFFL);
+        dest[base + 1] = (byte) ((value >>> 48) & 0xFFL);
+        dest[base + 2] = (byte) ((value >>> 40) & 0xFFL);
+        dest[base + 3] = (byte) ((value >>> 32) & 0xFFL);
+        dest[base + 4] = (byte) ((value >>> 24) & 0xFFL);
+        dest[base + 5] = (byte) ((value >>> 16) & 0xFFL);
+        dest[base + 6] = (byte) ((value >>> 8) & 0xFFL);
+        dest[base + 7] = (byte) (value & 0xFFL);
     }
 
     private static void encodeUint256(BigInteger value, byte[] dest, int offset) {

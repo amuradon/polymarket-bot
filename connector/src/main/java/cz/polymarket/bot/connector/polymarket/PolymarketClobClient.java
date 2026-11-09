@@ -17,6 +17,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -560,6 +563,8 @@ public class PolymarketClobClient {
         private static final int WAYS_SHIFT = 4;
         private static final int WAYS_PER_SET = 1 << WAYS_SHIFT;
         private static final int WAY_MASK = WAYS_PER_SET - 1;
+        private static final VarHandle LONG_ARRAY_HANDLE =
+                MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
         private final long[] cache = new long[SET_COUNT * WAYS_PER_SET];
         private final byte[] wayCursors = new byte[SET_COUNT];
@@ -595,13 +600,25 @@ public class PolymarketClobClient {
             if (bytes == null || bytes.length == 0) {
                 return 0L;
             }
-            long h = 0xcbf29ce484222325L;
-            for (byte b : bytes) {
-                h ^= (b & 0xFFL);
-                h *= 0x100000001b3L;
+            int len = bytes.length;
+            long h = 0xcbf29ce484222325L ^ ((long) len * 0x9e3779b97f4a7c15L);
+            int i = 0;
+            int limit = len - 8;
+            while (i <= limit) {
+                long word = (long) LONG_ARRAY_HANDLE.get(bytes, i);
+                h ^= Long.rotateLeft(word * 0xbf58476d1ce4e5b9L, 31);
+                h = Long.rotateLeft(h, 27) * 0x94d049bb133111ebL + 0x52dce729L;
+                i += 8;
             }
-            long fp = h ^ ((long) bytes.length << 48);
-            return fp != 0L ? fp : 1L;
+            while (i < len) {
+                h ^= (bytes[i] & 0xFFL);
+                h *= 0x100000001b3L;
+                i++;
+            }
+            h ^= (h >>> 33);
+            h *= 0xff51afd7ed558ccdL;
+            h ^= (h >>> 33);
+            return h != 0L ? h : 1L;
         }
     }
 }

@@ -402,4 +402,44 @@ class PolymarketStreamParserTest {
         assertThat(currentQuote.get().bestAskUp()).isCloseTo(0.57, within(1e-6));
         assertThat(localBook.getLastServerTimestampMs()).isEqualTo(1794221100500L);
     }
+
+    @Test
+    void shouldParseRawUtf8BytesDirectlyWithDeferredBookLevelsBeforeAssetIdAndFastDoubleParsing() {
+        String yesToken = "token_up_bytes";
+        String noToken = "token_down_bytes";
+        PolymarketLocalBook localBook = new PolymarketLocalBook(yesToken, noToken);
+
+        // "bids" and "asks" appear BEFORE "asset_id" and mix string decimals, whitespace, scientific notation, and numeric tokens
+        byte[] deferredBookBytes = """
+                [
+                  {
+                    "bids": [{"price": "0.51", "size": "100.5"}, {"price": " 0.53 ", "size": "2.5e2"}],
+                    "asks": [{"price": 0.56, "size": 180}, {"price": "0.55", "size": "95.25"}],
+                    "event_type": "book",
+                    "asset_id": "token_up_bytes",
+                    "timestamp": "1794221200100"
+                  },
+                  {
+                    "bids": [{"price": "0.44", "size": "120"}],
+                    "asks": [{"price": "0.47", "size": "140"}],
+                    "asset_id": "token_down_bytes",
+                    "event_type": "book",
+                    "timestamp": "1794221200100"
+                  }
+                ]
+                """.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        Optional<PolymarketBboQuote> quote = parser.applyClobFrame(deferredBookBytes, 2000L, localBook);
+        assertThat(quote).isPresent();
+        assertThat(quote.get().bestBidUp()).isCloseTo(0.53, within(1e-6));
+        assertThat(quote.get().bestAskUp()).isCloseTo(0.55, within(1e-6));
+        assertThat(quote.get().askSizeUp()).isCloseTo(95.25, within(1e-6));
+        assertThat(quote.get().bestBidDown()).isCloseTo(0.44, within(1e-6));
+        assertThat(quote.get().bestAskDown()).isCloseTo(0.47, within(1e-6));
+        assertThat(quote.get().askSizeDown()).isCloseTo(140.0, within(1e-6));
+        assertThat(localBook.getLastServerTimestampMs()).isEqualTo(1794221200100L);
+
+        assertThat(parser.applyClobFrame("PING".getBytes(java.nio.charset.StandardCharsets.UTF_8), 2001L, localBook)).isEmpty();
+        assertThat(parser.applyClobFrame("  pong  ".getBytes(java.nio.charset.StandardCharsets.UTF_8), 2002L, localBook)).isEmpty();
+    }
 }

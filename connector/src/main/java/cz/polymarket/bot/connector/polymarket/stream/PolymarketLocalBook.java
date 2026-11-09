@@ -1,5 +1,6 @@
 package cz.polymarket.bot.connector.polymarket.stream;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Optional;
 
@@ -16,6 +17,8 @@ public class PolymarketLocalBook {
 
     private final String yesTokenId;
     private final String noTokenId;
+    private final byte[] yesTokenBytes;
+    private final byte[] noTokenBytes;
 
     // Indexed by price in millicents (1..999, where 540 = $0.540), value = size in shares
     private final double[] yesBids = new double[BOOK_LEVELS];
@@ -38,6 +41,8 @@ public class PolymarketLocalBook {
     public PolymarketLocalBook(String yesTokenId, String noTokenId) {
         this.yesTokenId = yesTokenId != null ? yesTokenId.trim() : "";
         this.noTokenId = noTokenId != null ? noTokenId.trim() : "";
+        this.yesTokenBytes = this.yesTokenId.getBytes(StandardCharsets.UTF_8);
+        this.noTokenBytes = this.noTokenId.getBytes(StandardCharsets.UTF_8);
     }
 
     /**
@@ -56,6 +61,24 @@ public class PolymarketLocalBook {
      */
     public String getNoTokenId() {
         return noTokenId;
+    }
+
+    /**
+     * Returns the pre-encoded UTF-8 bytes of the tracked Up (YES) token ID.
+     *
+     * @return UTF-8 bytes of {@code yesTokenId}
+     */
+    public byte[] getYesTokenBytes() {
+        return yesTokenBytes;
+    }
+
+    /**
+     * Returns the pre-encoded UTF-8 bytes of the tracked Down (NO) token ID.
+     *
+     * @return UTF-8 bytes of {@code noTokenId}
+     */
+    public byte[] getNoTokenBytes() {
+        return noTokenBytes;
     }
 
     /**

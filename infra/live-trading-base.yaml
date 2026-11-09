@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Polymarket Bot Live Trading Base Infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
-  CloudWatch Logs group, least-privilege IAM role with SSM Session Manager and Secrets Manager access,
-  and a security group restricting inbound HTTPS (port 443) strictly to authorized management IP (178.17.13.13/32).
+  Polymarket Bot Live Trading Base Infrastructure in eu-west-1 (Dublin). Provisions an encrypted private S3
+  release artifact bucket, CloudWatch Logs group, least-privilege IAM role with SSM Session Manager, S3 artifact
+  read, and Secrets Manager access, and a security group restricting inbound HTTPS (port 443) strictly to
+  authorized management IP (178.17.13.13/32).
 
 Metadata:
   AWSToolsMetrics:
@@ -31,38 +32,53 @@ Parameters:
     Description: CIDR IP range allowed inbound HTTPS (port 443) access.
 
 Resources:
-  LiveTradingEcrRepository:
-    Type: AWS::ECR::Repository
+  LiveTradingArtifactBucket:
+    Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Metadata:
       com.aws.cloudformation.Context:
-        why: Stores versioned Docker images for the Polymarket Bot Live Trading Quarkus application.
-        must: Keep image scanning enabled and retain repository across stack updates.
+        why: Stores versioned Quarkus fast-jar release archives (live-{x.y.z}.tar.gz) for direct Bare-OS systemd deployment on EC2 without Docker or ECR overhead.
+        must: Block all public access, encrypt at rest with AES256, and expire old release archives after 30 days.
     Properties:
-      RepositoryName: !Sub "${AWS::StackName}-repo"
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      EncryptionConfiguration:
-        EncryptionType: AES256
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
+      BucketName: !Sub "${AWS::StackName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLiveReleaseArchives
+            Prefix: releases/
+            Status: Enabled
+            ExpirationInDays: 30
+
+  LiveTradingArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Enforces TLS-only transport for all requests to LiveTradingArtifactBucket.
+        must: Deny any S3 operation where aws:SecureTransport is false.
+    Properties:
+      Bucket: !Ref LiveTradingArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LiveTradingArtifactBucket.Arn
+              - !Sub "${LiveTradingArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
   LiveTradingLogGroup:
     Type: AWS::Logs::LogGroup
@@ -70,7 +86,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Metadata:
       com.aws.cloudformation.Context:
-        why: Centralized CloudWatch Logs log group for the Live Trading Docker container (awslogs driver) and EC2 host logs.
+        why: Centralized CloudWatch Logs log group for the Live Trading systemd service and EC2 host logs.
         must: Retain logs across stack updates and enforce a bounded retention period.
     Properties:
       LogGroupName: !Sub "/polymarket-bot/${AWS::StackName}/live-trading"
@@ -81,7 +97,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: Security group restricting inbound HTTPS to authorized management IP and permitting all outbound traffic for market feeds.
-        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound HTTPS (443) for Polymarket CLOB, PolyBolt, ECR, SSM, and CloudWatch.
+        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound HTTPS (443) for Polymarket CLOB, PolyBolt, S3, SSM, and CloudWatch.
     Properties:
       GroupDescription: Security group for Polymarket Live Trading EC2 instance with restricted inbound HTTPS
       VpcId: !Ref VpcId
@@ -94,13 +110,13 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
-          Description: Allow outbound traffic for Polymarket CLOB/Gamma/PolyBolt (443), ECR, SSM, CloudWatch Logs, and Secrets Manager
+          Description: Allow outbound traffic for Polymarket CLOB/Gamma/PolyBolt (443), S3, SSM, CloudWatch Logs, and Secrets Manager
 
   LiveTradingIamRole:
     Type: AWS::IAM::Role
     Metadata:
       com.aws.cloudformation.Context:
-        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, pull images from ECR, and read credentials from Secrets Manager.
+        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, download release archives from S3, and read credentials from Secrets Manager.
         must: Scope Secrets Manager GetSecretValue permission strictly to the PolymarketSecretId prefix in eu-west-1.
     Properties:
       AssumeRolePolicyDocument:
@@ -113,22 +129,20 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: LiveTradingEcrSecretsAndCloudWatchAccess
+        - PolicyName: LiveTradingS3SecretsAndCloudWatchAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: EcrAuthToken
+              - Sid: S3ListLiveTradingArtifactBucket
                 Effect: Allow
                 Action:
-                  - ecr:GetAuthorizationToken
-                Resource: '*'
-              - Sid: EcrPullLiveTradingImage
+                  - s3:ListBucket
+                Resource: !GetAtt LiveTradingArtifactBucket.Arn
+              - Sid: S3GetLiveTradingArtifacts
                 Effect: Allow
                 Action:
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:BatchGetImage
-                Resource: !GetAtt LiveTradingEcrRepository.Arn
+                  - s3:GetObject
+                Resource: !Sub "${LiveTradingArtifactBucket.Arn}/releases/*"
               - Sid: ListSecretsForQuarkusSecretsManagerConfigSource
                 Effect: Allow
                 Action:
@@ -139,7 +153,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PolymarketSecretId}*"
-              - Sid: WriteContainerAndHostLogsToCloudWatch
+              - Sid: WriteServiceAndHostLogsToCloudWatch
                 Effect: Allow
                 Action:
                   - logs:CreateLogStream
@@ -158,16 +172,16 @@ Resources:
         - !Ref LiveTradingIamRole
 
 Outputs:
-  EcrRepositoryUri:
-    Description: Amazon ECR Repository URI for the Live Trading Docker image
-    Value: !GetAtt LiveTradingEcrRepository.RepositoryUri
+  ArtifactBucketName:
+    Description: S3 Bucket name storing Live Trading release archives (live-{x.y.z}.tar.gz)
+    Value: !Ref LiveTradingArtifactBucket
     Export:
-      Name: !Sub "${AWS::StackName}-EcrRepositoryUri"
-  EcrRepositoryArn:
-    Description: Amazon ECR Repository ARN for the Live Trading Docker image
-    Value: !GetAtt LiveTradingEcrRepository.Arn
+      Name: !Sub "${AWS::StackName}-ArtifactBucketName"
+  ArtifactBucketArn:
+    Description: S3 Bucket ARN storing Live Trading release archives
+    Value: !GetAtt LiveTradingArtifactBucket.Arn
     Export:
-      Name: !Sub "${AWS::StackName}-EcrRepositoryArn"
+      Name: !Sub "${AWS::StackName}-ArtifactBucketArn"
   LogGroupName:
     Description: CloudWatch Logs log group name for Live Trading logs
     Value: !Ref LiveTradingLogGroup

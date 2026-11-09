@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Builds the Docker image, pushes it to Amazon ECR, and deploys the Quarkus Live Trading application to AWS EC2 in eu-west-1.
+    Packages the Quarkus Live Trading fast-jar archive, uploads it to Amazon S3, and deploys it as a Bare-OS systemd service on AWS EC2 in eu-west-1.
 
 .DESCRIPTION
-    1. Determines the Docker image version {x.y.z} from .\live\target\quarkus-app\app\live-{x.y.z}.jar.
-    2. Resolves the Amazon ECR repository URI in the target region (default: eu-west-1).
-    3. Authenticates Docker with Amazon ECR.
-    4. Builds and pushes the AWS Graviton (linux/arm64) Docker image using Docker Buildx tagged with {x.y.z} and 'latest'.
-    5. Deploys the updated container on the running 24/7 EC2 instance via AWS Systems Manager (SSM) without open SSH ports.
+    1. Determines the release version {x.y.z} from .\live\target\quarkus-app\app\live-{x.y.z}.jar.
+    2. Resolves the S3 Artifact Bucket name from the Base Infrastructure stack in the target region (default: eu-west-1).
+    3. Packages .\live\target\quarkus-app into .\live\target\live-{x.y.z}.tar.gz.
+    4. Uploads the release archive to s3://<ArtifactBucketName>/releases/live-{x.y.z}.tar.gz.
+    5. Deploys the archive and restarts the polymarket-live systemd service on the running 24/7 EC2 instance via AWS Systems Manager (SSM).
 
 .PARAMETER Region
     Target AWS Region (default: eu-west-1).
@@ -18,8 +18,8 @@
 .PARAMETER Ec2StackName
     Name of the Live Trading Compute stack (default: polymarket-bot-live-ec2).
 
-.PARAMETER RepositoryUri
-    Amazon ECR repository URI override. If omitted, resolved from BaseStackName outputs.
+.PARAMETER ArtifactBucket
+    Amazon S3 bucket name override. If omitted, resolved from BaseStackName outputs.
 
 .PARAMETER InstanceId
     EC2 Instance ID override. If omitted, resolved from Ec2StackName outputs.
@@ -40,7 +40,7 @@ param(
     [string]$Ec2StackName = "polymarket-bot-live-ec2",
 
     [Parameter(Mandatory = $false)]
-    [string]$RepositoryUri = "",
+    [string]$ArtifactBucket = "",
 
     [Parameter(Mandatory = $false)]
     [string]$InstanceId = ""
@@ -55,13 +55,14 @@ if (-not (Test-Path (Join-Path $RepoRoot "pom.xml"))) {
 }
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Polymarket Bot: Build Image & Deploy Live Trading App    " -ForegroundColor Cyan
+Write-Host " Polymarket Bot: Package & Deploy Live Trading (Bare-OS)  " -ForegroundColor Cyan
 Write-Host " Region: $Region | Base: $BaseStackName | EC2: $Ec2StackName" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Determine version from .\live\target\quarkus-app\app\live-{x.y.z}.jar
-Write-Host "[1/5] Resolving version from .\live\target\quarkus-app\app\live-{x.y.z}.jar..." -ForegroundColor Yellow
-$AppDir = Join-Path $RepoRoot "live\target\quarkus-app\app"
+Write-Host "[1/4] Resolving version from .\live\target\quarkus-app\app\live-{x.y.z}.jar..." -ForegroundColor Yellow
+$QuarkusAppDir = Join-Path $RepoRoot "live\target\quarkus-app"
+$AppDir = Join-Path $QuarkusAppDir "app"
 if (-not (Test-Path $AppDir)) {
     throw "Directory '$AppDir' not found. Run 'mvnw release:clean release:prepare' before deploying."
 }
@@ -81,88 +82,47 @@ if ($JarName -notmatch '^live-(\d+\.\d+\.\d+)\.jar$') {
 $ReleaseVersion = $matches[1]
 Write-Host "      Detected artifact: $JarName (Version: $ReleaseVersion)" -ForegroundColor Green
 
-# 2. Resolve Amazon ECR Repository URI
-if (-not $RepositoryUri) {
-    Write-Host "[2/5] Resolving Amazon ECR repository URI..." -ForegroundColor Yellow
+# 2. Resolve S3 Artifact Bucket Name
+if (-not $ArtifactBucket) {
+    Write-Host "[2/4] Resolving S3 Artifact Bucket name from stack '$BaseStackName'..." -ForegroundColor Yellow
     try {
-        $RepositoryUri = (aws cloudformation describe-stacks `
+        $ArtifactBucket = (aws cloudformation describe-stacks `
             --stack-name $BaseStackName `
             --region $Region `
-            --query "Stacks[0].Outputs[?OutputKey=='EcrRepositoryUri'].OutputValue" `
+            --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" `
             --output text 2>$null).Trim()
     } catch {
-        $RepositoryUri = ""
+        $ArtifactBucket = ""
     }
 
-    if (-not $RepositoryUri -or $RepositoryUri -eq "None") {
+    if (-not $ArtifactBucket -or $ArtifactBucket -eq "None") {
         $AccountId = (aws sts get-caller-identity --query "Account" --output text).Trim()
-        $RepositoryUri = "$AccountId.dkr.ecr.$Region.amazonaws.com/$BaseStackName-repo"
+        $ArtifactBucket = "$BaseStackName-artifacts-$AccountId-$Region"
     }
 }
-Write-Host "      ECR Repository URI: $RepositoryUri" -ForegroundColor Green
+Write-Host "      S3 Artifact Bucket: $ArtifactBucket" -ForegroundColor Green
 
-# 3. Authenticate Docker with Amazon ECR
-Write-Host "[3/5] Authenticating Docker with Amazon ECR in $Region..." -ForegroundColor Yellow
-$EcrDomain = ($RepositoryUri -split '/')[0]
-
-# Ensure Docker config does not fail due to Windows Credential Manager payload length limits on ECR tokens
-$DockerConfigPath = Join-Path $env:USERPROFILE ".docker\config.json"
-if (Test-Path $DockerConfigPath) {
-    try {
-        $dockerConfig = Get-Content $DockerConfigPath -Raw | ConvertFrom-Json
-        if ($dockerConfig.credsStore -in @("desktop", "wincred")) {
-            Write-Host "      Removing '$($dockerConfig.credsStore)' from credsStore to prevent Windows Credential Manager token buffer overflow..." -ForegroundColor DarkGray
-            $dockerConfig.PSObject.Properties.Remove("credsStore")
-            $dockerConfig | ConvertTo-Json -Depth 10 | Set-Content $DockerConfigPath
-        }
-    } catch {
-        # Proceed with standard login attempt
-    }
+# 3. Package .\live\target\quarkus-app into live-{x.y.z}.tar.gz and upload to S3
+Write-Host "[3/4] Packaging quarkus-app and uploading to S3..." -ForegroundColor Yellow
+$ArchivePath = Join-Path $RepoRoot "live\target\live-$ReleaseVersion.tar.gz"
+if (Test-Path $ArchivePath) {
+    Remove-Item -Force $ArchivePath
 }
 
-$ecrPassword = (aws ecr get-login-password --region $Region).Trim()
-$ecrPassword | docker login --username AWS --password-stdin $EcrDomain
+tar -czf $ArchivePath -C $QuarkusAppDir .
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ArchivePath)) {
+    throw "Failed to create release archive '$ArchivePath' using tar."
+}
+
+$S3ArtifactUri = "s3://$ArtifactBucket/releases/live-$ReleaseVersion.tar.gz"
+aws s3 cp $ArchivePath $S3ArtifactUri --region $Region --only-show-errors
 if ($LASTEXITCODE -ne 0) {
-    # Direct fallback: write basic auth token directly to config.json
-    Write-Host "      Standard docker login failed; falling back to direct auth token injection..." -ForegroundColor Yellow
-    try {
-        $authBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("AWS:$ecrPassword"))
-        $dockerConfig = Get-Content $DockerConfigPath -Raw | ConvertFrom-Json
-        if (-not $dockerConfig.auths) {
-            $dockerConfig | Add-Member -Name "auths" -Value ([PSCustomObject]@{}) -MemberType NoteProperty -Force
-        }
-        $dockerConfig.auths | Add-Member -Name $EcrDomain -Value ([PSCustomObject]@{ auth = $authBase64 }) -MemberType NoteProperty -Force
-        $dockerConfig.PSObject.Properties.Remove("credsStore")
-        $dockerConfig | ConvertTo-Json -Depth 10 | Set-Content $DockerConfigPath
-        Write-Host "      Direct auth token configured successfully for $EcrDomain." -ForegroundColor Green
-    } catch {
-        throw "ECR authentication failed with exit code $LASTEXITCODE"
-    }
+    throw "Failed to upload '$ArchivePath' to '$S3ArtifactUri' (Exit code: $LASTEXITCODE)"
 }
+Write-Host "SUCCESS: Uploaded release archive to $S3ArtifactUri." -ForegroundColor Green
 
-# 4. Build and Push Multi-Platform ARM64 Docker Images (Docker Buildx)
-Write-Host "[4/5] Building and pushing linux/arm64 Docker image via Buildx..." -ForegroundColor Yellow
-$VersionedUri = "$RepositoryUri`:$ReleaseVersion"
-$LatestUri = "$RepositoryUri`:latest"
-
-Push-Location $RepoRoot
-try {
-    docker buildx build --platform linux/arm64 --provenance=false `
-        -t $VersionedUri `
-        -t $LatestUri `
-        -f live/src/main/docker/Dockerfile.jvm `
-        --push live
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Docker buildx build failed with exit code $LASTEXITCODE"
-    }
-} finally {
-    Pop-Location
-}
-Write-Host "SUCCESS: Pushed $VersionedUri and $LatestUri to Amazon ECR." -ForegroundColor Green
-
-# 5. Deploy Container on EC2 via AWS Systems Manager (SSM)
-Write-Host "[5/5] Deploying container on EC2 instance via AWS Systems Manager..." -ForegroundColor Yellow
+# 4. Deploy Bare-OS systemd Service on EC2 via AWS Systems Manager (SSM)
+Write-Host "[4/4] Deploying systemd service on EC2 instance via AWS Systems Manager..." -ForegroundColor Yellow
 if (-not $InstanceId) {
     try {
         $InstanceId = (aws cloudformation describe-stacks `
@@ -186,12 +146,11 @@ Write-Host "      Target EC2 Instance ID: $InstanceId" -ForegroundColor Green
 $Commands = @(
     "set -euxo pipefail",
     "export AWS_REGION=$Region",
-    'ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)',
-    "aws ecr get-login-password --region $Region | docker login --username AWS --password-stdin `"`$ACCOUNT_ID.dkr.ecr.$Region.amazonaws.com`"",
-    "docker pull $VersionedUri",
-    "sudo /usr/local/bin/start-polymarket-live.sh `"$VersionedUri`"",
+    "if command -v docker >/dev/null 2>&1; then sudo docker rm -f polymarket-live 2>/dev/null || true; sudo systemctl disable --now docker 2>/dev/null || true; fi",
+    "if command -v iptables >/dev/null 2>&1; then sudo iptables -t nat -F 2>/dev/null || true; fi",
+    "sudo /usr/local/bin/deploy-polymarket-live.sh `"$S3ArtifactUri`"",
     "sleep 3",
-    "docker ps --filter name=polymarket-live"
+    "sudo systemctl status polymarket-live --no-pager"
 )
 
 $TempParamsFile = [System.IO.Path]::GetTempFileName()
@@ -208,7 +167,7 @@ try {
     $SsmCommandId = (aws ssm send-command `
         --instance-ids $InstanceId `
         --document-name "AWS-RunShellScript" `
-        --comment "Deploy Polymarket Live Trading $ReleaseVersion" `
+        --comment "Deploy Polymarket Live Trading $ReleaseVersion (Bare-OS systemd)" `
         --parameters "file://$ForwardPath" `
         --region $Region `
         --query "Command.CommandId" `

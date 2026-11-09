@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Builds the Docker image, pushes it to Amazon ECR, and deploys the Quarkus Live
-# Trading application to AWS EC2 in eu-west-1.
+# Packages the Quarkus Live Trading fast-jar archive, uploads it to Amazon S3,
+# and deploys it as a Bare-OS systemd service on AWS EC2 in eu-west-1.
 #
-# Resolves the Docker image version {x.y.z} from:
+# Resolves the release version {x.y.z} from:
 #   ./live/target/quarkus-app/app/live-{x.y.z}.jar
 #
 # Usage:
-#   ./deploy-live.sh [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [-u <repository-uri>] [-i <instance-id>]
+#   ./deploy-live.sh [-r <region>] [-b <base-stack>] [-e <ec2-stack>] [-a <artifact-bucket>] [-i <instance-id>]
 # ==============================================================================
 set -euo pipefail
 
@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REGION="eu-west-1"
 BASE_STACK_NAME="polymarket-bot-live-base"
 EC2_STACK_NAME="polymarket-bot-live-ec2"
-REPOSITORY_URI=""
+ARTIFACT_BUCKET=""
 INSTANCE_ID=""
 
 usage() {
@@ -25,12 +25,12 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  -r, --region <region>       AWS Region (default: eu-west-1)
-  -b, --base-stack <name>     Base Infrastructure Stack Name (default: polymarket-bot-live-base)
-  -e, --ec2-stack <name>      EC2 Compute Stack Name (default: polymarket-bot-live-ec2)
-  -u, --repository-uri <uri>  Amazon ECR repository URI override
-  -i, --instance-id <id>      EC2 Instance ID override
-  -h, --help                  Show this help message
+  -r, --region <region>            AWS Region (default: eu-west-1)
+  -b, --base-stack <name>          Base Infrastructure Stack Name (default: polymarket-bot-live-base)
+  -e, --ec2-stack <name>           EC2 Compute Stack Name (default: polymarket-bot-live-ec2)
+  -a, --artifact-bucket <bucket>   Amazon S3 artifact bucket name override
+  -i, --instance-id <id>           EC2 Instance ID override
+  -h, --help                       Show this help message
 EOF
     exit 1
 }
@@ -49,8 +49,8 @@ while [[ $# -gt 0 ]]; do
             EC2_STACK_NAME="$2"
             shift 2
             ;;
-        -u|--repository-uri)
-            REPOSITORY_URI="$2"
+        -a|--artifact-bucket)
+            ARTIFACT_BUCKET="$2"
             shift 2
             ;;
         -i|--instance-id)
@@ -68,13 +68,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "=========================================================="
-echo " Polymarket Bot: Build Image & Deploy Live Trading App    "
+echo " Polymarket Bot: Package & Deploy Live Trading (Bare-OS)  "
 echo " Region: ${REGION} | Base: ${BASE_STACK_NAME} | EC2: ${EC2_STACK_NAME}"
 echo "=========================================================="
 
 # 1. Determine version from ./live/target/quarkus-app/app/live-{x.y.z}.jar
-echo "[1/5] Resolving version from ./live/target/quarkus-app/app/live-{x.y.z}.jar..."
-APP_DIR="${REPO_ROOT}/live/target/quarkus-app/app"
+echo "[1/4] Resolving version from ./live/target/quarkus-app/app/live-{x.y.z}.jar..."
+QUARKUS_APP_DIR="${REPO_ROOT}/live/target/quarkus-app"
+APP_DIR="${QUARKUS_APP_DIR}/app"
 if [ ! -d "$APP_DIR" ]; then
     echo "Error: Directory '${APP_DIR}' not found. Run './mvnw release:clean release:prepare' before deploying." >&2
     exit 1
@@ -101,44 +102,34 @@ fi
 RELEASE_VERSION="${BASH_REMATCH[1]}"
 echo "      Detected artifact: ${JAR_NAME} (Version: ${RELEASE_VERSION})"
 
-# 2. Resolve Amazon ECR Repository URI
-if [ -z "$REPOSITORY_URI" ]; then
-    echo "[2/5] Resolving Amazon ECR repository URI..."
-    REPOSITORY_URI=$(aws cloudformation describe-stacks \
+# 2. Resolve S3 Artifact Bucket Name
+if [ -z "$ARTIFACT_BUCKET" ]; then
+    echo "[2/4] Resolving S3 Artifact Bucket name from stack '${BASE_STACK_NAME}'..."
+    ARTIFACT_BUCKET=$(aws cloudformation describe-stacks \
         --stack-name "${BASE_STACK_NAME}" \
         --region "${REGION}" \
-        --query "Stacks[0].Outputs[?OutputKey=='EcrRepositoryUri'].OutputValue" \
+        --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" \
         --output text 2>/dev/null || true)
 
-    if [ -z "$REPOSITORY_URI" ] || [ "$REPOSITORY_URI" = "None" ]; then
+    if [ -z "$ARTIFACT_BUCKET" ] || [ "$ARTIFACT_BUCKET" = "None" ]; then
         ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${BASE_STACK_NAME}-repo"
+        ARTIFACT_BUCKET="${BASE_STACK_NAME}-artifacts-${ACCOUNT_ID}-${REGION}"
     fi
 fi
-echo "      ECR Repository URI: ${REPOSITORY_URI}"
+echo "      S3 Artifact Bucket: ${ARTIFACT_BUCKET}"
 
-# 3. Authenticate Docker with Amazon ECR
-echo "[3/5] Authenticating Docker with Amazon ECR in ${REGION}..."
-ECR_DOMAIN="${REPOSITORY_URI%%/*}"
-aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ECR_DOMAIN}"
+# 3. Package ./live/target/quarkus-app into live-{x.y.z}.tar.gz and upload to S3
+echo "[3/4] Packaging quarkus-app and uploading to S3..."
+ARCHIVE_PATH="${REPO_ROOT}/live/target/live-${RELEASE_VERSION}.tar.gz"
+rm -f "$ARCHIVE_PATH"
+tar -czf "$ARCHIVE_PATH" -C "$QUARKUS_APP_DIR" .
 
-# 4. Build and Push Multi-Platform ARM64 Docker Images (Docker Buildx)
-echo "[4/5] Building and pushing linux/arm64 Docker image via Buildx..."
-VERSIONED_URI="${REPOSITORY_URI}:${RELEASE_VERSION}"
-LATEST_URI="${REPOSITORY_URI}:latest"
+S3_ARTIFACT_URI="s3://${ARTIFACT_BUCKET}/releases/live-${RELEASE_VERSION}.tar.gz"
+aws s3 cp "$ARCHIVE_PATH" "$S3_ARTIFACT_URI" --region "${REGION}" --only-show-errors
+echo "SUCCESS: Uploaded release archive to ${S3_ARTIFACT_URI}."
 
-pushd "$REPO_ROOT" > /dev/null
-docker buildx build --platform linux/arm64 --provenance=false \
-    -t "${VERSIONED_URI}" \
-    -t "${LATEST_URI}" \
-    -f live/src/main/docker/Dockerfile.jvm \
-    --push live
-popd > /dev/null
-
-echo "SUCCESS: Pushed ${VERSIONED_URI} and ${LATEST_URI} to Amazon ECR."
-
-# 5. Deploy Container on EC2 via AWS Systems Manager (SSM)
-echo "[5/5] Deploying container on EC2 instance via AWS Systems Manager..."
+# 4. Deploy Bare-OS systemd Service on EC2 via AWS Systems Manager (SSM)
+echo "[4/4] Deploying systemd service on EC2 instance via AWS Systems Manager..."
 if [ -z "$INSTANCE_ID" ]; then
     INSTANCE_ID=$(aws cloudformation describe-stacks \
         --stack-name "${EC2_STACK_NAME}" \
@@ -161,12 +152,11 @@ cat << EOF > "${TEMP_PARAMS}"
   "commands": [
     "set -euxo pipefail",
     "export AWS_REGION=${REGION}",
-    "ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)",
-    "aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin \"\${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\"",
-    "docker pull ${VERSIONED_URI}",
-    "sudo /usr/local/bin/start-polymarket-live.sh \"${VERSIONED_URI}\"",
+    "if command -v docker >/dev/null 2>&1; then sudo docker rm -f polymarket-live 2>/dev/null || true; sudo systemctl disable --now docker 2>/dev/null || true; fi",
+    "if command -v iptables >/dev/null 2>&1; then sudo iptables -t nat -F 2>/dev/null || true; fi",
+    "sudo /usr/local/bin/deploy-polymarket-live.sh \"${S3_ARTIFACT_URI}\"",
     "sleep 3",
-    "docker ps --filter name=polymarket-live"
+    "sudo systemctl status polymarket-live --no-pager"
   ]
 }
 EOF
@@ -174,7 +164,7 @@ EOF
 SSM_COMMAND_ID=$(aws ssm send-command \
     --instance-ids "${INSTANCE_ID}" \
     --document-name "AWS-RunShellScript" \
-    --comment "Deploy Polymarket Live Trading ${RELEASE_VERSION}" \
+    --comment "Deploy Polymarket Live Trading ${RELEASE_VERSION} (Bare-OS systemd)" \
     --parameters "file://${TEMP_PARAMS}" \
     --region "${REGION}" \
     --query "Command.CommandId" \

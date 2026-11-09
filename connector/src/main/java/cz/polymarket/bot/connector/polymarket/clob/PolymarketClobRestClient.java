@@ -32,10 +32,29 @@ import java.util.Map;
 @ApplicationScoped
 public class PolymarketClobRestClient {
 
+    private static final byte[] METHOD_POST_BYTES = "POST".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] METHOD_DELETE_BYTES = "DELETE".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] METHOD_GET_BYTES = "GET".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] PATH_ORDER_BYTES = "/order".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] PATH_BALANCE_ALLOWANCE_BYTES = "/balance-allowance".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] EMPTY_BODY_BYTES = new byte[0];
+
+    private static final ThreadLocal<Mac> HMAC_SHA256_THREAD_LOCAL = ThreadLocal.withInitial(() -> {
+        try {
+            return Mac.getInstance("HmacSHA256");
+        } catch (Exception e) {
+            throw new IllegalStateException("HmacSHA256 unavailable", e);
+        }
+    });
+
     private final String baseUrl;
+    private final URI orderUri;
+    private final URI timeUri;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final PolymarketSecretsResolver secretsResolver;
+    private volatile PolymarketCredentials cachedCredentials;
+    private volatile SecretKeySpec cachedHmacKeySpec;
 
     /**
      * Constructs the Polymarket CLOB REST client.
@@ -53,6 +72,8 @@ public class PolymarketClobRestClient {
             ObjectMapper objectMapper,
             PolymarketSecretsResolver secretsResolver) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.orderUri = URI.create(this.baseUrl + "/order");
+        this.timeUri = URI.create(this.baseUrl + "/time");
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
         this.secretsResolver = secretsResolver;
@@ -85,14 +106,20 @@ public class PolymarketClobRestClient {
         String path = "/order";
         long timestampSec = Instant.now().getEpochSecond();
         String timestampStr = String.valueOf(timestampSec);
-        String signature = computeL2HmacSignature(creds.secret(), timestampStr, "POST", path, jsonBodyBytes);
+        String signature = computeL2HmacSignatureFast(
+                requireHmacKeySpec(creds),
+                timestampStr,
+                METHOD_POST_BYTES,
+                PATH_ORDER_BYTES,
+                jsonBodyBytes
+        );
 
         try {
             if (Log.isTraceEnabled()) {
                 Log.tracef("CLOB POST %s request payload: %s", path, new String(jsonBodyBytes, StandardCharsets.UTF_8));
             }
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + path))
+                    .uri(orderUri)
                     .timeout(Duration.ofSeconds(10))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
@@ -141,14 +168,20 @@ public class PolymarketClobRestClient {
         String path = "/order";
         byte[] bodyBytes = ("{\"orderID\":\"" + orderId.trim() + "\"}").getBytes(StandardCharsets.UTF_8);
         String timestampStr = String.valueOf(Instant.now().getEpochSecond());
-        String signature = computeL2HmacSignature(creds.secret(), timestampStr, "DELETE", path, bodyBytes);
+        String signature = computeL2HmacSignatureFast(
+                requireHmacKeySpec(creds),
+                timestampStr,
+                METHOD_DELETE_BYTES,
+                PATH_ORDER_BYTES,
+                bodyBytes
+        );
 
         try {
             if (Log.isTraceEnabled()) {
                 Log.tracef("CLOB DELETE %s for orderId=%s", path, orderId);
             }
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + path))
+                    .uri(orderUri)
                     .timeout(Duration.ofSeconds(10))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
@@ -226,7 +259,13 @@ public class PolymarketClobRestClient {
         String cleanPath = "/balance-allowance";
         String fullPathWithQuery = cleanPath + querySuffix;
         String timestampStr = String.valueOf(Instant.now().getEpochSecond());
-        String signature = computeL2HmacSignature(creds.secret(), timestampStr, "GET", cleanPath, new byte[0]);
+        String signature = computeL2HmacSignatureFast(
+                requireHmacKeySpec(creds),
+                timestampStr,
+                METHOD_GET_BYTES,
+                PATH_BALANCE_ALLOWANCE_BYTES,
+                EMPTY_BODY_BYTES
+        );
 
         try {
             if (Log.isTraceEnabled()) {
@@ -276,7 +315,7 @@ public class PolymarketClobRestClient {
                 Log.trace("Sending CLOB GET /time keepalive request");
             }
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/time"))
+                    .uri(timeUri)
                     .timeout(Duration.ofSeconds(5))
                     .header("Accept", "application/json")
                     .GET()
@@ -316,12 +355,31 @@ public class PolymarketClobRestClient {
             byte[] keyBytes = decodeBase64Flexible(base64Secret.trim());
             int queryIdx = requestPath.indexOf('?');
             String cleanPath = queryIdx >= 0 ? requestPath.substring(0, queryIdx) : requestPath;
+            return computeL2HmacSignatureFast(
+                    new SecretKeySpec(keyBytes, "HmacSHA256"),
+                    timestamp,
+                    method.toUpperCase().getBytes(StandardCharsets.UTF_8),
+                    cleanPath.getBytes(StandardCharsets.UTF_8),
+                    bodyBytes
+            );
+        } catch (Exception e) {
+            Log.fatalf("Failed to compute Polymarket L2 HMAC-SHA256 signature: %s", e.getMessage());
+            throw new IllegalArgumentException("Failed to compute Polymarket L2 HMAC-SHA256 signature", e);
+        }
+    }
 
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(keyBytes, "HmacSHA256"));
+    private static String computeL2HmacSignatureFast(
+            SecretKeySpec keySpec,
+            String timestamp,
+            byte[] methodBytes,
+            byte[] cleanPathBytes,
+            byte[] bodyBytes) {
+        try {
+            Mac mac = HMAC_SHA256_THREAD_LOCAL.get();
+            mac.init(keySpec);
             mac.update(timestamp.getBytes(StandardCharsets.UTF_8));
-            mac.update(method.toUpperCase().getBytes(StandardCharsets.UTF_8));
-            mac.update(cleanPath.getBytes(StandardCharsets.UTF_8));
+            mac.update(methodBytes);
+            mac.update(cleanPathBytes);
             if (bodyBytes != null && bodyBytes.length > 0) {
                 mac.update(bodyBytes);
             }
@@ -333,13 +391,37 @@ public class PolymarketClobRestClient {
     }
 
     private PolymarketCredentials requireL2Credentials() {
-        PolymarketCredentials creds = secretsResolver.resolveCredentials();
-        if (!creds.hasL2Credentials() || creds.signerAddress().isBlank()) {
-            String msg = "Missing Polymarket CLOB L2 credentials (apiKey, secret, passphrase, signerAddress)";
-            Log.fatal(msg);
-            throw new IllegalStateException(msg);
+        PolymarketCredentials creds = this.cachedCredentials;
+        if (creds != null) {
+            return creds;
         }
-        return creds;
+        synchronized (this) {
+            creds = this.cachedCredentials;
+            if (creds != null) {
+                return creds;
+            }
+            PolymarketCredentials resolved = secretsResolver.resolveCredentials();
+            if (!resolved.hasL2Credentials() || resolved.signerAddress().isBlank()) {
+                String msg = "Missing Polymarket CLOB L2 credentials (apiKey, secret, passphrase, signerAddress)";
+                Log.fatal(msg);
+                throw new IllegalStateException(msg);
+            }
+            byte[] keyBytes = decodeBase64Flexible(resolved.secret().trim());
+            this.cachedHmacKeySpec = new SecretKeySpec(keyBytes, "HmacSHA256");
+            this.cachedCredentials = resolved;
+            return resolved;
+        }
+    }
+
+    private SecretKeySpec requireHmacKeySpec(PolymarketCredentials creds) {
+        SecretKeySpec spec = this.cachedHmacKeySpec;
+        if (spec != null) {
+            return spec;
+        }
+        byte[] keyBytes = decodeBase64Flexible(creds.secret().trim());
+        spec = new SecretKeySpec(keyBytes, "HmacSHA256");
+        this.cachedHmacKeySpec = spec;
+        return spec;
     }
 
     private static byte[] decodeBase64Flexible(String secret) {

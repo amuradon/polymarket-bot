@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Polymarket Bot Live Trading Compute Infrastructure in eu-west-1 (Dublin). Provisions a 24/7 c8gn.xlarge
-  EC2 instance (4 vCPU Graviton4 ARM64, 30 Gbps Enhanced Networking) with host-networked Docker,
-  non-blocking awslogs streaming, kernel TCP buffer tuning, and IMDSv2 token enforcement, referencing
-  the Live Trading Base Infrastructure stack.
+  EC2 instance (4 vCPU Graviton4 ARM64, 30 Gbps Enhanced Networking) running the Quarkus Live Trading Engine
+  directly on Amazon Linux 2023 via systemd (Bare-OS, zero Docker/NAT overhead), with Temurin Java 25,
+  non-blocking CloudWatch Agent log streaming, HFT kernel TCP/busy-poll tuning, and IMDSv2 token enforcement.
 
 Metadata:
   AWSToolsMetrics:
@@ -13,7 +13,7 @@ Parameters:
   BaseStackName:
     Type: String
     Default: polymarket-bot-live-base
-    Description: Name of the Live Trading Base Infrastructure CloudFormation stack exporting network, IAM, and log group resources.
+    Description: Name of the Live Trading Base Infrastructure CloudFormation stack exporting network, IAM, S3 artifact bucket, and log group resources.
 
   InstanceType:
     Type: String
@@ -40,8 +40,8 @@ Resources:
     Type: AWS::EC2::Instance
     Metadata:
       com.aws.cloudformation.Context:
-        why: 24/7 c8gn.xlarge EC2 host in eu-west-1 running the 4-Core Dockerized Quarkus Live Trading Engine with --network host, non-blocking CloudWatch logging, and IMDSv2 hop limit 2.
-        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 2) and ship container and host logs to CloudWatch Logs without blocking stdout.
+        why: 24/7 c8gn.xlarge EC2 host in eu-west-1 running the 4-Core Quarkus Live Trading Engine directly via systemd on Temurin JDK 25 with HFT sysctl tuning and CloudWatch Agent log shipping.
+        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 1) and ship service and host logs to CloudWatch Logs without blocking stdout.
     Properties:
       InstanceType: !Ref InstanceType
       ImageId: !Ref LatestAmiId
@@ -54,7 +54,7 @@ Resources:
       MetadataOptions:
         HttpEndpoint: enabled
         HttpTokens: required
-        HttpPutResponseHopLimit: 2
+        HttpPutResponseHopLimit: 1
       UserData:
         Fn::Base64:
           Fn::Sub:
@@ -62,24 +62,38 @@ Resources:
               #!/bin/bash
               set -euxo pipefail
               dnf update -y
-              dnf install -y docker jq awscli amazon-cloudwatch-agent iptables
+              dnf install -y jq awscli amazon-cloudwatch-agent tar gzip logrotate
 
-              # Configure Docker daemon
-              mkdir -p /etc/docker
-              cat << 'EOF' > /etc/docker/daemon.json
-              {
-                "log-driver": "json-file",
-                "log-opts": {
-                  "max-size": "50m",
-                  "max-file": "3"
-                }
+              # Install Eclipse Temurin 25 (ARM64 / aarch64) directly to /usr/lib/jvm/temurin-25
+              mkdir -p /usr/lib/jvm/temurin-25
+              curl -fsSL "https://api.adoptium.net/v3/binary/latest/25/ga/linux/aarch64/jre/hotspot/normal/eclipse" \
+                -o /tmp/temurin-25-jre-aarch64.tar.gz
+              tar -xzf /tmp/temurin-25-jre-aarch64.tar.gz -C /usr/lib/jvm/temurin-25 --strip-components=1
+              rm -f /tmp/temurin-25-jre-aarch64.tar.gz
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/local/bin/java
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/bin/java
+
+              # Create dedicated unprivileged system user and directories for Polymarket Live Trading
+              id -u polymarket >/dev/null 2>&1 || useradd --system --home-dir /opt/polymarket-live --shell /sbin/nologin polymarket
+              mkdir -p /opt/polymarket-live /var/log/polymarket-live
+              touch /var/log/polymarket-live/live-trading.log
+              chown -R polymarket:polymarket /opt/polymarket-live /var/log/polymarket-live
+
+              # Configure logrotate for /var/log/polymarket-live/live-trading.log
+              cat << 'EOF' > /etc/logrotate.d/polymarket-live
+              /var/log/polymarket-live/live-trading.log {
+                  daily
+                  rotate 7
+                  size 100M
+                  compress
+                  delaycompress
+                  missingok
+                  notifempty
+                  copytruncate
               }
               EOF
 
-              systemctl enable --now docker
-              usermod -aG docker ec2-user || true
-
-              # Configure Amazon CloudWatch Agent for host bootstrap and system logs
+              # Configure Amazon CloudWatch Agent for systemd service and host logs
               mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
               cat << 'EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
               {
@@ -87,6 +101,11 @@ Resources:
                   "logs_collected": {
                     "files": {
                       "collect_list": [
+                        {
+                          "file_path": "/var/log/polymarket-live/live-trading.log",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "polymarket-live"
+                        },
                         {
                           "file_path": "/var/log/cloud-init-output.log",
                           "log_group_name": "${LogGroupName}",
@@ -107,46 +126,91 @@ Resources:
                 -a fetch-config -m ec2 \
                 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
-              # Tune Linux kernel TCP receive buffer auto-tuning for high-frequency Polymarket CLOB WebSocket bursts
+              # Tune Linux kernel TCP buffers, busy-polling, and direct port 443 binding (zero iptables/nf_conntrack)
               cat << 'EOF' > /etc/sysctl.d/99-polymarket-network.conf
               net.core.rmem_default = 16777216
               net.core.rmem_max = 33554432
               net.ipv4.tcp_rmem = 4096 16777216 33554432
               net.ipv4.tcp_moderate_rcvbuf = 1
+              net.ipv4.tcp_slow_start_after_idle = 0
+              net.core.busy_read = 50
+              net.core.busy_poll = 50
+              net.core.netdev_max_backlog = 30000
+              net.ipv4.ip_unprivileged_port_start = 443
               EOF
               sysctl --system || true
 
-              # Forward inbound TCP port 443 to Quarkus HTTP port 8080 when running with --network host
-              iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8080 2>/dev/null || \
-                iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8080
-              iptables -t nat -C OUTPUT -p tcp -o lo --dport 443 -j REDIRECT --to-port 8080 2>/dev/null || \
-                iptables -t nat -A OUTPUT -p tcp -o lo --dport 443 -j REDIRECT --to-port 8080
+              # Configure systemd service for Bare-OS 24/7 HFT execution
+              cat << 'EOF' > /etc/systemd/system/polymarket-live.service
+              [Unit]
+              Description=Polymarket Bot Live Trading Engine (Quarkus HFT Bare-OS)
+              After=network-online.target
+              Wants=network-online.target
 
-              # Create helper launch script for 24/7 container execution with --network host and non-blocking CloudWatch Logs
-              cat << 'EOF' > /usr/local/bin/start-polymarket-live.sh
+              [Service]
+              Type=simple
+              User=polymarket
+              Group=polymarket
+              WorkingDirectory=/opt/polymarket-live
+              Environment="QUARKUS_PROFILE=prod"
+              Environment="AWS_REGION=${AWS::Region}"
+              Environment="POLYMARKET_CREDENTIALS_SECRET_ID=${PolymarketSecretId}"
+              Environment="POLYMARKET_STRATEGY_NAME=UtterParameciumStrategy"
+              AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              Nice=-20
+              LimitMEMLOCK=infinity
+              LimitNOFILE=1048576
+              ExecStart=/usr/lib/jvm/temurin-25/bin/java \
+                -XX:+UseZGC \
+                -XX:+AlwaysPreTouch \
+                -XX:+UseTransparentHugePages \
+                -XX:+UseThreadPriorities \
+                -Xms6g \
+                -Xmx6g \
+                -XX:+DisableExplicitGC \
+                --enable-native-access=ALL-UNNAMED \
+                -Dquarkus.http.host=0.0.0.0 \
+                -Dquarkus.http.port=443 \
+                -Djava.util.logging.manager=org.jboss.logmanager.LogManager \
+                -jar /opt/polymarket-live/quarkus-run.jar
+              StandardOutput=append:/var/log/polymarket-live/live-trading.log
+              StandardError=append:/var/log/polymarket-live/live-trading.log
+              Restart=always
+              RestartSec=2
+              TimeoutStopSec=15
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+
+              # Create atomic S3 release deployment script invoked via AWS SSM Run Command
+              cat << 'EOF' > /usr/local/bin/deploy-polymarket-live.sh
               #!/bin/bash
               set -euo pipefail
-              IMAGE_URI="${!1:-polymarket-bot/live:latest}"
-              iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8080 2>/dev/null || \
-                iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8080
-              docker rm -f polymarket-live || true
-              docker run -d \
-                --name polymarket-live \
-                --restart unless-stopped \
-                --network host \
-                --log-driver=awslogs \
-                --log-opt awslogs-region="${AWS::Region}" \
-                --log-opt awslogs-group="${LogGroupName}" \
-                --log-opt awslogs-stream="polymarket-live" \
-                --log-opt mode=non-blocking \
-                --log-opt max-buffer-size=16m \
-                -e QUARKUS_PROFILE="prod" \
-                -e AWS_REGION="${AWS::Region}" \
-                -e POLYMARKET_CREDENTIALS_SECRET_ID="${PolymarketSecretId}" \
-                -e POLYMARKET_STRATEGY_NAME="UtterParameciumStrategy" \
-                "$IMAGE_URI"
+              S3_ARTIFACT_URI="${!1:?Usage: deploy-polymarket-live.sh s3://<bucket>/releases/live-<version>.tar.gz}"
+              TMP_ARCHIVE="/tmp/polymarket-live-release.tar.gz"
+              STAGING_DIR="/opt/polymarket-live.staging"
+
+              aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
+              rm -rf "$STAGING_DIR"
+              mkdir -p "$STAGING_DIR"
+              tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
+              rm -f "$TMP_ARCHIVE"
+              chown -R polymarket:polymarket "$STAGING_DIR"
+
+              systemctl stop polymarket-live || true
+              rm -rf /opt/polymarket-live/*
+              cp -a "$STAGING_DIR"/. /opt/polymarket-live/
+              rm -rf "$STAGING_DIR"
+              chown -R polymarket:polymarket /opt/polymarket-live
+
+              systemctl daemon-reload
+              systemctl enable --now polymarket-live
+              systemctl restart polymarket-live
               EOF
-              chmod +x /usr/local/bin/start-polymarket-live.sh
+              chmod +x /usr/local/bin/deploy-polymarket-live.sh
             - LogGroupName:
                 Fn::ImportValue: !Sub "${BaseStackName}-LogGroupName"
       Tags:
