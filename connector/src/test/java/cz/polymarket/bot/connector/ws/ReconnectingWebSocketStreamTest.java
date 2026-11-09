@@ -1,19 +1,24 @@
 package cz.polymarket.bot.connector.ws;
 
+import io.netty.handler.ssl.OpenSsl;
 import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.net.OpenSSLEngineOptions;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -347,6 +352,162 @@ class ReconnectingWebSocketStreamTest {
                     assertThat(stream.getIoReaderThread()).isNotNull();
                     assertThat(stream.getIoReaderThread().getName()).isEqualTo("clob-ws-io-reader");
                 });
+
+        stream.stop();
+    }
+
+    @Test
+    void shouldNotOverrideReceiveBufferSizeAndShouldConfigureBoringSslWithWarnOnFallback() {
+        ReconnectingWebSocketStream wssStream = new ReconnectingWebSocketStream(
+                vertx,
+                "WSS-CONFIG-TEST",
+                "wss://localhost:8443/ws/market",
+                List::of,
+                (rawJson, recvTs) -> {
+                },
+                1000L,
+                0L
+        );
+
+        HttpClientOptions clientOptions = wssStream.getHttpClientOptions();
+        // Receive buffer size MUST stay at default (-1) so Vert.x does not force a 16 MB FixedRecvByteBufAllocator
+        assertThat(clientOptions.getReceiveBufferSize()).isEqualTo(HttpClientOptions.DEFAULT_RECEIVE_BUFFER_SIZE);
+        assertThat(clientOptions.isSsl()).isTrue();
+
+        if (OpenSsl.isAvailable()) {
+            assertThat(clientOptions.getSslEngineOptions()).isInstanceOf(OpenSSLEngineOptions.class);
+        }
+
+        // Verify fallback helper behavior when OpenSSL is unavailable
+        HttpClientOptions fallbackOptions = new HttpClientOptions();
+        boolean usedOpenSsl = ReconnectingWebSocketStream.configureSslEngineOptions(
+                fallbackOptions,
+                true,
+                false,
+                new RuntimeException("synthetic tcnative missing"),
+                "FALLBACK-TEST-STREAM"
+        );
+        assertThat(usedOpenSsl).isFalse();
+        assertThat(fallbackOptions.getSslEngineOptions()).isNull();
+
+        wssStream.stop();
+    }
+
+    @Test
+    void shouldWakeExternalWorkerAcrossBurstsUsingTwoPhaseParkedProtocol() throws Exception {
+        int bursts = 3;
+        int messagesPerBurst = 20;
+        List<String> drainedPayloads = new CopyOnWriteArrayList<>();
+        AtomicBoolean workerRunning = new AtomicBoolean(true);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    for (int b = 0; b < bursts; b++) {
+                        int burstIdx = b;
+                        vertx.setTimer(b * 40L + 5L, id -> {
+                            for (int m = 0; m < messagesPerBurst; m++) {
+                                ws.writeTextMessage("{\"burst\":" + burstIdx + ",\"msg\":" + m + "}");
+                            }
+                        });
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/ext-worker-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "EXT-WORKER-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                null,
+                batch -> {
+                    for (TimestampedFrame frame : batch) {
+                        drainedPayloads.add(frame.rawText());
+                    }
+                },
+                1000L,
+                0L,
+                null
+        );
+
+        Thread externalWorker = Thread.ofPlatform()
+                .daemon(true)
+                .name("test-ext-clob-worker")
+                .unstarted(() -> {
+                    List<TimestampedFrame> scratch = new ArrayList<>(64);
+                    while (workerRunning.get()) {
+                        int drained = stream.drainAvailableBatch(scratch);
+                        if (drained > 0) {
+                            continue;
+                        }
+                        LockSupport.parkNanos(stream, 20_000_000L);
+                    }
+                });
+
+        stream.bindExternalWorker(externalWorker);
+        externalWorker.start();
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(drainedPayloads).hasSize(bursts * messagesPerBurst);
+                    assertThat(stream.getTelemetrySnapshot().queueDepth()).isZero();
+                });
+
+        workerRunning.set(false);
+        LockSupport.unpark(externalWorker);
+        stream.stop();
+    }
+
+    @Test
+    void shouldInvokeDisconnectListenerWithStreamTelemetryAndNotOverwriteCloseCodeWithMinusOne() throws Exception {
+        List<WebSocketStreamTelemetry> disconnectSnapshots = new CopyOnWriteArrayList<>();
+        AtomicInteger connAttempt = new AtomicInteger(0);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    int attempt = connAttempt.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        ws.writeTextMessage("{\"frame\":" + attempt + "}");
+                        if (attempt == 1) {
+                            vertx.setTimer(30L, id -> ws.close((short) 1013, "slow consumer: send buffer full"));
+                        } else if (attempt == 2) {
+                            vertx.setTimer(30L, id -> ws.close());
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/disconnect-listener-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "DISCONNECT-LISTENER-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> {
+                },
+                80L,
+                0L
+        );
+        stream.setDisconnectListener(disconnectSnapshots::add);
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(connAttempt.get()).isGreaterThanOrEqualTo(3);
+                    assertThat(disconnectSnapshots).hasSizeGreaterThanOrEqualTo(2);
+                });
+
+        WebSocketStreamTelemetry firstDisconnect = disconnectSnapshots.getFirst();
+        assertThat(firstDisconnect.streamName()).isEqualTo("DISCONNECT-LISTENER-WS");
+        assertThat(firstDisconnect.lastCloseCode()).isEqualTo(1013);
+        assertThat(firstDisconnect.lastCloseReason()).isEqualTo("slow consumer: send buffer full");
+        assertThat(firstDisconnect.totalFramesReceived()).isGreaterThanOrEqualTo(1L);
 
         stream.stop();
     }

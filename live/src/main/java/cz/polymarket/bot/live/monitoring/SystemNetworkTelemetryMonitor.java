@@ -9,7 +9,9 @@ import java.lang.management.MemoryUsage;
 import java.lang.management.ThreadMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,7 +19,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Low-overhead OS kernel network buffer, JVM ZGC, and per-thread utilization monitor.
+ * Low-overhead OS kernel network buffer, JVM ZGC, per-thread utilization, and historical
+ * telemetry ring-buffer monitor.
  * <p>
  * Periodically invoked off the hot path (once per second on {@code order-execution-io-worker}) to read:
  * <ul>
@@ -26,10 +29,21 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li>Kernel TCP packet collapse and out-of-order counters from {@code /proc/net/netstat}</li>
  *   <li>Per-thread OS CPU time via {@link ThreadMXBean#getThreadCpuTime(long)} and nanosecond work duty cycle</li>
  *   <li>JVM CPU load, Garbage Collector pauses, and heap usage</li>
+ *   <li>Bounded historical time-series samples and WebSocket disconnect diagnostic events</li>
  * </ul>
  */
 @ApplicationScoped
 public class SystemNetworkTelemetryMonitor {
+
+    /**
+     * Maximum number of periodic historical telemetry points retained in memory (360 points = 60 minutes at 10s interval).
+     */
+    public static final int MAX_HISTORY_POINTS = 360;
+
+    /**
+     * Maximum number of unexpected WebSocket disconnect diagnostic snapshots retained in memory.
+     */
+    public static final int MAX_DISCONNECT_EVENTS = 50;
 
     private static final Path PROC_NET_TCP = Path.of("/proc/net/tcp");
     private static final Path PROC_NET_TCP6 = Path.of("/proc/net/tcp6");
@@ -39,9 +53,9 @@ public class SystemNetworkTelemetryMonitor {
     /**
      * Descriptor of a monitored dedicated thread passed during periodic sampling.
      *
-     * @param role           human-readable core/thread role
-     * @param fallbackName   fallback thread name when the thread is not yet started
-     * @param thread         live {@link Thread} reference (may be {@code null} if not started)
+     * @param role             human-readable core/thread role
+     * @param fallbackName     fallback thread name when the thread is not yet started
+     * @param thread           live {@link Thread} reference (may be {@code null} if not started)
      * @param cumulativeBusyNs cumulative nanosecond busy time tracked by the worker loop (or {@code -1} to derive from CPU time)
      */
     public record MonitoredThreadSpec(
@@ -55,9 +69,9 @@ public class SystemNetworkTelemetryMonitor {
     /**
      * Parsed snapshot of Linux kernel TCP socket queues from {@code /proc/net/tcp} and {@code /proc/net/tcp6}.
      *
-     * @param rxQueueBytes     sum or max of unread bytes across active TCP receive queues
-     * @param txQueueBytes     sum or max of unsent bytes across active TCP transmit queues
-     * @param activeSockets    number of active non-listening TCP sockets
+     * @param rxQueueBytes  sum of unread bytes across active TCP receive queues
+     * @param txQueueBytes  sum of unsent bytes across active TCP transmit queues
+     * @param activeSockets number of active non-listening TCP sockets
      */
     public record TcpQueueStats(
             long rxQueueBytes,
@@ -69,9 +83,9 @@ public class SystemNetworkTelemetryMonitor {
     /**
      * Parsed snapshot of Linux kernel TCP extended counters from {@code /proc/net/netstat}.
      *
-     * @param tcpRcvCollapsed  packets collapsed in receive queue due to buffer pressure ({@code TCPRcvCollapsed})
-     * @param tcpOfoQueue      packets queued out-of-order ({@code TCPOFOQueue})
-     * @param tcpBacklogDrop   packets dropped because socket backlog was full ({@code TCPBacklogDrop})
+     * @param tcpRcvCollapsed packets collapsed in receive queue due to buffer pressure ({@code TCPRcvCollapsed})
+     * @param tcpOfoQueue     packets queued out-of-order ({@code TCPOFOQueue})
+     * @param tcpBacklogDrop  packets dropped because socket backlog was full ({@code TCPBacklogDrop})
      */
     public record TcpNetstatStats(
             long tcpRcvCollapsed,
@@ -83,24 +97,24 @@ public class SystemNetworkTelemetryMonitor {
     /**
      * Immutable point-in-time snapshot of OS network, JVM, and per-thread utilization metrics.
      *
-     * @param kernelRmemMaxBytes    configured Linux {@code net.core.rmem_max} in bytes
+     * @param kernelRmemMaxBytes     configured Linux {@code net.core.rmem_max} in bytes
      * @param currentTcpRxQueueBytes current bytes queued in OS TCP receive buffers
-     * @param maxTcpRxQueueBytes    high-water mark of bytes queued in OS TCP receive buffers
+     * @param maxTcpRxQueueBytes     high-water mark of bytes queued in OS TCP receive buffers
      * @param currentTcpTxQueueBytes current bytes queued in OS TCP transmit buffers
-     * @param maxTcpTxQueueBytes    high-water mark of bytes queued in OS TCP transmit buffers
-     * @param activeTcpSockets      number of active TCP connections
-     * @param tcpRcvCollapsed       kernel {@code TCPRcvCollapsed} counter
-     * @param tcpOfoQueue           kernel {@code TCPOFOQueue} counter
-     * @param tcpBacklogDrop        kernel {@code TCPBacklogDrop} counter
-     * @param gcName                active JVM Garbage Collector name (e.g. {@code "ZGC"})
-     * @param processCpuLoadPct     current JVM process CPU utilization ({@code 0..100%})
-     * @param maxProcessCpuLoadPct  peak JVM process CPU utilization ({@code 0..100%})
-     * @param systemCpuLoadPct      current host system CPU utilization ({@code 0..100%})
-     * @param gcCount               total GC collection count
-     * @param totalGcPauseMs        total GC collection time in milliseconds
-     * @param usedHeapMb            currently used JVM heap memory in MiB
-     * @param maxHeapMb             maximum JVM heap memory in MiB
-     * @param threads               utilization snapshots for the 4 dedicated threads
+     * @param maxTcpTxQueueBytes     high-water mark of bytes queued in OS TCP transmit buffers
+     * @param activeTcpSockets       number of active TCP connections
+     * @param tcpRcvCollapsed        kernel {@code TCPRcvCollapsed} counter
+     * @param tcpOfoQueue            kernel {@code TCPOFOQueue} counter
+     * @param tcpBacklogDrop         kernel {@code TCPBacklogDrop} counter
+     * @param gcName                 active JVM Garbage Collector name (e.g. {@code "ZGC"})
+     * @param processCpuLoadPct      current JVM process CPU utilization ({@code 0..100%})
+     * @param maxProcessCpuLoadPct   peak JVM process CPU utilization ({@code 0..100%})
+     * @param systemCpuLoadPct       current host system CPU utilization ({@code 0..100%})
+     * @param gcCount                total GC collection count
+     * @param totalGcPauseMs         total GC collection time in milliseconds
+     * @param usedHeapMb             currently used JVM heap memory in MiB
+     * @param maxHeapMb              maximum JVM heap memory in MiB
+     * @param threads                utilization snapshots for the 4 dedicated threads
      */
     public record SystemTelemetrySnapshot(
             long kernelRmemMaxBytes,
@@ -143,6 +157,9 @@ public class SystemNetworkTelemetryMonitor {
     private final AtomicLong maxTcpTxQueueBytes = new AtomicLong(0L);
     private volatile double maxProcessCpuLoadPct = 0.0;
     private final AtomicReference<SystemTelemetrySnapshot> latestSnapshot = new AtomicReference<>(emptySnapshot());
+
+    private final Deque<TelemetryHistoryPoint> historyRing = new ArrayDeque<>(MAX_HISTORY_POINTS);
+    private final Deque<WebSocketDisconnectEvent> disconnectEventsRing = new ArrayDeque<>(MAX_DISCONNECT_EVENTS);
 
     public SystemNetworkTelemetryMonitor() {
         try {
@@ -245,6 +262,64 @@ public class SystemNetworkTelemetryMonitor {
             return sample(threadSpecs);
         }
         return current;
+    }
+
+    /**
+     * Appends a periodic telemetry history point to the bounded in-memory ring buffer.
+     * When the buffer reaches {@link #MAX_HISTORY_POINTS}, the oldest entry is evicted.
+     *
+     * @param point point-in-time telemetry sample
+     */
+    public void recordHistoryPoint(TelemetryHistoryPoint point) {
+        if (point == null) {
+            return;
+        }
+        synchronized (historyRing) {
+            while (historyRing.size() >= MAX_HISTORY_POINTS) {
+                historyRing.pollFirst();
+            }
+            historyRing.addLast(point);
+        }
+    }
+
+    /**
+     * Returns an immutable chronological copy of all retained historical telemetry points.
+     *
+     * @return list of {@link TelemetryHistoryPoint}
+     */
+    public List<TelemetryHistoryPoint> getHistory() {
+        synchronized (historyRing) {
+            return List.copyOf(historyRing);
+        }
+    }
+
+    /**
+     * Appends an unexpected WebSocket disconnect diagnostic event to the bounded ring buffer.
+     * When the buffer reaches {@link #MAX_DISCONNECT_EVENTS}, the oldest event is evicted.
+     *
+     * @param event disconnect diagnostic snapshot
+     */
+    public void recordDisconnectEvent(WebSocketDisconnectEvent event) {
+        if (event == null) {
+            return;
+        }
+        synchronized (disconnectEventsRing) {
+            while (disconnectEventsRing.size() >= MAX_DISCONNECT_EVENTS) {
+                disconnectEventsRing.pollFirst();
+            }
+            disconnectEventsRing.addLast(event);
+        }
+    }
+
+    /**
+     * Returns an immutable copy of all retained unexpected WebSocket disconnect events.
+     *
+     * @return list of {@link WebSocketDisconnectEvent}
+     */
+    public List<WebSocketDisconnectEvent> getDisconnectEvents() {
+        synchronized (disconnectEventsRing) {
+            return List.copyOf(disconnectEventsRing);
+        }
     }
 
     private List<ThreadUtilizationTelemetry> sampleThreads(List<MonitoredThreadSpec> specs, long nowNs) {
@@ -461,6 +536,10 @@ public class SystemNetworkTelemetryMonitor {
     }
 
     private static SystemTelemetrySnapshot emptySnapshot() {
-        return new SystemTelemetrySnapshot(0L, 0L, 0L, 0L, 0L, 0, 0L, 0L, 0L, "ZGC", 0.0, 0.0, 0.0, 0L, 0L, 0L, 0L, List.of());
+        return new SystemTelemetrySnapshot(
+                0L, 0L, 0L, 0L, 0L, 0, 0L, 0L, 0L,
+                "ZGC", 0.0, 0.0, 0.0, 0L, 0L, 0L, 0L,
+                List.of()
+        );
     }
 }

@@ -26,6 +26,9 @@ import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.SystemTelemetrySnapshot;
+import cz.polymarket.bot.live.monitoring.TelemetryHistoryPoint;
+import cz.polymarket.bot.live.monitoring.ThreadUtilizationTelemetry;
+import cz.polymarket.bot.live.monitoring.WebSocketDisconnectEvent;
 import cz.polymarket.bot.live.web.LiveTelemetryDto;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
@@ -245,6 +248,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 : strategyName.trim();
         this.activeStrategy = strategyRegistry.getStrategy(resolvedName);
         this.activeStrategy.init(this);
+        this.clobWsClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -408,6 +413,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private void orderExecutionWorkerLoop() {
         List<TimestampedFrame> scratchBatch = new ArrayList<>(32);
         long lastTelemetrySampleNs = 0L;
+        long lastHistoryRecordNs = 0L;
         while (workersRunning.get()) {
             boolean didWork = false;
             long startNs = System.nanoTime();
@@ -436,7 +442,11 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             if (nowNs - lastTelemetrySampleNs >= 1_000_000_000L) {
                 didWork = true;
                 lastTelemetrySampleNs = nowNs;
-                telemetryMonitor.sample(buildMonitoredThreadSpecs());
+                SystemTelemetrySnapshot sysSnap = telemetryMonitor.sample(buildMonitoredThreadSpecs());
+                if (lastHistoryRecordNs == 0L || nowNs - lastHistoryRecordNs >= 10_000_000_000L) {
+                    lastHistoryRecordNs = nowNs;
+                    recordTelemetryHistorySnapshot(sysSnap, clobWsClient.getStreamTelemetries());
+                }
             }
 
             if (didWork) {
@@ -1466,15 +1476,23 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
     /**
      * Builds a comprehensive point-in-time {@link LiveTelemetryDto} snapshot combining OS TCP buffers,
-     * JVM ZGC metrics, 4-core thread utilization, order execution latency, and WebSocket stream queues.
+     * JVM ZGC metrics, native transport/TLS status, 4-core thread utilization, order execution latency,
+     * WebSocket stream queues, disconnect forensic snapshots, and historical time-series samples.
      *
      * @return current {@link LiveTelemetryDto}
      */
     public LiveTelemetryDto getTelemetry() {
         SystemTelemetrySnapshot sys = telemetryMonitor.getLatestOrSample(buildMonitoredThreadSpecs());
+        List<WebSocketStreamTelemetry> clobStreams = clobWsClient.getStreamTelemetries();
         List<WebSocketStreamTelemetry> streams = new ArrayList<>(4);
-        streams.addAll(clobWsClient.getStreamTelemetries());
+        streams.addAll(clobStreams);
         streams.addAll(polyBoltClient.getStreamTelemetries());
+
+        List<TelemetryHistoryPoint> history = telemetryMonitor.getHistory();
+        if (history.isEmpty()) {
+            recordTelemetryHistorySnapshot(sys, clobStreams);
+            history = telemetryMonitor.getHistory();
+        }
 
         return new LiveTelemetryDto(
                 sys.kernelRmemMaxBytes(),
@@ -1487,6 +1505,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 sys.tcpOfoQueue(),
                 sys.tcpBacklogDrop(),
                 sys.gcName(),
+                clobWsClient.isNativeTransportEnabled(),
+                clobWsClient.isOpenSslAvailable(),
                 sys.processCpuLoadPct(),
                 sys.maxProcessCpuLoadPct(),
                 sys.systemCpuLoadPct(),
@@ -1504,8 +1524,99 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 lastOrderRttMs.get(),
                 maxOrderRttMs.get(),
                 sys.threads(),
-                streams
+                streams,
+                telemetryMonitor.getDisconnectEvents(),
+                history
         );
+    }
+
+    /**
+     * Captures a diagnostic snapshot at the exact moment a WebSocket stream disconnects unexpectedly,
+     * recording it in the bounded {@link SystemNetworkTelemetryMonitor} ring buffer and logging
+     * full system/thread/queue forensics.
+     *
+     * @param streamSnap telemetry snapshot of the disconnected stream
+     */
+    public void onStreamUnexpectedDisconnect(WebSocketStreamTelemetry streamSnap) {
+        if (streamSnap == null) {
+            return;
+        }
+        SystemTelemetrySnapshot sys = telemetryMonitor.getLatestOrSample(buildMonitoredThreadSpecs());
+        double ioReaderCpu = extractThreadCpuPct(sys.threads(), 0);
+        double clobWorkerCpu = extractThreadCpuPct(sys.threads(), 1);
+
+        WebSocketDisconnectEvent event = new WebSocketDisconnectEvent(
+                System.currentTimeMillis(),
+                streamSnap.streamName(),
+                streamSnap.lastCloseCode(),
+                streamSnap.lastCloseReason(),
+                streamSnap.reconnectCount(),
+                streamSnap.queueDepth(),
+                streamSnap.maxQueueDepth(),
+                streamSnap.lastQueueLagMs(),
+                streamSnap.maxQueueLagMs(),
+                streamSnap.lastProcessTimeUs(),
+                streamSnap.maxProcessTimeUs(),
+                sys.currentTcpRxQueueBytes(),
+                sys.tcpRcvCollapsed(),
+                sys.processCpuLoadPct(),
+                ioReaderCpu,
+                clobWorkerCpu
+        );
+        telemetryMonitor.recordDisconnectEvent(event);
+        Log.warnf("[%s] Recorded WebSocket disconnect forensics (code=%d, reason=%s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+                event.streamName(),
+                event.closeCode(),
+                event.closeReason(),
+                event.queueDepthAtDisconnect(),
+                event.maxQueueDepth(),
+                event.lastQueueLagMs(),
+                event.maxQueueLagMs(),
+                event.lastProcessTimeUs(),
+                event.maxProcessTimeUs(),
+                event.tcpRxQueueBytes(),
+                event.tcpRcvCollapsed(),
+                event.processCpuLoadPct(),
+                event.ioReaderCpuPct(),
+                event.clobBookWorkerCpuPct());
+    }
+
+    private void recordTelemetryHistorySnapshot(
+            SystemTelemetrySnapshot sys,
+            List<WebSocketStreamTelemetry> clobStreams) {
+        int clobQueueDepth = 0;
+        long clobMaxLagMs = 0L;
+        if (clobStreams != null) {
+            for (WebSocketStreamTelemetry s : clobStreams) {
+                if (s.streamName() != null && !s.streamName().endsWith("-USER")) {
+                    clobQueueDepth = Math.max(clobQueueDepth, s.queueDepth());
+                    clobMaxLagMs = Math.max(clobMaxLagMs, s.maxQueueLagMs());
+                }
+            }
+        }
+        List<ThreadUtilizationTelemetry> threads = sys.threads();
+        TelemetryHistoryPoint point = new TelemetryHistoryPoint(
+                System.currentTimeMillis(),
+                sys.processCpuLoadPct(),
+                sys.systemCpuLoadPct(),
+                extractThreadCpuPct(threads, 0),
+                extractThreadCpuPct(threads, 1),
+                extractThreadCpuPct(threads, 2),
+                extractThreadCpuPct(threads, 3),
+                sys.currentTcpRxQueueBytes(),
+                clobQueueDepth,
+                clobMaxLagMs,
+                lastQuoteAgeMs.get(),
+                sys.usedHeapMb()
+        );
+        telemetryMonitor.recordHistoryPoint(point);
+    }
+
+    private static double extractThreadCpuPct(List<ThreadUtilizationTelemetry> threads, int index) {
+        if (threads == null || index < 0 || index >= threads.size()) {
+            return 0.0;
+        }
+        return threads.get(index).cpuUtilizationPct();
     }
 
     private List<MonitoredThreadSpec> buildMonitoredThreadSpecs() {

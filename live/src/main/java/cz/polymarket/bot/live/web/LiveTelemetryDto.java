@@ -1,14 +1,16 @@
 package cz.polymarket.bot.live.web;
 
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
+import cz.polymarket.bot.live.monitoring.TelemetryHistoryPoint;
 import cz.polymarket.bot.live.monitoring.ThreadUtilizationTelemetry;
+import cz.polymarket.bot.live.monitoring.WebSocketDisconnectEvent;
 
 import java.util.List;
 
 /**
  * Comprehensive telemetry DTO combining OS kernel TCP buffer metrics, JVM ZGC metrics,
- * 4-core dedicated thread utilization, live engine order execution latency, and per-stream
- * WebSocket queue depths.
+ * native transport/TLS status, 4-core dedicated thread utilization, live engine order execution latency,
+ * per-stream WebSocket queue depths, unexpected disconnect diagnostic events, and historical telemetry series.
  *
  * @param kernelRmemMaxBytes     configured Linux {@code net.core.rmem_max} in bytes
  * @param currentTcpRxQueueBytes current unread bytes across active OS TCP receive queues
@@ -20,6 +22,8 @@ import java.util.List;
  * @param tcpOfoQueue            Linux kernel {@code TCPOFOQueue} packet counter
  * @param tcpBacklogDrop         Linux kernel {@code TCPBacklogDrop} packet counter
  * @param gcName                 active JVM garbage collector name (e.g. {@code "ZGC"})
+ * @param nativeTransportEnabled whether native Linux {@code EpollEventLoop} transport is active
+ * @param openSslAvailable       whether native BoringSSL ({@code netty-tcnative}) is active
  * @param processCpuLoadPct      current JVM process CPU utilization percentage
  * @param maxProcessCpuLoadPct   peak JVM process CPU utilization percentage
  * @param systemCpuLoadPct       current host system CPU utilization percentage
@@ -38,6 +42,8 @@ import java.util.List;
  * @param maxOrderRttMs          maximum observed round-trip execution latency in milliseconds
  * @param threads                utilization snapshots for the 4 dedicated pipeline threads
  * @param streams                queue depth and latency snapshots for all active WebSocket streams
+ * @param disconnectEvents       recent unexpected WebSocket disconnect diagnostic snapshots
+ * @param history                periodic historical telemetry time-series samples
  */
 public record LiveTelemetryDto(
         long kernelRmemMaxBytes,
@@ -50,6 +56,8 @@ public record LiveTelemetryDto(
         long tcpOfoQueue,
         long tcpBacklogDrop,
         String gcName,
+        boolean nativeTransportEnabled,
+        boolean openSslAvailable,
         double processCpuLoadPct,
         double maxProcessCpuLoadPct,
         double systemCpuLoadPct,
@@ -67,6 +75,8 @@ public record LiveTelemetryDto(
         long lastOrderRttMs,
         long maxOrderRttMs,
         List<ThreadUtilizationTelemetry> threads,
-        List<WebSocketStreamTelemetry> streams
+        List<WebSocketStreamTelemetry> streams,
+        List<WebSocketDisconnectEvent> disconnectEvents,
+        List<TelemetryHistoryPoint> history
 ) {
 }

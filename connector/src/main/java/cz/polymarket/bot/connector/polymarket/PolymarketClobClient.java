@@ -6,7 +6,9 @@ import cz.polymarket.bot.connector.ws.RawWebSocketBatchListener;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
+import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
@@ -52,6 +54,7 @@ public class PolymarketClobClient {
 
     private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
     private volatile ReconnectingWebSocketStream userStream;
+    private volatile WebSocketDisconnectListener disconnectListener;
 
     // Cumulative telemetry preserved across 15m market stream rotations
     private long historicalMarketReconnects = 0L;
@@ -83,6 +86,13 @@ public class PolymarketClobClient {
         this.clobMarketVertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(1)
                 .setPreferNativeTransport(true));
+        if (!this.clobMarketVertx.isNativeTransportEnabled()) {
+            Log.warnf("Native Linux Epoll transport is unavailable on clobMarketVertx (os=%s); falling back to JDK NIO EventLoop",
+                    System.getProperty("os.name", "unknown"));
+        } else {
+            Log.infof("Initialized dedicated clobMarketVertx with native Linux Epoll transport (openSslAvailable=%b)",
+                    OpenSsl.isAvailable());
+        }
         this.wsUrl = wsUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
@@ -94,6 +104,40 @@ public class PolymarketClobClient {
         try {
             clobMarketVertx.close();
         } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Returns whether native Linux Epoll transport is active on the dedicated CLOB market Vert.x instance.
+     *
+     * @return {@code true} if native transport is enabled
+     */
+    public boolean isNativeTransportEnabled() {
+        return clobMarketVertx.isNativeTransportEnabled();
+    }
+
+    /**
+     * Returns whether native OpenSSL/BoringSSL ({@code netty-tcnative}) is available on the runtime classpath.
+     *
+     * @return {@code true} if native OpenSSL/BoringSSL is available
+     */
+    public boolean isOpenSslAvailable() {
+        return OpenSsl.isAvailable();
+    }
+
+    /**
+     * Registers a listener notified whenever any active CLOB market or user stream disconnects unexpectedly.
+     *
+     * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
+     */
+    public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
+        this.disconnectListener = disconnectListener;
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            stream.setDisconnectListener(disconnectListener);
+        }
+        ReconnectingWebSocketStream currentUser = this.userStream;
+        if (currentUser != null) {
+            currentUser.setDisconnectListener(disconnectListener);
         }
     }
 
@@ -128,6 +172,7 @@ public class PolymarketClobClient {
                 "PING"
         );
         stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        stream.setDisconnectListener(this.disconnectListener);
         stream.seedHistoricalTelemetry(
                 historicalMarketReconnects,
                 lastMarketCloseCode,
@@ -174,6 +219,7 @@ public class PolymarketClobClient {
                 "PING"
         );
         stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        stream.setDisconnectListener(this.disconnectListener);
         stream.seedHistoricalTelemetry(
                 historicalMarketReconnects,
                 lastMarketCloseCode,
@@ -204,10 +250,11 @@ public class PolymarketClobClient {
         if (stream != null) {
             WebSocketStreamTelemetry snap = stream.getTelemetrySnapshot();
             historicalMarketReconnects = Math.max(historicalMarketReconnects, snap.reconnectCount());
-            if (snap.lastCloseCode() != 0) {
+            if (snap.lastCloseCode() != 0 && (snap.lastCloseCode() != -1 || lastMarketCloseCode == 0)) {
                 lastMarketCloseCode = snap.lastCloseCode();
             }
-            if (snap.lastCloseReason() != null && !snap.lastCloseReason().isEmpty()) {
+            if (snap.lastCloseReason() != null && !snap.lastCloseReason().isEmpty()
+                    && (!"none".equals(snap.lastCloseReason()) || lastMarketCloseReason.isEmpty())) {
                 lastMarketCloseReason = snap.lastCloseReason();
             }
             historicalMaxQueueDepth = Math.max(historicalMaxQueueDepth, snap.maxQueueDepth());
@@ -261,6 +308,7 @@ public class PolymarketClobClient {
                 pingIntervalMs,
                 "PING"
         );
+        stream.setDisconnectListener(this.disconnectListener);
         if (externalWorker != null) {
             stream.bindExternalWorker(externalWorker);
         }

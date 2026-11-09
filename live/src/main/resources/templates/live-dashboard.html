@@ -282,6 +282,12 @@
             <span class="badge badge-live">● {status}</span>
             <span class="badge badge-armed">{orderType}</span>
             <span class="badge badge-strategy">GC: {telemetry.gcName}</span>
+            <span class="badge {#if telemetry.nativeTransportEnabled}badge-up{#else}badge-armed{/if}">
+                I/O: {#if telemetry.nativeTransportEnabled}EPOLL{#else}NIO{/if}
+            </span>
+            <span class="badge {#if telemetry.openSslAvailable}badge-up{#else}badge-armed{/if}">
+                TLS: {#if telemetry.openSslAvailable}BoringSSL{#else}JDK{/if}
+            </span>
         </div>
         <div class="header-right">
             <div class="header-stat">
@@ -445,6 +451,104 @@
                             <td style="color: var(--text-secondary);">
                                 {#if s.lastCloseCode != 0}{s.lastCloseCode} ({s.lastCloseReason}){#else}NONE{/if}
                             </td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Disconnect &amp; Slow-Consumer Forensics</span>
+            <span style="font-size: 12px; color: var(--text-secondary);">Retained ring buffer (max 50 events)</span>
+        </div>
+        {#if telemetry.disconnectEvents.isEmpty}
+            <div class="no-data">
+                No unexpected WebSocket disconnects recorded since startup.
+            </div>
+        {#else}
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Timestamp (ms)</th>
+                        <th>Stream Name</th>
+                        <th>Close Code &amp; Reason</th>
+                        <th>Reconnects</th>
+                        <th>Queue Depth (At Close / Max)</th>
+                        <th>Queue Lag (Last / Max)</th>
+                        <th>Process Time (Last / Max)</th>
+                        <th>OS TCP Rx Queue</th>
+                        <th>CPU (Proc / vCPU #1 / vCPU #2)</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for d in telemetry.disconnectEvents}
+                        <tr>
+                            <td>{d.timestampMs}</td>
+                            <td><strong>{d.streamName}</strong></td>
+                            <td class="{#if d.closeCode == 1013}text-red{#else}text-orange{/if}">
+                                {d.closeCode} ({d.closeReason})
+                            </td>
+                            <td>{d.reconnectCount}</td>
+                            <td>{d.queueDepthAtDisconnect} / {d.maxQueueDepth}</td>
+                            <td>{d.lastQueueLagMs} ms / {d.maxQueueLagMs} ms</td>
+                            <td>{d.lastProcessTimeUs} µs / {d.maxProcessTimeUs} µs</td>
+                            <td>{d.tcpRxQueueBytes} B (collapsed: {d.tcpRcvCollapsed})</td>
+                            <td>{d.processCpuLoadPct}% / {d.ioReaderCpuPct}% / {d.clobBookWorkerCpuPct}%</td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Recent Telemetry History (10s Time-Series Ring Buffer)</span>
+            <span style="font-size: 12px; color: var(--text-secondary);">Samples retained: {telemetry.history.size} / 360</span>
+        </div>
+        {#if telemetry.history.isEmpty}
+            <div class="no-data">
+                No historical telemetry samples recorded yet.
+            </div>
+        {#else}
+            <div style="overflow-x: auto; max-height: 300px; overflow-y: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Timestamp (ms)</th>
+                        <th>JVM CPU %</th>
+                        <th>Host CPU %</th>
+                        <th>vCPU #1 (I/O) %</th>
+                        <th>vCPU #2 (Book) %</th>
+                        <th>vCPU #3 (Strat) %</th>
+                        <th>vCPU #4 (Order) %</th>
+                        <th>TCP Rx Queue</th>
+                        <th>CLOB Queue Depth</th>
+                        <th>CLOB Max Lag</th>
+                        <th>Quote Age</th>
+                        <th>Heap Used</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for h in telemetry.history}
+                        <tr>
+                            <td>{h.timestampMs}</td>
+                            <td>{h.processCpuLoadPct}%</td>
+                            <td>{h.systemCpuLoadPct}%</td>
+                            <td class="{#if h.ioReaderCpuPct > 80}text-red{#else}text-green{/if}">{h.ioReaderCpuPct}%</td>
+                            <td>{h.clobBookWorkerCpuPct}%</td>
+                            <td>{h.strategyWorkerCpuPct}%</td>
+                            <td>{h.orderWorkerCpuPct}%</td>
+                            <td>{h.tcpRxQueueBytes} B</td>
+                            <td>{h.clobQueueDepth}</td>
+                            <td>{h.clobMaxQueueLagMs} ms</td>
+                            <td>{h.lastQuoteAgeMs} ms</td>
+                            <td>{h.usedHeapMb} MiB</td>
                         </tr>
                     {/for}
                     </tbody>

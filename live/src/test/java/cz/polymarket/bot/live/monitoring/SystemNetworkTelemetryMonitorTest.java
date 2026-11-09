@@ -80,4 +80,57 @@ class SystemNetworkTelemetryMonitorTest {
         assertThat(second.threads().get(1).busyDutyCyclePct()).isGreaterThan(0.0);
         assertThat(second.threads().get(1).maxBusyDutyCyclePct()).isGreaterThanOrEqualTo(second.threads().get(1).busyDutyCyclePct());
     }
+
+    @Test
+    void shouldMaintainBoundedRingBuffersForHistoryPointsAndDisconnectEvents() {
+        SystemNetworkTelemetryMonitor monitor = new SystemNetworkTelemetryMonitor();
+
+        for (int i = 0; i < SystemNetworkTelemetryMonitor.MAX_HISTORY_POINTS + 10; i++) {
+            monitor.recordHistoryPoint(new TelemetryHistoryPoint(
+                    1_700_000_000_000L + i * 10_000L,
+                    12.5,
+                    15.0,
+                    4.2,
+                    1.1,
+                    0.5,
+                    0.3,
+                    0L,
+                    0,
+                    2L,
+                    1L,
+                    120L
+            ));
+        }
+
+        List<TelemetryHistoryPoint> history = monitor.getHistory();
+        assertThat(history).hasSize(SystemNetworkTelemetryMonitor.MAX_HISTORY_POINTS);
+        assertThat(history.getFirst().timestampMs()).isEqualTo(1_700_000_000_000L + 10 * 10_000L);
+
+        for (int i = 0; i < SystemNetworkTelemetryMonitor.MAX_DISCONNECT_EVENTS + 5; i++) {
+            monitor.recordDisconnectEvent(new WebSocketDisconnectEvent(
+                    1_700_000_000_000L + i * 1_000L,
+                    "POLYMARKET-CLOB-btc-updown-15m-" + i,
+                    1013,
+                    "slow consumer: send buffer full",
+                    i + 1L,
+                    3,
+                    150,
+                    1L,
+                    2L,
+                    120L,
+                    864L,
+                    0L,
+                    0L,
+                    25.0,
+                    100.0,
+                    1.3
+            ));
+        }
+
+        List<WebSocketDisconnectEvent> disconnects = monitor.getDisconnectEvents();
+        assertThat(disconnects).hasSize(SystemNetworkTelemetryMonitor.MAX_DISCONNECT_EVENTS);
+        assertThat(disconnects.getFirst().streamName()).isEqualTo("POLYMARKET-CLOB-btc-updown-15m-5");
+        assertThat(disconnects.getLast().closeCode()).isEqualTo(1013);
+        assertThat(disconnects.getLast().closeReason()).isEqualTo("slow consumer: send buffer full");
+    }
 }

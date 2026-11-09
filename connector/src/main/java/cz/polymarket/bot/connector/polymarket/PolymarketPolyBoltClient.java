@@ -4,6 +4,7 @@ import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
@@ -36,6 +37,7 @@ public class PolymarketPolyBoltClient {
 
     private volatile ReconnectingWebSocketStream twapStream;
     private volatile ReconnectingWebSocketStream cryptoPriceStream;
+    private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
      * CDI constructor for the Polymarket PolyBolt WebSocket client.
@@ -64,12 +66,33 @@ public class PolymarketPolyBoltClient {
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
         this.vertx = vertx;
+        if (!this.vertx.isNativeTransportEnabled()) {
+            Log.warnf("Native Linux Epoll transport is unavailable on shared Vertx (os=%s); falling back to JDK NIO EventLoop",
+                    System.getProperty("os.name", "unknown"));
+        }
         this.wsUrl = wsUrl;
         this.apiKey = apiKey.map(String::trim).orElse("");
         this.secret = secret.map(String::trim).orElse("");
         this.passphrase = passphrase.map(String::trim).orElse("");
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+    }
+
+    /**
+     * Registers a listener notified whenever any active PolyBolt stream disconnects unexpectedly.
+     *
+     * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
+     */
+    public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
+        this.disconnectListener = disconnectListener;
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            twap.setDisconnectListener(disconnectListener);
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            spot.setDisconnectListener(disconnectListener);
+        }
     }
 
     /**
@@ -115,6 +138,7 @@ public class PolymarketPolyBoltClient {
                 () -> this.twapStream,
                 listener
         );
+        newStream.setDisconnectListener(this.disconnectListener);
         if (externalWorker != null) {
             newStream.bindExternalWorker(externalWorker);
         }
@@ -152,6 +176,7 @@ public class PolymarketPolyBoltClient {
                 () -> this.cryptoPriceStream,
                 listener
         );
+        newStream.setDisconnectListener(this.disconnectListener);
         if (externalWorker != null) {
             newStream.bindExternalWorker(externalWorker);
         }
