@@ -1,10 +1,10 @@
 package cz.polymarket.bot.data.storage;
 
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -15,12 +15,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages per-market Zstandard streaming JSONL files ({@code .jsonl.zst}) for Polymarket markets,
- * keeping each market's file open across its entire lifecycle (from creation ~7h before open through resolution).
+ * keeping each market's file open across its entire lifecycle (from creation ~7h before open through resolution)
+ * with per-market lock isolation and zero-decode {@code byte[]} writing.
  */
 @ApplicationScoped
 public class PolymarketMarketStorageManager {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketMarketStorageManager.class);
 
     private final Path polymarketDir;
     private final Map<String, ZstdJsonlWriter> marketWriters = new ConcurrentHashMap<>();
@@ -53,15 +52,15 @@ public class PolymarketMarketStorageManager {
      *
      * @param marketSlug      Polymarket market slug (e.g. btc-updown-15m-1789041600)
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
-     * @param eventType       event classification ("market_discovered", "twap_60s", "target_price", "resolution_price", "book", "price_change", "last_trade_price", "market_resolved")
+     * @param eventType       event classification ("market_discovered", "clob", "market_resolved")
      * @param rawJson         raw JSON payload
      */
-    public synchronized void recordMarketEvent(
+    public void recordMarketEvent(
             String marketSlug,
             long recvTimestampMs,
             String eventType,
             String rawJson) {
-        if (marketSlug == null || marketSlug.isBlank()) {
+        if (marketSlug == null || marketSlug.isBlank() || rawJson == null || rawJson.isBlank()) {
             return;
         }
         try {
@@ -69,7 +68,33 @@ public class PolymarketMarketStorageManager {
             writer.writePolymarketEvent(recvTimestampMs, eventType, rawJson);
             totalRecordsWritten.incrementAndGet();
         } catch (IOException e) {
-            LOG.errorf(e, "Failed to write Polymarket %s event for market %s", eventType, marketSlug);
+            Log.errorf(e, "Failed to write Polymarket %s event for market %s", eventType, marketSlug);
+        }
+    }
+
+    /**
+     * Appends a raw UTF-8 {@code byte[]} event payload directly to the specified market's {@code .jsonl.zst} file
+     * without allocating a {@link String}.
+     *
+     * @param marketSlug      Polymarket market slug (e.g. btc-updown-15m-1789041600)
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param eventType       event classification ("market_discovered", "clob", "market_resolved")
+     * @param rawPayloadBytes raw UTF-8 JSON bytes
+     */
+    public void recordMarketEventBytes(
+            String marketSlug,
+            long recvTimestampMs,
+            String eventType,
+            byte[] rawPayloadBytes) {
+        if (marketSlug == null || marketSlug.isBlank() || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        try {
+            ZstdJsonlWriter writer = getOrCreateWriter(marketSlug);
+            writer.writePolymarketEvent(recvTimestampMs, eventType, rawPayloadBytes);
+            totalRecordsWritten.incrementAndGet();
+        } catch (IOException e) {
+            Log.errorf(e, "Failed to write Polymarket %s byte event for market %s", eventType, marketSlug);
         }
     }
 
@@ -83,9 +108,9 @@ public class PolymarketMarketStorageManager {
         if (writer != null) {
             try {
                 writer.close();
-                LOG.infof("Closed Polymarket market file for %s (%d records)", marketSlug, writer.getRecordsWritten());
+                Log.infof("Closed Polymarket market file for %s (%d records)", marketSlug, writer.getRecordsWritten());
             } catch (IOException e) {
-                LOG.warnf("Failed to close Polymarket writer for %s: %s", marketSlug, e.getMessage());
+                Log.warnf("Failed to close Polymarket writer for %s: %s", marketSlug, e.getMessage());
             }
         }
     }
@@ -93,12 +118,12 @@ public class PolymarketMarketStorageManager {
     /**
      * Flushes all currently open market writers to disk.
      */
-    public synchronized void flushAll() {
+    public void flushAll() {
         for (Map.Entry<String, ZstdJsonlWriter> entry : marketWriters.entrySet()) {
             try {
                 entry.getValue().flush();
             } catch (IOException e) {
-                LOG.warnf("Failed to flush Polymarket writer for %s: %s", entry.getKey(), e.getMessage());
+                Log.warnf("Failed to flush Polymarket writer for %s: %s", entry.getKey(), e.getMessage());
             }
         }
     }
@@ -136,10 +161,16 @@ public class PolymarketMarketStorageManager {
         if (existing != null) {
             return existing;
         }
-        Path filePath = resolveMarketFilePath(marketSlug);
-        ZstdJsonlWriter created = new ZstdJsonlWriter(filePath);
-        marketWriters.put(marketSlug, created);
-        LOG.infof("Opened Polymarket market stream file: %s", filePath);
-        return created;
+        synchronized (this) {
+            existing = marketWriters.get(marketSlug);
+            if (existing != null) {
+                return existing;
+            }
+            Path filePath = resolveMarketFilePath(marketSlug);
+            ZstdJsonlWriter created = new ZstdJsonlWriter(filePath);
+            marketWriters.put(marketSlug, created);
+            Log.infof("Opened Polymarket market stream file: %s", filePath);
+            return created;
+        }
     }
 }

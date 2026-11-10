@@ -1,14 +1,20 @@
 package cz.polymarket.bot.data.service;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
+import cz.polymarket.bot.connector.binance.BinanceStreamListener;
+import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
+import cz.polymarket.bot.connector.ws.RawWebSocketListener;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
 import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import cz.polymarket.bot.data.web.CollectorStatusDto;
+import io.quarkus.logging.Log;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -17,7 +23,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -25,14 +30,12 @@ import java.util.Map;
 
 /**
  * Main orchestrator service for the Data Collector application.
- * Always starts recording Binance, Deribit, and Polymarket WebSocket streams on application startup,
- * schedules periodic Polymarket market discovery/resolution checks and Zstandard frame flushes,
- * and exposes runtime status.
+ * Always starts recording Binance, Deribit, and Polymarket WebSocket streams on application startup
+ * using zero-decode {@code byte[]} Zstandard writing, schedules periodic Polymarket market discovery/resolution
+ * checks and Zstandard frame flushes, and exposes runtime status.
  */
 @ApplicationScoped
 public class DataCollectorService {
-
-    private static final Logger LOG = Logger.getLogger(DataCollectorService.class);
 
     private final BinanceStreamConnector binanceConnector;
     private final DailyBinanceStorageManager binanceStorage;
@@ -87,25 +90,75 @@ public class DataCollectorService {
         this.clobClient = clobClient;
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
         this.timeframe = timeframe;
+        this.binanceConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.deribitConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.clobClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
     }
 
     void onStart(@Observes StartupEvent event) {
-        LOG.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s...", symbol, timeframe);
+        Log.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s...", symbol, timeframe);
         try {
-            polyBoltClient.startCryptoPriceStream(symbol, polyBoltDailyStorage::recordCryptoPrice);
-            polyBoltClient.startTwapStream(symbol, polyBoltDailyStorage::recordTwap);
-            binanceConnector.start(symbol, binanceStorage::record);
-            deribitConnector.start(symbol, deribitStorage::record);
+            polyBoltClient.startCryptoPriceStream(symbol, new RawWebSocketListener() {
+                @Override
+                public void onMessage(String rawJson, long recvTs) {
+                    polyBoltDailyStorage.recordCryptoPrice(rawJson, recvTs);
+                }
+
+                @Override
+                public void onMessageBytes(TimestampedFrame frame) {
+                    if (frame != null) {
+                        polyBoltDailyStorage.recordCryptoPriceBytes(frame.rawUtf8Bytes(), frame.recvTs());
+                    }
+                }
+            });
+            polyBoltClient.startTwapStream(symbol, new RawWebSocketListener() {
+                @Override
+                public void onMessage(String rawJson, long recvTs) {
+                    polyBoltDailyStorage.recordTwap(rawJson, recvTs);
+                }
+
+                @Override
+                public void onMessageBytes(TimestampedFrame frame) {
+                    if (frame != null) {
+                        polyBoltDailyStorage.recordTwapBytes(frame.rawUtf8Bytes(), frame.recvTs());
+                    }
+                }
+            });
+            binanceConnector.start(symbol, new BinanceStreamListener() {
+                @Override
+                public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+                    binanceStorage.record(streamType, rawJson, recvTimestampMs);
+                }
+
+                @Override
+                public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                    binanceStorage.recordBytes(streamType, rawUtf8Bytes, recvTimestampMs);
+                }
+            });
+            deribitConnector.start(symbol, new RawWebSocketListener() {
+                @Override
+                public void onMessage(String rawJson, long recvTs) {
+                    deribitStorage.record(rawJson, recvTs);
+                }
+
+                @Override
+                public void onMessageBytes(TimestampedFrame frame) {
+                    if (frame != null) {
+                        deribitStorage.recordBytes(frame.rawUtf8Bytes(), frame.recvTs());
+                    }
+                }
+            });
             polymarketCoordinator.start(Instant.now().getEpochSecond());
         } catch (Exception e) {
-            LOG.errorf("Fatal error starting Data Collector: %s. Terminating application.", e.getMessage());
+            Log.errorf("Fatal error starting Data Collector: %s. Terminating application.", e.getMessage());
             Quarkus.asyncExit(1);
             throw e;
         }
     }
 
     void onStop(@Observes ShutdownEvent event) {
-        LOG.info("Shutting down Data Collector and closing Zstd streams...");
+        Log.info("Shutting down Data Collector and closing Zstd streams...");
         binanceConnector.stop();
         deribitConnector.stop();
         polymarketCoordinator.stop();
@@ -113,6 +166,22 @@ public class DataCollectorService {
         binanceStorage.closeAll();
         deribitStorage.closeAll();
         polyBoltDailyStorage.closeAll();
+    }
+
+    private void onStreamUnexpectedDisconnect(WebSocketStreamTelemetry snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        Log.warnf("Data Collector stream disconnect telemetry [%s]: remote=%s, closeCode=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, maxQueueLagMs=%d, totalFrames=%d, reconnectCount=%d",
+                snapshot.streamName(),
+                snapshot.remoteAddress().isEmpty() ? "unknown" : snapshot.remoteAddress(),
+                snapshot.lastCloseCode(),
+                snapshot.lastCloseReason(),
+                snapshot.queueDepth(),
+                snapshot.maxQueueDepth(),
+                snapshot.maxQueueLagMs(),
+                snapshot.totalFramesReceived(),
+                snapshot.reconnectCount());
     }
 
     /**

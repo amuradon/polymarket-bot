@@ -93,10 +93,12 @@ class PolymarketLifecycleCoordinatorTest {
         assertThat(coordinator.getTrackedMarketSlugs()).contains(slug0, slug5);
         assertThat(coordinator.getTrackedMarketSlugs()).doesNotContain(slug6);
 
-        // 2. Emit raw CLOB messages -> saved directly without parsing
-        clobListenersBySlug.get(slug0).onMessage(
-                "[{\"event_type\":\"book\",\"asset_id\":\"token_up_0\",\"bids\":[{\"price\":\"0.50\",\"size\":\"100\"}]}]",
-                (baseStartSec + 20L) * 1000L
+        // 2. Emit raw CLOB messages via zero-decode TimestampedFrame -> saved directly without parsing
+        clobListenersBySlug.get(slug0).onMessageBytes(
+                new cz.polymarket.bot.connector.ws.TimestampedFrame(
+                        "[{\"event_type\":\"book\",\"asset_id\":\"token_up_0\",\"bids\":[{\"price\":\"0.50\",\"size\":\"100\"}]}]".getBytes(StandardCharsets.UTF_8),
+                        (baseStartSec + 20L) * 1000L
+                )
         );
 
         // 3. Cycle 0 ends (now = baseStartSec + 905), but Gamma still has closed=false -> keep slug0 open, do not open slug6 yet

@@ -70,6 +70,15 @@ public final class TimestampedFrame {
     }
 
     /**
+     * Returns whether the UTF-8 text representation has already been decoded into a {@link String}.
+     *
+     * @return {@code true} if {@link #rawText} is already materialized
+     */
+    public boolean isTextDecoded() {
+        return this.rawText != null;
+    }
+
+    /**
      * Returns the local receipt timestamp in epoch milliseconds captured on the I/O thread.
      *
      * @return receipt timestamp in epoch milliseconds

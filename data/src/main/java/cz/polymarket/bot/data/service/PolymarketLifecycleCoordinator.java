@@ -3,11 +3,13 @@ package cz.polymarket.bot.data.service;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
+import cz.polymarket.bot.connector.ws.RawWebSocketListener;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,13 +20,12 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Coordinates the lifecycle of Polymarket prediction markets, maintaining CLOB WebSocket connections
  * to the current market and {@code lookahead-count} (default 5) future markets.
- * Records all raw CLOB WebSocket messages without JSON parsing overhead, and disconnects each market's
- * stream and closes its {@code .jsonl.zst} file once its resolution is recorded.
+ * Records all raw CLOB WebSocket messages as UTF-8 {@code byte[]} directly to Zstandard storage without JSON parsing
+ * or {@link String} allocation overhead, and disconnects each market's stream and closes its {@code .jsonl.zst} file
+ * once its resolution is recorded.
  */
 @ApplicationScoped
 public class PolymarketLifecycleCoordinator {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketLifecycleCoordinator.class);
 
     private final PolymarketGammaClient gammaClient;
     private final PolymarketClobClient clobClient;
@@ -158,6 +159,20 @@ public class PolymarketLifecycleCoordinator {
     }
 
     /**
+     * Records a raw UTF-8 {@code byte[]} CLOB WebSocket message for a specific market without {@link String} allocation.
+     *
+     * @param slug            market slug owning the CLOB WebSocket stream
+     * @param rawPayloadBytes unmodified UTF-8 JSON bytes from CLOB WebSocket
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public void onRawClobMessageBytes(String slug, byte[] rawPayloadBytes, long recvTimestampMs) {
+        if (!isJsonPayloadBytes(rawPayloadBytes) || !trackedMarketsBySlug.containsKey(slug)) {
+            return;
+        }
+        storageManager.recordMarketEventBytes(slug, recvTimestampMs, "clob", rawPayloadBytes);
+    }
+
+    /**
      * Returns the list of currently tracked market slugs.
      *
      * @return list of active market slugs
@@ -167,15 +182,28 @@ public class PolymarketLifecycleCoordinator {
     }
 
     private void registerNewMarket(PolymarketMarketInfo info, long recvTs) {
-        trackedMarketsBySlug.put(info.slug(), info);
-        storageManager.recordMarketEvent(info.slug(), recvTs, "market_discovered", info.rawJson());
+        String slug = info.slug();
+        trackedMarketsBySlug.put(slug, info);
+        storageManager.recordMarketEvent(slug, recvTs, "market_discovered", info.rawJson());
         clobClient.openMarketStream(
-                info.slug(),
+                slug,
                 info.clobTokenIds(),
-                (rawJson, msgRecvTs) -> onRawClobMessage(info.slug(), rawJson, msgRecvTs)
+                new RawWebSocketListener() {
+                    @Override
+                    public void onMessage(String rawJson, long msgRecvTs) {
+                        onRawClobMessage(slug, rawJson, msgRecvTs);
+                    }
+
+                    @Override
+                    public void onMessageBytes(TimestampedFrame frame) {
+                        if (frame != null) {
+                            onRawClobMessageBytes(slug, frame.rawUtf8Bytes(), frame.recvTs());
+                        }
+                    }
+                }
         );
-        LOG.infof("Tracking Polymarket market %s (start=%d, end=%d, tokens=%s)",
-                info.slug(), info.startSec(), info.endSec(), info.clobTokenIds());
+        Log.infof("Tracking Polymarket market %s (start=%d, end=%d, tokens=%s)",
+                slug, info.startSec(), info.endSec(), info.clobTokenIds());
     }
 
     private void finalizeMarket(String slug) {
@@ -190,5 +218,18 @@ public class PolymarketLifecycleCoordinator {
         }
         char first = raw.stripLeading().charAt(0);
         return first == '{' || first == '[';
+    }
+
+    private static boolean isJsonPayloadBytes(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return false;
+        }
+        for (byte b : bytes) {
+            int u = b & 0xFF;
+            if (u > ' ') {
+                return u == '{' || u == '[';
+            }
+        }
+        return false;
     }
 }

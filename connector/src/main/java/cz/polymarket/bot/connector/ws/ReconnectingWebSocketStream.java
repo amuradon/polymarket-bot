@@ -382,7 +382,7 @@ public class ReconnectingWebSocketStream {
             } else if (messageListener != null) {
                 for (int i = 0; i < drainedCount; i++) {
                     TimestampedFrame frame = scratchBatch.get(i);
-                    messageListener.onMessage(frame.rawText(), frame.recvTs());
+                    messageListener.onMessageBytes(frame);
                 }
             }
         } catch (Exception e) {

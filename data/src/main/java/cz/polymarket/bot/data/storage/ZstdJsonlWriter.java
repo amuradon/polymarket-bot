@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * High-efficiency Zstandard streaming JSONL writer ({@code .jsonl.zst}).
  * Writes raw WebSocket JSON payloads paired with local receipt timestamps directly as UTF-8 bytes
- * without re-parsing or re-serializing the JSON payload tree.
+ * without re-parsing, re-serializing, or allocating intermediate {@link String} or {@code byte[]} objects.
  */
 public class ZstdJsonlWriter implements Closeable, Flushable {
 
@@ -30,6 +30,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     private final Path filePath;
     private final OutputStream underlyingOut;
     private final ZstdOutputStream zstdOut;
+    private final byte[] timestampAsciiScratch = new byte[20];
     private final AtomicLong recordsWritten = new AtomicLong(0L);
     private volatile boolean closed = false;
 
@@ -68,10 +69,31 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
         if (closed || rawPayloadJson == null || rawPayloadJson.isBlank()) {
             return;
         }
+        writeBinanceEvent(recvTimestampMs, rawPayloadJson.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Writes a raw UTF-8 {@code byte[]} payload with its local receipt timestamp directly into the Zstandard stream
+     * without allocating a {@link String} or temporary {@code byte[]} copy:
+     * {@code {"ts":<recvTimestampMs>,"payload":<rawPayloadBytes>}}
+     *
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writeBinanceEvent(long recvTimestampMs, byte[] rawPayloadBytes) throws IOException {
+        if (closed || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        int start = firstNonWhitespaceIndex(rawPayloadBytes);
+        int end = lastNonWhitespaceEndIndex(rawPayloadBytes, start);
+        if (start >= end) {
+            return;
+        }
         zstdOut.write(PREFIX_TS);
-        zstdOut.write(Long.toString(recvTimestampMs).getBytes(StandardCharsets.UTF_8));
+        writeTimestampAscii(recvTimestampMs);
         zstdOut.write(INFIX_PAYLOAD);
-        zstdOut.write(rawPayloadJson.strip().getBytes(StandardCharsets.UTF_8));
+        zstdOut.write(rawPayloadBytes, start, end - start);
         zstdOut.write(SUFFIX_LINE);
         recordsWritten.incrementAndGet();
     }
@@ -88,13 +110,25 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
         writeBinanceEvent(recvTimestampMs, rawPayloadJson);
     }
 
+    /**
+     * Writes a raw Deribit Futures trade UTF-8 {@code byte[]} payload with its local receipt timestamp
+     * directly into the Zstandard stream with zero heap allocations:
+     * {@code {"ts":<recvTimestampMs>,"payload":<rawPayloadBytes>}}
+     *
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writeDeribitEvent(long recvTimestampMs, byte[] rawPayloadBytes) throws IOException {
+        writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+    }
 
     /**
      * Writes a raw Polymarket event payload with its local receipt timestamp and event type as a single JSONL line:
      * {@code {"ts":<recvTimestampMs>,"type":"<eventType>","payload":<rawPayloadJson>}}
      *
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
-     * @param eventType       Polymarket event classification (e.g. "market_discovered", "twap_60s", "target_price", "resolution_price", "book", "price_change", "last_trade_price")
+     * @param eventType       Polymarket event classification (e.g. "market_discovered", "clob", "market_resolved")
      * @param rawPayloadJson  raw JSON payload string
      * @throws IOException if writing to the underlying stream fails
      */
@@ -102,14 +136,76 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
         if (closed || rawPayloadJson == null || rawPayloadJson.isBlank()) {
             return;
         }
+        writePolymarketEvent(recvTimestampMs, eventType, rawPayloadJson.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Writes a raw Polymarket UTF-8 {@code byte[]} event payload with its local receipt timestamp and event type
+     * directly into the Zstandard stream without {@link String} allocation:
+     * {@code {"ts":<recvTimestampMs>,"type":"<eventType>","payload":<rawPayloadBytes>}}
+     *
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param eventType       Polymarket event classification (e.g. "market_discovered", "clob", "market_resolved")
+     * @param rawPayloadBytes raw UTF-8 JSON payload bytes
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writePolymarketEvent(long recvTimestampMs, String eventType, byte[] rawPayloadBytes) throws IOException {
+        if (closed || eventType == null || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        int start = firstNonWhitespaceIndex(rawPayloadBytes);
+        int end = lastNonWhitespaceEndIndex(rawPayloadBytes, start);
+        if (start >= end) {
+            return;
+        }
         zstdOut.write(PREFIX_TS);
-        zstdOut.write(Long.toString(recvTimestampMs).getBytes(StandardCharsets.UTF_8));
+        writeTimestampAscii(recvTimestampMs);
         zstdOut.write(INFIX_TYPE);
-        zstdOut.write(eventType.getBytes(StandardCharsets.UTF_8));
+        for (int i = 0, n = eventType.length(); i < n; i++) {
+            zstdOut.write((byte) eventType.charAt(i));
+        }
         zstdOut.write(INFIX_TYPE_PAYLOAD);
-        zstdOut.write(rawPayloadJson.strip().getBytes(StandardCharsets.UTF_8));
+        zstdOut.write(rawPayloadBytes, start, end - start);
         zstdOut.write(SUFFIX_LINE);
         recordsWritten.incrementAndGet();
+    }
+
+    private void writeTimestampAscii(long value) throws IOException {
+        if (value == 0L) {
+            timestampAsciiScratch[0] = '0';
+            zstdOut.write(timestampAsciiScratch, 0, 1);
+            return;
+        }
+        boolean negative = value < 0L;
+        long abs = negative ? -value : value;
+        int cursor = timestampAsciiScratch.length;
+        while (abs > 0L) {
+            long q = abs / 10L;
+            int digit = (int) (abs - (q * 10L));
+            timestampAsciiScratch[--cursor] = (byte) ('0' + digit);
+            abs = q;
+        }
+        if (negative) {
+            timestampAsciiScratch[--cursor] = '-';
+        }
+        zstdOut.write(timestampAsciiScratch, cursor, timestampAsciiScratch.length - cursor);
+    }
+
+    private static int firstNonWhitespaceIndex(byte[] bytes) {
+        int len = bytes.length;
+        int i = 0;
+        while (i < len && (bytes[i] & 0xFF) <= ' ') {
+            i++;
+        }
+        return i;
+    }
+
+    private static int lastNonWhitespaceEndIndex(byte[] bytes, int start) {
+        int end = bytes.length;
+        while (end > start && (bytes[end - 1] & 0xFF) <= ' ') {
+            end--;
+        }
+        return end;
     }
 
     /**

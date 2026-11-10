@@ -3,13 +3,21 @@ package cz.polymarket.bot.connector.deribit;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
+import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.dns.AddressResolverOptions;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -17,17 +25,29 @@ import java.util.function.Consumer;
 /**
  * Resilient WebSocket client for Deribit v2 API ({@code wss://www.deribit.com/ws/api/v2}).
  * Exclusively connects to authenticated raw trade channels ({@code trades.{instrument}.raw}) via
- * JSON-RPC {@code public/auth} client credentials.
+ * JSON-RPC {@code public/auth} client credentials on an isolated 1-thread Netty EventLoop
+ * ({@code deribit-ws-io-reader}) with native Linux Epoll transport and BoringSSL.
  * If credentials are missing or authentication fails, the connector aborts and terminates the application with an error.
  */
 @ApplicationScoped
 public class DeribitStreamConnector {
 
+    /**
+     * Dedicated thread name for the isolated Netty EventLoop servicing the Deribit WebSocket stream.
+     */
+    public static final String DEDICATED_DERIBIT_IO_THREAD_NAME = "deribit-ws-io-reader";
+
     private static final int AUTH_REQUEST_ID = 1;
     private static final int SUBSCRIBE_REQUEST_ID = 2;
     private static final int HEARTBEAT_REPLY_ID = 999;
+    private static final String HEARTBEAT_REPLY_JSON =
+            "{\"jsonrpc\":\"2.0\",\"id\":" + HEARTBEAT_REPLY_ID + ",\"method\":\"public/test\"}";
+    private static final byte[] SUBSCRIPTION_PATTERN_COMPACT =
+            "\"method\":\"subscription\"".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] SUBSCRIPTION_PATTERN_SPACED =
+            "\"method\": \"subscription\"".getBytes(StandardCharsets.UTF_8);
 
-    private final Vertx vertx;
+    private final Vertx deribitVertx;
     private final String wsUrl;
     private final String clientId;
     private final String clientSecret;
@@ -37,11 +57,12 @@ public class DeribitStreamConnector {
     private volatile ReconnectingWebSocketStream stream;
     private volatile String activeInstrument;
     private volatile Consumer<String> fatalErrorHandler;
+    private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Deribit WebSocket connector with configuration and credentials.
+     * Constructs the Deribit WebSocket connector with configuration, credentials, and a dedicated 1-thread Vert.x instance.
      *
-     * @param vertx            Vert.x instance
+     * @param vertx            shared Vert.x instance
      * @param wsUrl            Deribit WebSocket v2 endpoint URL
      * @param clientId         Deribit API Client ID (required for raw trades)
      * @param clientSecret     Deribit API Client Secret (required for raw trades)
@@ -61,7 +82,20 @@ public class DeribitStreamConnector {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "15000")
             long pingIntervalMs) {
-        this.vertx = vertx;
+        this.deribitVertx = Vertx.vertx(new VertxOptions()
+                .setEventLoopPoolSize(1)
+                .setPreferNativeTransport(true)
+                .setAddressResolverOptions(new AddressResolverOptions()
+                        .setRoundRobinInetAddress(true)
+                        .setRotateServers(true)
+                        .setCacheMaxTimeToLive(60)));
+        if (!this.deribitVertx.isNativeTransportEnabled()) {
+            Log.warnf("Native Linux Epoll transport is unavailable on deribitVertx (os=%s); falling back to JDK NIO EventLoop",
+                    System.getProperty("os.name", "unknown"));
+        } else {
+            Log.infof("Initialized dedicated deribitVertx with native Linux Epoll transport (openSslAvailable=%b)",
+                    OpenSsl.isAvailable());
+        }
         this.wsUrl = wsUrl;
         this.clientId = clientId.filter(s -> !s.isBlank()).orElse(null);
         this.clientSecret = clientSecret.filter(s -> !s.isBlank()).orElse(null);
@@ -87,6 +121,46 @@ public class DeribitStreamConnector {
             long reconnectDelayMs,
             long pingIntervalMs) {
         this(vertx, wsUrl, Optional.ofNullable(clientId), Optional.ofNullable(clientSecret), reconnectDelayMs, pingIntervalMs);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        stop();
+        try {
+            deribitVertx.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Returns whether native Linux Epoll transport is active on the dedicated Deribit Vert.x instance.
+     *
+     * @return {@code true} if native transport is enabled
+     */
+    public boolean isNativeTransportEnabled() {
+        return deribitVertx.isNativeTransportEnabled();
+    }
+
+    /**
+     * Returns whether native OpenSSL/BoringSSL ({@code netty-tcnative}) is available on the runtime classpath.
+     *
+     * @return {@code true} if native OpenSSL/BoringSSL is available
+     */
+    public boolean isOpenSslAvailable() {
+        return OpenSsl.isAvailable();
+    }
+
+    /**
+     * Registers a listener notified whenever the Deribit stream disconnects unexpectedly.
+     *
+     * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
+     */
+    public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
+        this.disconnectListener = disconnectListener;
+        ReconnectingWebSocketStream current = this.stream;
+        if (current != null) {
+            current.setDisconnectListener(disconnectListener);
+        }
     }
 
     /**
@@ -117,6 +191,18 @@ public class DeribitStreamConnector {
      * @throws IllegalStateException if required Deribit API credentials are not configured
      */
     public synchronized void start(String symbol, RawWebSocketListener listener) {
+        start(symbol, listener, null);
+    }
+
+    /**
+     * Starts the Deribit WebSocket stream for the given symbol/instrument bound to an optional external worker thread.
+     *
+     * @param symbol         trading symbol or instrument name (e.g. BTCUSDT, BTC, or BTC-PERPETUAL)
+     * @param listener       raw WebSocket listener receiving unmodified JSON payloads and local receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     * @throws IllegalStateException if required Deribit API credentials are not configured
+     */
+    public synchronized void start(String symbol, RawWebSocketListener listener, Thread externalWorker) {
         stop();
         String instrument = normalizeInstrument(symbol);
         this.activeInstrument = instrument;
@@ -134,63 +220,114 @@ public class DeribitStreamConnector {
         Log.infof("[%s] Initializing authenticated Deribit raw stream (trades.%s.raw) with clientId=%s...",
                 streamName, instrument, maskKey(clientId));
 
-        this.stream = new ReconnectingWebSocketStream(
-                vertx,
+        String authMessage = buildAuthMessage();
+        String subscribeMessage = buildSubscribeMessage(instrument);
+
+        RawWebSocketListener internalListener = new RawWebSocketListener() {
+            @Override
+            public void onMessage(String rawJson, long recvTs) {
+                handleControlFrame(streamName, instrument, subscribeMessage, rawJson);
+            }
+
+            @Override
+            public void onMessageBytes(TimestampedFrame frame) {
+                if (frame == null) {
+                    return;
+                }
+                byte[] rawBytes = frame.rawUtf8Bytes();
+                if (rawBytes == null || rawBytes.length == 0) {
+                    return;
+                }
+                // Fast-path: >99.9% of frames are subscription trade notifications (evaluated directly on byte[] without String allocation)
+                if (isTradeNotificationBytes(rawBytes)) {
+                    if (listener != null) {
+                        listener.onMessageBytes(frame);
+                    }
+                    return;
+                }
+                String rawJson = frame.rawText();
+                if (rawJson != null && !rawJson.isBlank()) {
+                    handleControlFrame(streamName, instrument, subscribeMessage, rawJson);
+                }
+            }
+        };
+
+        ReconnectingWebSocketStream newStream = new ReconnectingWebSocketStream(
+                deribitVertx,
                 streamName,
                 wsUrl,
-                () -> List.of(buildAuthMessage()),
-                (rawJson, recvTs) -> {
-                    if (rawJson == null || rawJson.isBlank()) {
-                        return;
-                    }
-                    // Handle Deribit heartbeat test request by replying immediately
-                    if (isTestRequest(rawJson)) {
-                        ReconnectingWebSocketStream current = this.stream;
-                        if (current != null) {
-                            current.sendText("{\"jsonrpc\":\"2.0\",\"id\":" + HEARTBEAT_REPLY_ID + ",\"method\":\"public/test\"}");
-                        }
-                        return;
-                    }
-                    // Handle authentication response
-                    if (isAuthResponse(rawJson)) {
-                        if (isErrorResponse(rawJson)) {
-                            Log.fatalf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
-                            triggerFatalError(rawJson);
-                        } else {
-                            Log.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
-                            ReconnectingWebSocketStream current = this.stream;
-                            if (current != null) {
-                                current.sendText(buildSubscribeMessage(instrument));
-                            }
-                        }
-                        return;
-                    }
-                    // Handle subscription response
-                    if (isSubscriptionResponse(rawJson)) {
-                        if (isErrorResponse(rawJson)) {
-                            Log.fatalf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
-                            triggerFatalError(rawJson);
-                        } else {
-                            Log.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
-                        }
-                        return;
-                    }
-                    // Handle any unexpected error response
-                    if (isErrorResponse(rawJson)) {
-                        Log.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
-                        return;
-                    }
-                    // Forward real trade notification events ({"jsonrpc":"2.0","method":"subscription",...})
-                    if (isTradeNotification(rawJson)) {
-                        if (listener != null) {
-                            listener.onMessage(rawJson, recvTs);
-                        }
-                    }
-                },
+                () -> List.of(authMessage),
+                internalListener,
                 reconnectDelayMs,
                 pingIntervalMs
         );
-        this.stream.start();
+        newStream.setDedicatedIoThreadName(DEDICATED_DERIBIT_IO_THREAD_NAME);
+        newStream.setDisconnectListener(this.disconnectListener);
+        if (externalWorker != null) {
+            newStream.bindExternalWorker(externalWorker);
+        }
+        this.stream = newStream;
+        newStream.start();
+    }
+
+    private void handleControlFrame(String streamName, String instrument, String subscribeMessage, String rawJson) {
+        // Handle Deribit heartbeat test request by replying immediately
+        if (isTestRequest(rawJson)) {
+            ReconnectingWebSocketStream current = this.stream;
+            if (current != null) {
+                current.sendText(HEARTBEAT_REPLY_JSON);
+            }
+            return;
+        }
+        // Handle authentication response
+        if (isAuthResponse(rawJson)) {
+            if (isErrorResponse(rawJson)) {
+                Log.fatalf("[%s] Deribit authentication failed: %s. Terminating application.", streamName, rawJson);
+                triggerFatalError(rawJson);
+            } else {
+                Log.infof("[%s] Deribit session authenticated successfully. Subscribing to channel trades.%s.raw...", streamName, instrument);
+                ReconnectingWebSocketStream current = this.stream;
+                if (current != null) {
+                    current.sendText(subscribeMessage);
+                }
+            }
+            return;
+        }
+        // Handle subscription response
+        if (isSubscriptionResponse(rawJson)) {
+            if (isErrorResponse(rawJson)) {
+                Log.fatalf("[%s] Deribit raw subscription rejected: %s. Terminating application.", streamName, rawJson);
+                triggerFatalError(rawJson);
+            } else {
+                Log.infof("[%s] Subscribed successfully to channel: trades.%s.raw", streamName, instrument);
+            }
+            return;
+        }
+        // Handle any unexpected error response
+        if (isErrorResponse(rawJson)) {
+            Log.errorf("[%s] Deribit returned error: %s", streamName, rawJson);
+        }
+    }
+
+    /**
+     * Drains all currently queued frames from the Deribit stream into {@code scratchBatch}.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the caller
+     * @return number of frames drained
+     */
+    public int drainStream(List<TimestampedFrame> scratchBatch) {
+        ReconnectingWebSocketStream current = this.stream;
+        return current != null ? current.drainAvailableBatch(scratchBatch) : 0;
+    }
+
+    /**
+     * Returns whether the Deribit stream currently has frames waiting in its inbound queue.
+     *
+     * @return {@code true} if the Deribit queue is non-empty
+     */
+    public boolean hasQueuedFrames() {
+        ReconnectingWebSocketStream current = this.stream;
+        return current != null && current.hasQueuedFrames();
     }
 
     /**
@@ -212,6 +349,26 @@ public class DeribitStreamConnector {
     public ConnectionState getState() {
         ReconnectingWebSocketStream current = this.stream;
         return current != null ? current.getState() : ConnectionState.DISCONNECTED;
+    }
+
+    /**
+     * Returns telemetry snapshots for the active Deribit WebSocket stream.
+     *
+     * @return list of {@link WebSocketStreamTelemetry} snapshots
+     */
+    public List<WebSocketStreamTelemetry> getStreamTelemetries() {
+        ReconnectingWebSocketStream current = this.stream;
+        return current != null ? List.of(current.getTelemetrySnapshot()) : List.of();
+    }
+
+    /**
+     * Returns the dedicated Netty I/O reader thread observed by the active Deribit stream, or {@code null}.
+     *
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        ReconnectingWebSocketStream current = this.stream;
+        return current != null ? current.getIoReaderThread() : null;
     }
 
     /**
@@ -294,8 +451,35 @@ public class DeribitStreamConnector {
                 && (rawJson.contains("\"result\"") || rawJson.contains("\"error\""));
     }
 
-    private static boolean isTradeNotification(String rawJson) {
-        return rawJson.contains("\"method\":\"subscription\"") || rawJson.contains("\"method\": \"subscription\"");
+    static boolean isTradeNotificationBytes(byte[] rawBytes) {
+        // Deribit subscription header is always within the first 96 bytes of the JSON-RPC envelope
+        int maxSearchLen = Math.min(rawBytes.length, 96);
+        return containsAsciiPattern(rawBytes, maxSearchLen, SUBSCRIPTION_PATTERN_COMPACT)
+                || containsAsciiPattern(rawBytes, maxSearchLen, SUBSCRIPTION_PATTERN_SPACED);
+    }
+
+    private static boolean containsAsciiPattern(byte[] haystack, int searchLimit, byte[] needle) {
+        int nLen = needle.length;
+        int lastStart = searchLimit - nLen;
+        if (lastStart < 0) {
+            return false;
+        }
+        byte first = needle[0];
+        for (int i = 0; i <= lastStart; i++) {
+            if (haystack[i] == first) {
+                boolean match = true;
+                for (int j = 1; j < nLen; j++) {
+                    if (haystack[i + j] != needle[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isErrorResponse(String rawJson) {

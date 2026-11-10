@@ -349,59 +349,105 @@ public class PolymarketPolyBoltClient {
         }
         String initialMessage = buildAuthMessage();
 
+        RawWebSocketListener internalListener = new RawWebSocketListener() {
+            @Override
+            public void onMessage(String rawJson, long recvTs) {
+                if (rawJson == null || rawJson.isBlank()) {
+                    return;
+                }
+                if (!rawJson.contains("\"op\"")) {
+                    if (listener != null) {
+                        listener.onMessage(rawJson, recvTs);
+                    }
+                    return;
+                }
+                handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, recvTs);
+            }
+
+            @Override
+            public void onMessageBytes(TimestampedFrame frame) {
+                if (frame == null) {
+                    return;
+                }
+                byte[] rawBytes = frame.rawUtf8Bytes();
+                if (rawBytes == null || rawBytes.length == 0) {
+                    return;
+                }
+                if (!containsOpFieldBytes(rawBytes)) {
+                    if (listener != null) {
+                        listener.onMessageBytes(frame);
+                    }
+                    return;
+                }
+                String rawJson = frame.rawText();
+                if (rawJson != null && !rawJson.isBlank()) {
+                    handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, frame.recvTs());
+                }
+            }
+        };
+
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
                 polyBoltVertx,
                 streamName,
                 wsUrl,
                 () -> List.of(initialMessage),
-                (rawJson, recvTs) -> {
-                    if (rawJson == null || rawJson.isBlank()) {
-                        return;
-                    }
-                    if (!rawJson.contains("\"op\"")) {
-                        if (listener != null) {
-                            listener.onMessage(rawJson, recvTs);
-                        }
-                        return;
-                    }
-                    if (isAuthedConfirmation(rawJson)) {
-                        Log.infof("[%s] PolyBolt session authenticated successfully; subscribing to channel", streamName);
-                        ReconnectingWebSocketStream current = streamRef.get();
-                        if (current != null) {
-                            current.sendText(subscribeMsg);
-                        }
-                        return;
-                    }
-                    if (isSubscribedConfirmation(rawJson)) {
-                        Log.infof("[%s] PolyBolt channel subscription confirmed: %s", streamName, rawJson);
-                        return;
-                    }
-                    if (isPongConfirmation(rawJson)) {
-                        if (Log.isTraceEnabled()) {
-                            Log.tracef("[%s] PolyBolt pong received: %s", streamName, rawJson);
-                        }
-                        return;
-                    }
-                    if (isErrorFrame(rawJson)) {
-                        Log.errorf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
-                        if (isAuthRequiredError(rawJson)) {
-                            ReconnectingWebSocketStream current = streamRef.get();
-                            if (current != null) {
-                                current.sendText(buildAuthMessage());
-                            }
-                        }
-                        return;
-                    }
-                    if (listener != null) {
-                        listener.onMessage(rawJson, recvTs);
-                    }
-                },
+                internalListener,
                 reconnectDelayMs,
                 pingIntervalMs,
                 "{\"op\":\"ping\"}"
         );
         stream.setDedicatedIoThreadName(DEDICATED_POLYBOLT_IO_THREAD_NAME);
         return stream;
+    }
+
+    private void handleControlFrame(
+            String streamName,
+            String subscribeMsg,
+            Supplier<ReconnectingWebSocketStream> streamRef,
+            RawWebSocketListener listener,
+            String rawJson,
+            long recvTs) {
+        if (isAuthedConfirmation(rawJson)) {
+            Log.infof("[%s] PolyBolt session authenticated successfully; subscribing to channel", streamName);
+            ReconnectingWebSocketStream current = streamRef.get();
+            if (current != null) {
+                current.sendText(subscribeMsg);
+            }
+            return;
+        }
+        if (isSubscribedConfirmation(rawJson)) {
+            Log.infof("[%s] PolyBolt channel subscription confirmed: %s", streamName, rawJson);
+            return;
+        }
+        if (isPongConfirmation(rawJson)) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] PolyBolt pong received: %s", streamName, rawJson);
+            }
+            return;
+        }
+        if (isErrorFrame(rawJson)) {
+            Log.errorf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
+            if (isAuthRequiredError(rawJson)) {
+                ReconnectingWebSocketStream current = streamRef.get();
+                if (current != null) {
+                    current.sendText(buildAuthMessage());
+                }
+            }
+            return;
+        }
+        if (listener != null) {
+            listener.onMessage(rawJson, recvTs);
+        }
+    }
+
+    static boolean containsOpFieldBytes(byte[] rawBytes) {
+        int limit = Math.min(rawBytes.length, 64) - 4;
+        for (int i = 0; i <= limit; i++) {
+            if (rawBytes[i] == '"' && rawBytes[i + 1] == 'o' && rawBytes[i + 2] == 'p' && rawBytes[i + 3] == '"') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String buildAuthMessage() {

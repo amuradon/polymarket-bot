@@ -565,4 +565,53 @@ class ReconnectingWebSocketStreamTest {
 
         stream.stop();
     }
+
+    @Test
+    void shouldDeliverTimestampedFrameDirectlyViaOnMessageBytesWithoutDecodingString() throws Exception {
+        List<byte[]> receivedBytes = new CopyOnWriteArrayList<>();
+        List<Long> receivedTimestamps = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> ws.writeTextMessage("{\"raw_bytes\":true}")));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/raw-bytes-listener-test";
+
+        RawWebSocketListener rawBytesListener = new RawWebSocketListener() {
+            @Override
+            public void onMessage(String rawJson, long recvTimestampMs) {
+                throw new AssertionError("onMessage(String) must not be invoked when onMessageBytes is overridden");
+            }
+
+            @Override
+            public void onMessageBytes(TimestampedFrame frame) {
+                assertThat(frame.isTextDecoded()).isFalse();
+                receivedBytes.add(frame.rawUtf8Bytes());
+                receivedTimestamps.add(frame.recvTs());
+            }
+        };
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "RAW-BYTES-LISTENER-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                rawBytesListener,
+                1000L,
+                0L
+        );
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(receivedBytes).hasSize(1);
+                    assertThat(new String(receivedBytes.getFirst(), java.nio.charset.StandardCharsets.UTF_8))
+                            .isEqualTo("{\"raw_bytes\":true}");
+                    assertThat(receivedTimestamps.getFirst()).isPositive();
+                });
+
+        stream.stop();
+    }
 }

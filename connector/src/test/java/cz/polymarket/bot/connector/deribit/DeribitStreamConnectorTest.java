@@ -130,10 +130,66 @@ class DeribitStreamConnectorTest {
                     assertThat(receivedPayloads.get(0)).contains("\"channel\":\"trades.BTC-PERPETUAL.raw\"");
                     assertThat(receivedPayloads.get(0)).contains("82100.0");
                     assertThat(receivedTimestamps.get(0)).isPositive();
+                    assertThat(connector.getIoReaderThread()).isNotNull();
+                    assertThat(connector.getIoReaderThread().getName())
+                            .isEqualTo(DeribitStreamConnector.DEDICATED_DERIBIT_IO_THREAD_NAME);
+                    assertThat(connector.getIoReaderThread().getPriority()).isEqualTo(Thread.MAX_PRIORITY);
+                    assertThat(connector.getStreamTelemetries()).hasSize(1);
                 });
 
-        connector.stop();
+        connector.destroy();
         assertThat(connector.isConnected()).isFalse();
+    }
+
+    @Test
+    void shouldFastPathDeliverRawByteTradeNotificationsWithoutDecodingString() throws Exception {
+        List<byte[]> receivedBytePayloads = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    if (msg.contains("public/auth")) {
+                        ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"access_token\":\"jwt\",\"expires_in\":3600}}");
+                    } else if (msg.contains("public/subscribe")) {
+                        ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[\"trades.BTC-PERPETUAL.raw\"]}");
+                        ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.raw\",\"data\":[{\"price\":83500.0}]}}");
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        DeribitStreamConnector connector = new DeribitStreamConnector(
+                vertx,
+                "ws://localhost:" + port + "/ws/api/v2",
+                "test-key",
+                "test-secret",
+                200L,
+                0L
+        );
+
+        cz.polymarket.bot.connector.ws.RawWebSocketListener rawBytesListener =
+                new cz.polymarket.bot.connector.ws.RawWebSocketListener() {
+                    @Override
+                    public void onMessage(String rawJson, long recvTimestampMs) {
+                        throw new AssertionError("onMessage(String) must not be called when onMessageBytes is overridden");
+                    }
+
+                    @Override
+                    public void onMessageBytes(cz.polymarket.bot.connector.ws.TimestampedFrame frame) {
+                        assertThat(frame.isTextDecoded()).isFalse();
+                        receivedBytePayloads.add(frame.rawUtf8Bytes());
+                    }
+                };
+
+        connector.start("BTC-PERPETUAL", rawBytesListener);
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(receivedBytePayloads).hasSize(1);
+                    String text = new String(receivedBytePayloads.getFirst(), java.nio.charset.StandardCharsets.UTF_8);
+                    assertThat(text).contains("83500.0");
+                });
+
+        connector.destroy();
     }
 
     @Test

@@ -1,10 +1,10 @@
 package cz.polymarket.bot.data.storage;
 
 import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -16,13 +16,12 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for Deribit Futures trade streams,
- * automatically rotating files at UTC midnight.
+ * automatically rotating files at UTC midnight and supporting zero-decode {@code byte[]} writing.
  * File path format: {@code deribit/futures/{instrument}/trades/{instrument}-trades-{YYYY-MM-DD}.jsonl.zst}.
  */
 @ApplicationScoped
 public class DailyDeribitStorageManager {
 
-    private static final Logger LOG = Logger.getLogger(DailyDeribitStorageManager.class);
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final Path baseDataDir;
@@ -56,13 +55,37 @@ public class DailyDeribitStorageManager {
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
     public synchronized void record(String rawJson, long recvTimestampMs) {
+        if (rawJson == null || rawJson.isBlank()) {
+            return;
+        }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
         try {
             ZstdJsonlWriter writer = getOrRotateWriter(utcDate);
             writer.writeDeribitEvent(recvTimestampMs, rawJson);
             totalRecordsWritten.incrementAndGet();
         } catch (IOException e) {
-            LOG.errorf(e, "Failed to write Deribit trade event to daily Zstd file");
+            Log.errorf(e, "Failed to write Deribit trade event to daily Zstd file");
+        }
+    }
+
+    /**
+     * Records a raw UTF-8 {@code byte[]} Deribit Futures trade payload directly into the UTC daily
+     * {@code .jsonl.zst} file without allocating a {@link String}.
+     *
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void recordBytes(byte[] rawPayloadBytes, long recvTimestampMs) {
+        if (rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
+        try {
+            ZstdJsonlWriter writer = getOrRotateWriter(utcDate);
+            writer.writeDeribitEvent(recvTimestampMs, rawPayloadBytes);
+            totalRecordsWritten.incrementAndGet();
+        } catch (IOException e) {
+            Log.errorf(e, "Failed to write Deribit byte trade event to daily Zstd file");
         }
     }
 
@@ -74,7 +97,7 @@ public class DailyDeribitStorageManager {
             try {
                 activeWriter.flush();
             } catch (IOException e) {
-                LOG.warnf("Failed to flush Deribit writer: %s", e.getMessage());
+                Log.warnf("Failed to flush Deribit writer: %s", e.getMessage());
             }
         }
     }
@@ -87,7 +110,7 @@ public class DailyDeribitStorageManager {
             try {
                 activeWriter.close();
             } catch (IOException e) {
-                LOG.warnf("Failed to close Deribit writer: %s", e.getMessage());
+                Log.warnf("Failed to close Deribit writer: %s", e.getMessage());
             }
             activeWriter = null;
             activeDate = null;
@@ -137,13 +160,13 @@ public class DailyDeribitStorageManager {
             try {
                 activeWriter.close();
             } catch (IOException e) {
-                LOG.warnf("Error closing previous day writer for Deribit: %s", e.getMessage());
+                Log.warnf("Error closing previous day writer for Deribit: %s", e.getMessage());
             }
         }
         Path targetPath = resolveDailyFilePath(utcDate);
         activeWriter = new ZstdJsonlWriter(targetPath);
         activeDate = utcDate;
-        LOG.infof("Opened Deribit Futures daily stream file: %s", targetPath);
+        Log.infof("Opened Deribit Futures daily stream file: %s", targetPath);
         return activeWriter;
     }
 }

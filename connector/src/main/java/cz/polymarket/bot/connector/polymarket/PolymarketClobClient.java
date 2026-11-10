@@ -162,16 +162,27 @@ public class PolymarketClobClient {
             return;
         }
         String subPayload = buildSubscriptionPayload(tokenIds);
+        RawWebSocketListener delegatingListener = new RawWebSocketListener() {
+            @Override
+            public void onMessage(String rawJson, long recvTs) {
+                if (listener != null && rawJson != null && !rawJson.isBlank()) {
+                    listener.onMessage(rawJson, recvTs);
+                }
+            }
+
+            @Override
+            public void onMessageBytes(TimestampedFrame frame) {
+                if (listener != null && frame != null) {
+                    listener.onMessageBytes(frame);
+                }
+            }
+        };
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
                 clobMarketVertx,
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
-                (rawJson, recvTs) -> {
-                    if (listener != null && rawJson != null && !rawJson.isBlank()) {
-                        listener.onMessage(rawJson, recvTs);
-                    }
-                },
+                delegatingListener,
                 reconnectDelayMs,
                 pingIntervalMs,
                 "PING"

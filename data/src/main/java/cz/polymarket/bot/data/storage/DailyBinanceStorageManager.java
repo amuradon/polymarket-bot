@@ -2,10 +2,10 @@ package cz.polymarket.bot.data.storage;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -15,21 +15,22 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for each of the 5 Binance streams,
- * automatically rotating files at UTC midnight.
+ * automatically rotating files at UTC midnight with per-stream lock isolation and zero-decode {@code byte[]} writing.
  */
 @ApplicationScoped
 public class DailyBinanceStorageManager {
 
-    private static final Logger LOG = Logger.getLogger(DailyBinanceStorageManager.class);
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final Path baseDataDir;
     private final String symbol;
-    private final Map<BinanceStreamType, ActiveDailyWriter> activeWriters = new EnumMap<>(BinanceStreamType.class);
+    private final Map<BinanceStreamType, Object> streamLocks = new EnumMap<>(BinanceStreamType.class);
+    private final Map<BinanceStreamType, ActiveDailyWriter> activeWriters = new ConcurrentHashMap<>();
     private final AtomicLong totalRecordsWritten = new AtomicLong(0L);
 
     private record ActiveDailyWriter(LocalDate utcDate, ZstdJsonlWriter writer) {
@@ -49,6 +50,9 @@ public class DailyBinanceStorageManager {
             String symbol) {
         this.baseDataDir = Path.of(dataDirStr);
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
+        for (BinanceStreamType type : BinanceStreamType.values()) {
+            this.streamLocks.put(type, new Object());
+        }
     }
 
     /**
@@ -59,26 +63,60 @@ public class DailyBinanceStorageManager {
      * @param rawJson         unmodified raw WebSocket JSON payload
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
-    public synchronized void record(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+    public void record(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+        if (streamType == null || rawJson == null || rawJson.isBlank()) {
+            return;
+        }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
-        try {
-            ZstdJsonlWriter writer = getOrRotateWriter(streamType, utcDate);
-            writer.writeBinanceEvent(recvTimestampMs, rawJson);
-            totalRecordsWritten.incrementAndGet();
-        } catch (IOException e) {
-            LOG.errorf(e, "Failed to write Binance %s event to daily Zstd file", streamType);
+        synchronized (streamLocks.get(streamType)) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateWriter(streamType, utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write Binance %s event to daily Zstd file", streamType);
+            }
+        }
+    }
+
+    /**
+     * Records a raw UTF-8 {@code byte[]} Binance stream payload directly into the stream's corresponding
+     * UTC daily {@code .jsonl.zst} file without allocating a {@link String}.
+     *
+     * @param streamType      Binance stream type
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public void recordBytes(BinanceStreamType streamType, byte[] rawPayloadBytes, long recvTimestampMs) {
+        if (streamType == null || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
+        synchronized (streamLocks.get(streamType)) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateWriter(streamType, utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write Binance %s byte event to daily Zstd file", streamType);
+            }
         }
     }
 
     /**
      * Flushes all currently open daily Binance stream writers to disk.
      */
-    public synchronized void flushAll() {
-        for (Map.Entry<BinanceStreamType, ActiveDailyWriter> entry : activeWriters.entrySet()) {
-            try {
-                entry.getValue().writer().flush();
-            } catch (IOException e) {
-                LOG.warnf("Failed to flush Binance %s writer: %s", entry.getKey(), e.getMessage());
+    public void flushAll() {
+        for (BinanceStreamType type : BinanceStreamType.values()) {
+            synchronized (streamLocks.get(type)) {
+                ActiveDailyWriter active = activeWriters.get(type);
+                if (active != null) {
+                    try {
+                        active.writer().flush();
+                    } catch (IOException e) {
+                        Log.warnf("Failed to flush Binance %s writer: %s", type, e.getMessage());
+                    }
+                }
             }
         }
     }
@@ -86,15 +124,19 @@ public class DailyBinanceStorageManager {
     /**
      * Closes all open daily Binance stream writers cleanly.
      */
-    public synchronized void closeAll() {
-        for (Map.Entry<BinanceStreamType, ActiveDailyWriter> entry : activeWriters.entrySet()) {
-            try {
-                entry.getValue().writer().close();
-            } catch (IOException e) {
-                LOG.warnf("Failed to close Binance %s writer: %s", entry.getKey(), e.getMessage());
+    public void closeAll() {
+        for (BinanceStreamType type : BinanceStreamType.values()) {
+            synchronized (streamLocks.get(type)) {
+                ActiveDailyWriter active = activeWriters.remove(type);
+                if (active != null) {
+                    try {
+                        active.writer().close();
+                    } catch (IOException e) {
+                        Log.warnf("Failed to close Binance %s writer: %s", type, e.getMessage());
+                    }
+                }
             }
         }
-        activeWriters.clear();
     }
 
     /**
@@ -133,13 +175,13 @@ public class DailyBinanceStorageManager {
             try {
                 current.writer().close();
             } catch (IOException e) {
-                LOG.warnf("Error closing previous day writer for %s: %s", streamType, e.getMessage());
+                Log.warnf("Error closing previous day writer for %s: %s", streamType, e.getMessage());
             }
         }
         Path targetPath = resolveDailyFilePath(streamType, utcDate);
         ZstdJsonlWriter newWriter = new ZstdJsonlWriter(targetPath);
         activeWriters.put(streamType, new ActiveDailyWriter(utcDate, newWriter));
-        LOG.infof("Opened Binance %s daily stream file: %s", streamType, targetPath);
+        Log.infof("Opened Binance %s daily stream file: %s", streamType, targetPath);
         return newWriter;
     }
 }

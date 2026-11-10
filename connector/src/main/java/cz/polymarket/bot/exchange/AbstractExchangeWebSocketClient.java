@@ -1,48 +1,39 @@
 package cz.polymarket.bot.exchange;
 
+import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.domain.Exchange;
-import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpClient;
-import io.vertx.core.http.HttpClientOptions;
-import io.vertx.core.http.WebSocket;
-import io.vertx.core.http.WebSocketConnectOptions;
 
 import java.math.BigDecimal;
-import java.net.URI;
+import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Base non-blocking Vert.x WebSocket client for exchange ticker feeds with automatic reconnection.
+ * Base non-blocking Vert.x WebSocket client for exchange ticker feeds with automatic reconnection,
+ * native BoringSSL ({@code netty-tcnative}), {@code TCP_NODELAY}, and lock-free JCTools queue handoff
+ * backed by {@link ReconnectingWebSocketStream}.
  */
 public abstract class AbstractExchangeWebSocketClient {
 
     private static final long RECONNECT_DELAY_MS = 3000L;
+    private static final long PING_INTERVAL_MS = 15000L;
 
-    private final Vertx vertx;
     private final ExchangePriceListener tracker;
     private final Exchange exchange;
-    private final String wsUrl;
-    private final String subscribePayload;
-    private final HttpClient httpClient;
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private volatile WebSocket currentWebSocket;
+    private final ReconnectingWebSocketStream stream;
 
     /**
      * Default no-arg constructor required for CDI proxies.
      */
     protected AbstractExchangeWebSocketClient() {
-        this.vertx = null;
         this.tracker = null;
         this.exchange = null;
-        this.wsUrl = null;
-        this.subscribePayload = null;
-        this.httpClient = null;
+        this.stream = null;
     }
 
     /**
-     * Constructs an exchange WebSocket client.
+     * Constructs an exchange WebSocket client backed by {@link ReconnectingWebSocketStream}.
      *
      * @param vertx            Vert.x instance for non-blocking network I/O
      * @param tracker          price listener notified on incoming ticker prices
@@ -56,17 +47,25 @@ public abstract class AbstractExchangeWebSocketClient {
             Exchange exchange,
             String wsUrl,
             String subscribePayload) {
-        this.vertx = vertx;
         this.tracker = tracker;
         this.exchange = exchange;
-        this.wsUrl = wsUrl;
-        this.subscribePayload = subscribePayload;
 
         if (wsUrl != null && vertx != null) {
-            HttpClientOptions options = new HttpClientOptions().setSsl(wsUrl.toLowerCase().startsWith("wss"));
-            this.httpClient = vertx.createHttpClient(options);
+            List<String> initialSubs = (subscribePayload != null && !subscribePayload.isBlank())
+                    ? List.of(subscribePayload)
+                    : List.of();
+            String streamName = "EXCHANGE-" + (exchange != null ? exchange.name() : "UNKNOWN");
+            this.stream = new ReconnectingWebSocketStream(
+                    vertx,
+                    streamName,
+                    wsUrl,
+                    () -> initialSubs,
+                    (rawJson, recvTs) -> handleMessage(rawJson),
+                    RECONNECT_DELAY_MS,
+                    PING_INTERVAL_MS
+            );
         } else {
-            this.httpClient = null;
+            this.stream = null;
         }
     }
 
@@ -74,8 +73,8 @@ public abstract class AbstractExchangeWebSocketClient {
      * Starts the WebSocket connection loop if not already running.
      */
     public void start() {
-        if (running.compareAndSet(false, true)) {
-            connect();
+        if (stream != null) {
+            stream.start();
         }
     }
 
@@ -83,73 +82,18 @@ public abstract class AbstractExchangeWebSocketClient {
      * Stops the WebSocket client and closes any active connection.
      */
     public void stop() {
-        running.set(false);
-        if (currentWebSocket != null) {
-            try {
-                currentWebSocket.close();
-            } catch (Exception ignored) {
-            }
-        }
-        if (httpClient != null) {
-            httpClient.close();
+        if (stream != null) {
+            stream.stop();
         }
     }
 
-    private void connect() {
-        if (!running.get()) {
-            return;
-        }
-
-        try {
-            URI uri = URI.create(wsUrl);
-            boolean isSsl = "wss".equalsIgnoreCase(uri.getScheme());
-            int port = uri.getPort() == -1 ? (isSsl ? 443 : 80) : uri.getPort();
-            String path = uri.getRawPath() == null || uri.getRawPath().isEmpty() ? "/" : uri.getRawPath();
-            if (uri.getRawQuery() != null) {
-                path += "?" + uri.getRawQuery();
-            }
-
-            WebSocketConnectOptions options = new WebSocketConnectOptions()
-                    .setHost(uri.getHost())
-                    .setPort(port)
-                    .setSsl(isSsl)
-                    .setURI(path);
-
-            httpClient.webSocket(options)
-                    .onSuccess(ws -> {
-                        Log.infof("[%s] WebSocket connected to %s", exchange, wsUrl);
-                        this.currentWebSocket = ws;
-
-                        if (subscribePayload != null && !subscribePayload.isBlank()) {
-                            ws.writeTextMessage(subscribePayload);
-                        }
-
-                        ws.textMessageHandler(this::handleMessage);
-                        ws.closeHandler(v -> onConnectionClosed());
-                        ws.exceptionHandler(err -> {
-                            Log.errorf("[%s] WebSocket error: %s", exchange, err.getMessage());
-                            onConnectionClosed();
-                        });
-                    })
-                    .onFailure(err -> {
-                        Log.errorf("[%s] WebSocket connection failed: %s", exchange, err.getMessage());
-                        scheduleReconnect();
-                    });
-        } catch (Exception e) {
-            Log.errorf("[%s] Error initiating WebSocket connection: %s", exchange, e.getMessage());
-            scheduleReconnect();
-        }
-    }
-
-    private void onConnectionClosed() {
-        this.currentWebSocket = null;
-        scheduleReconnect();
-    }
-
-    private void scheduleReconnect() {
-        if (running.get() && vertx != null) {
-            vertx.setTimer(RECONNECT_DELAY_MS, timerId -> connect());
-        }
+    /**
+     * Returns the current connection state of the underlying WebSocket stream.
+     *
+     * @return current {@link ConnectionState}
+     */
+    public ConnectionState getState() {
+        return stream != null ? stream.getState() : ConnectionState.DISCONNECTED;
     }
 
     /**
