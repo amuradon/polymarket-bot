@@ -34,9 +34,28 @@ Parameters:
     Default: polymarket-sniper/telegram-credentials
     Description: AWS Secrets Manager secret ID storing Telegram Bot credentials.
 
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: Retention period in days for the Telegram Alert Lambda CloudWatch Logs log group.
+
 Resources:
+  TelegramAlertLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Explicit CloudWatch Logs log group for the Telegram Alert Lambda function so execution logs expire after 7 days instead of accumulating indefinitely.
+        must: Enforce a 7-day default retention period and retain across stack updates.
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-function"
+      RetentionInDays: !Ref LogRetentionDays
+
   TelegramAlertFunction:
     Type: AWS::Lambda::Function
+    DependsOn: TelegramAlertLogGroup
     Metadata:
       com.aws.cloudformation.Context:
         why: Decodes CloudWatch Logs error, warning, fatal, and exception events and dispatches formatted alerts to Telegram.
@@ -54,6 +73,8 @@ Resources:
       MemorySize: 512
       Role:
         Fn::ImportValue: !Sub "${AlertBaseStackName}-TelegramAlertRoleArn"
+      LoggingConfig:
+        LogGroup: !Ref TelegramAlertLogGroup
       Environment:
         Variables:
           TELEGRAM_SECRET_ID: !Ref TelegramSecretId
