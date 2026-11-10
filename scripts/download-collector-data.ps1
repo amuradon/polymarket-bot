@@ -50,7 +50,7 @@ param(
     [string]$DestinationDir = "D:\Crypto\data\Polymarket\collector",
 
     [Parameter()]
-    [string]$Ec2Host = "i-058e25a0b3334934d",
+    [string]$Ec2Host = "i-0e826b5eb507d87be",
 
     [Parameter()]
     [string]$RemoteBaseDir = "/mnt/ebs/polymarket-data/collector",
