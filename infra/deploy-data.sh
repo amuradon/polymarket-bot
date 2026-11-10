@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Packages the Quarkus Data Collector fast-jar archive, uploads it to Amazon S3,
-# and deploys it as a Bare-OS systemd service on AWS EC2 in eu-west-1 (with
-# automated ~6-8s EBS hot-swap support when migrating instances).
+# and deploys it as a Bare-OS systemd service on AWS EC2 in eu-west-1.
 #
 # Resolves the release version {x.y.z} from:
 #   ./data/target/quarkus-app/app/data-{x.y.z}.jar
@@ -68,59 +67,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-run_ssm_commands() {
-    local target_instance="$1"
-    local comment="$2"
-    shift 2
-    local temp_params
-    temp_params=$(mktemp)
-
-    python3 - "$temp_params" "$@" << 'PYEOF'
-import json, sys
-out_path = sys.argv[1]
-cmds = sys.argv[2:]
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump({"commands": cmds}, f)
-PYEOF
-
-    local cmd_id
-    cmd_id=$(aws ssm send-command \
-        --instance-ids "${target_instance}" \
-        --document-name "AWS-RunShellScript" \
-        --comment "${comment}" \
-        --parameters "file://${temp_params}" \
-        --region "${REGION}" \
-        --query "Command.CommandId" \
-        --output text)
-    rm -f "${temp_params}"
-
-    aws ssm wait command-executed \
-        --command-id "${cmd_id}" \
-        --instance-id "${target_instance}" \
-        --region "${REGION}" || true
-
-    SSM_LAST_STATUS=$(aws ssm get-command-invocation \
-        --command-id "${cmd_id}" \
-        --instance-id "${target_instance}" \
-        --region "${REGION}" \
-        --query "Status" \
-        --output text)
-
-    SSM_LAST_STDOUT=$(aws ssm get-command-invocation \
-        --command-id "${cmd_id}" \
-        --instance-id "${target_instance}" \
-        --region "${REGION}" \
-        --query "StandardOutputContent" \
-        --output text)
-
-    SSM_LAST_STDERR=$(aws ssm get-command-invocation \
-        --command-id "${cmd_id}" \
-        --instance-id "${target_instance}" \
-        --region "${REGION}" \
-        --query "StandardErrorContent" \
-        --output text)
-}
-
 echo "=========================================================="
 echo " Polymarket Bot: Package & Deploy Data Collector (Bare-OS)"
 echo " Region: ${REGION} | Base: ${BASE_STACK_NAME} | EC2: ${EC2_STACK_NAME}"
@@ -156,9 +102,9 @@ fi
 RELEASE_VERSION="${BASH_REMATCH[1]}"
 echo "      Detected artifact: ${JAR_NAME} (Version: ${RELEASE_VERSION})"
 
-# 2. Resolve S3 Artifact Bucket Name and EBS Volume ID
-echo "[2/4] Resolving S3 Artifact Bucket and EBS Volume ID from stack '${BASE_STACK_NAME}'..."
+# 2. Resolve S3 Artifact Bucket Name
 if [ -z "$ARTIFACT_BUCKET" ]; then
+    echo "[2/4] Resolving S3 Artifact Bucket name from stack '${BASE_STACK_NAME}'..."
     ARTIFACT_BUCKET=$(aws cloudformation describe-stacks \
         --stack-name "${BASE_STACK_NAME}" \
         --region "${REGION}" \
@@ -170,17 +116,7 @@ if [ -z "$ARTIFACT_BUCKET" ]; then
         ARTIFACT_BUCKET="${BASE_STACK_NAME}-artifacts-${ACCOUNT_ID}-${REGION}"
     fi
 fi
-
-EBS_VOLUME_ID=$(aws cloudformation describe-stacks \
-    --stack-name "${BASE_STACK_NAME}" \
-    --region "${REGION}" \
-    --query "Stacks[0].Outputs[?OutputKey=='EbsVolumeId'].OutputValue" \
-    --output text 2>/dev/null || true)
-
 echo "      S3 Artifact Bucket: ${ARTIFACT_BUCKET}"
-if [ -n "$EBS_VOLUME_ID" ] && [ "$EBS_VOLUME_ID" != "None" ]; then
-    echo "      Persistent EBS Volume ID: ${EBS_VOLUME_ID}"
-fi
 
 # 3. Package ./data/target/quarkus-app into data-{x.y.z}.tar.gz and upload to S3
 echo "[3/4] Packaging quarkus-app and uploading to S3..."
@@ -210,95 +146,63 @@ fi
 
 echo "      Target EC2 Instance ID: ${INSTANCE_ID}"
 
-ATTACHED_INSTANCE_ID=""
-if [ -n "$EBS_VOLUME_ID" ] && [ "$EBS_VOLUME_ID" != "None" ]; then
-    ATTACHED_INSTANCE_ID=$(aws ec2 describe-volumes \
-        --region "${REGION}" \
-        --volume-ids "${EBS_VOLUME_ID}" \
-        --query "Volumes[0].Attachments[0].InstanceId" \
-        --output text 2>/dev/null || true)
-fi
+TEMP_PARAMS=$(mktemp)
+cat << EOF > "${TEMP_PARAMS}"
+{
+  "commands": [
+    "set -euxo pipefail",
+    "export AWS_REGION=${REGION}",
+    "sudo /usr/local/bin/deploy-polymarket-data.sh \"${S3_ARTIFACT_URI}\"",
+    "sleep 3",
+    "sudo systemctl status polymarket-data --no-pager"
+  ]
+}
+EOF
 
-if [ -n "$ATTACHED_INSTANCE_ID" ] && [ "$ATTACHED_INSTANCE_ID" != "None" ] && [ "$ATTACHED_INSTANCE_ID" != "$INSTANCE_ID" ]; then
-    echo "      Detected EBS Volume ${EBS_VOLUME_ID} currently attached to previous instance ${ATTACHED_INSTANCE_ID}."
-    echo "      [4a] Pre-staging release ${RELEASE_VERSION} on new instance ${INSTANCE_ID} (zero downtime on ${ATTACHED_INSTANCE_ID})..."
+SSM_COMMAND_ID=$(aws ssm send-command \
+    --instance-ids "${INSTANCE_ID}" \
+    --document-name "AWS-RunShellScript" \
+    --comment "Deploy Polymarket Data Collector ${RELEASE_VERSION} (Bare-OS systemd)" \
+    --parameters "file://${TEMP_PARAMS}" \
+    --region "${REGION}" \
+    --query "Command.CommandId" \
+    --output text)
+rm -f "${TEMP_PARAMS}"
 
-    run_ssm_commands "${INSTANCE_ID}" "Pre-stage Data Collector ${RELEASE_VERSION}" \
-        "set -euxo pipefail" \
-        "export AWS_REGION=${REGION}" \
-        "sudo /usr/local/bin/deploy-polymarket-data.sh \"${S3_ARTIFACT_URI}\" --stage-only"
+echo "      Dispatched SSM Command ID: ${SSM_COMMAND_ID}. Waiting for execution..."
 
-    if [ "$SSM_LAST_STATUS" != "Success" ]; then
-        echo "ERROR: Failed to pre-stage release on ${INSTANCE_ID}: ${SSM_LAST_STDERR}" >&2
-        exit 1
-    fi
+aws ssm wait command-executed \
+    --command-id "${SSM_COMMAND_ID}" \
+    --instance-id "${INSTANCE_ID}" \
+    --region "${REGION}" || true
 
-    echo "      [4b] Triggering online EBS Snapshot backup of ${EBS_VOLUME_ID}..."
-    SNAPSHOT_ID=$(aws ec2 create-snapshot \
-        --region "${REGION}" \
-        --volume-id "${EBS_VOLUME_ID}" \
-        --description "Pre-migration backup of ${EBS_VOLUME_ID} before hot-swap to ${INSTANCE_ID} (v${RELEASE_VERSION})" \
-        --query "SnapshotId" \
-        --output text)
-    echo "           Created online backup Snapshot: ${SNAPSHOT_ID}"
+OUTPUT=$(aws ssm get-command-invocation \
+    --command-id "${SSM_COMMAND_ID}" \
+    --instance-id "${INSTANCE_ID}" \
+    --region "${REGION}" \
+    --query "StandardOutputContent" \
+    --output text)
 
-    echo "      [4c] Executing fast EBS Hot-Swap from ${ATTACHED_INSTANCE_ID} to ${INSTANCE_ID}..."
-    SWAP_START=$(date +%s)
+STATUS=$(aws ssm get-command-invocation \
+    --command-id "${SSM_COMMAND_ID}" \
+    --instance-id "${INSTANCE_ID}" \
+    --region "${REGION}" \
+    --query "Status" \
+    --output text)
 
-    run_ssm_commands "${ATTACHED_INSTANCE_ID}" "Stop collector and unmount EBS for hot-swap" \
-        "set -euxo pipefail" \
-        "if command -v docker >/dev/null 2>&1; then sudo docker stop -t 5 polymarket-bot-data 2>/dev/null || true; sudo docker rm -f polymarket-bot-data 2>/dev/null || true; fi" \
-        "sudo systemctl stop polymarket-data 2>/dev/null || true" \
-        "sync" \
-        "sudo umount /mnt/ebs/polymarket-data 2>/dev/null || sudo umount -l /mnt/ebs/polymarket-data 2>/dev/null || true"
+echo "---------------- SSM Execution Output ----------------"
+echo "$OUTPUT"
+echo "------------------------------------------------------"
 
-    aws ec2 detach-volume --region "${REGION}" --volume-id "${EBS_VOLUME_ID}" --instance-id "${ATTACHED_INSTANCE_ID}" >/dev/null
-    for _ in $(seq 1 60); do
-        VOL_STATE=$(aws ec2 describe-volumes --region "${REGION}" --volume-ids "${EBS_VOLUME_ID}" --query "Volumes[0].State" --output text)
-        if [ "$VOL_STATE" = "available" ]; then
-            break
-        fi
-        sleep 0.5
-    done
-
-    run_ssm_commands "${INSTANCE_ID}" "Activate staged Data Collector ${RELEASE_VERSION} and mount EBS" \
-        "set -euxo pipefail" \
-        "export AWS_REGION=${REGION}" \
-        "sudo /usr/local/bin/deploy-polymarket-data.sh \"${S3_ARTIFACT_URI}\" --activate-staged" \
-        "sleep 2" \
-        "sudo systemctl status polymarket-data --no-pager"
-
-    SWAP_END=$(date +%s)
-    SWAP_ELAPSED=$(( SWAP_END - SWAP_START ))
-
-    echo "---------------- SSM Execution Output ----------------"
-    echo "$SSM_LAST_STDOUT"
-    echo "------------------------------------------------------"
-
-    if [ "$SSM_LAST_STATUS" = "Success" ]; then
-        echo "SUCCESS: EBS Hot-Swap completed in ${SWAP_ELAPSED}s! Data Collector ${RELEASE_VERSION} is running on ${INSTANCE_ID}."
-    else
-        echo "ERROR: Activation failed with status '${SSM_LAST_STATUS}': ${SSM_LAST_STDERR}" >&2
-        exit 1
-    fi
+if [ "$STATUS" = "Success" ]; then
+    echo "SUCCESS: Data Collector application ${RELEASE_VERSION} deployed and running on ${INSTANCE_ID}!"
 else
-    run_ssm_commands "${INSTANCE_ID}" "Deploy Polymarket Data Collector ${RELEASE_VERSION} (Bare-OS systemd)" \
-        "set -euxo pipefail" \
-        "export AWS_REGION=${REGION}" \
-        "if command -v docker >/dev/null 2>&1; then sudo docker rm -f polymarket-bot-data 2>/dev/null || true; sudo systemctl disable --now docker 2>/dev/null || true; fi" \
-        "if command -v iptables >/dev/null 2>&1; then sudo iptables -t nat -F 2>/dev/null || true; fi" \
-        "sudo /usr/local/bin/deploy-polymarket-data.sh \"${S3_ARTIFACT_URI}\"" \
-        "sleep 3" \
-        "sudo systemctl status polymarket-data --no-pager"
-
-    echo "---------------- SSM Execution Output ----------------"
-    echo "$SSM_LAST_STDOUT"
-    echo "------------------------------------------------------"
-
-    if [ "$SSM_LAST_STATUS" = "Success" ]; then
-        echo "SUCCESS: Data Collector application ${RELEASE_VERSION} deployed and running on ${INSTANCE_ID}!"
-    else
-        echo "ERROR: Deployment failed with status '${SSM_LAST_STATUS}': ${SSM_LAST_STDERR}" >&2
-        exit 1
-    fi
+    ERROR_OUTPUT=$(aws ssm get-command-invocation \
+        --command-id "${SSM_COMMAND_ID}" \
+        --instance-id "${INSTANCE_ID}" \
+        --region "${REGION}" \
+        --query "StandardErrorContent" \
+        --output text)
+    echo "ERROR: Deployment failed with status '${STATUS}': ${ERROR_OUTPUT}" >&2
+    exit 1
 fi

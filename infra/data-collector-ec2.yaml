@@ -90,10 +90,9 @@ Resources:
               # Create dedicated unprivileged system user and directories for Polymarket Data Collector
               id -u polymarket >/dev/null 2>&1 || useradd --system --home-dir /opt/polymarket-data --shell /sbin/nologin polymarket
               usermod -aG polymarket ec2-user || true
-              mkdir -p /opt/polymarket-data /var/log/polymarket-data /mnt/ebs/polymarket-data/collector
+              mkdir -p /opt/polymarket-data /var/log/polymarket-data
               touch /var/log/polymarket-data/data-collector.log
-              chown -R polymarket:polymarket /opt/polymarket-data /var/log/polymarket-data /mnt/ebs/polymarket-data
-              chmod -R 2775 /mnt/ebs/polymarket-data
+              chown -R polymarket:polymarket /opt/polymarket-data /var/log/polymarket-data
 
               # Configure SSH public key for ec2-user (used by scripts/download-collector-data.ps1 & .sh over SSM)
               mkdir -p /home/ec2-user/.ssh
@@ -104,47 +103,46 @@ Resources:
               chmod 700 /home/ec2-user/.ssh
               chmod 600 /home/ec2-user/.ssh/authorized_keys
 
-              # Create idempotent EBS volume attach & XFS mount helper (supports hot-swap migration without reformatting)
+              # Create idempotent EBS volume attach & XFS mount helper (automatically detaches from replaced instance if needed)
               cat << 'EOF' > /usr/local/bin/mount-polymarket-ebs.sh
               #!/bin/bash
               set -euo pipefail
-              MODE="${!1:-boot}"
               REGION="${AWS::Region}"
               VOLUME_ID="${EbsVolumeId}"
+
+              if mountpoint -q /mnt/ebs/polymarket-data; then
+                mkdir -p /mnt/ebs/polymarket-data/collector
+                chown -R polymarket:polymarket /mnt/ebs/polymarket-data
+                chmod -R 2775 /mnt/ebs/polymarket-data
+                exit 0
+              fi
 
               TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
               INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-              if [ "$MODE" = "--wait-available" ]; then
-                for i in $(seq 1 60); do
-                  VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
-                  if [ "$VOL_STATE" = "available" ]; then
-                    aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/sdf || true
-                    break
-                  elif [ "$VOL_STATE" = "in-use" ]; then
-                    ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
-                    if [ "$ATTACHED_ID" = "$INSTANCE_ID" ]; then
+              VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+              if [ "$VOL_STATE" = "in-use" ]; then
+                ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
+                if [ -n "$ATTACHED_ID" ] && [ "$ATTACHED_ID" != "None" ] && [ "$ATTACHED_ID" != "$INSTANCE_ID" ]; then
+                  echo "Detaching EBS volume $VOLUME_ID from previous instance $ATTACHED_ID..."
+                  aws ec2 detach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$ATTACHED_ID" || true
+                  for i in $(seq 1 120); do
+                    VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+                    if [ "$VOL_STATE" = "available" ]; then
                       break
                     fi
-                  fi
-                  sleep 0.5
-                done
-              else
-                VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
-                if [ "$VOL_STATE" = "available" ]; then
-                  aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/sdf || true
-                elif [ "$VOL_STATE" = "in-use" ]; then
-                  ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
-                  if [ "$ATTACHED_ID" != "$INSTANCE_ID" ]; then
-                    echo "EBS volume $VOLUME_ID is currently attached to $ATTACHED_ID; skipping boot-time attach (will hot-swap during deploy)."
-                    exit 0
-                  fi
+                    sleep 1
+                  done
                 fi
+              fi
+
+              if [ "$VOL_STATE" = "available" ]; then
+                aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/sdf
               fi
 
               # Wait for the attached secondary EBS volume (/dev/sdf -> nvme1n1 on Nitro)
               DATA_DEV=""
-              for i in $(seq 1 50); do
+              for i in $(seq 1 60); do
                 for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
                   if [ -b "$candidate" ]; then
                     ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
@@ -154,7 +152,7 @@ Resources:
                     fi
                   fi
                 done
-                sleep 0.2
+                sleep 0.5
               done
 
               if [ -z "$DATA_DEV" ]; then
@@ -179,7 +177,7 @@ Resources:
               chmod -R 2775 /mnt/ebs/polymarket-data
               EOF
               chmod +x /usr/local/bin/mount-polymarket-ebs.sh
-              /usr/local/bin/mount-polymarket-ebs.sh boot || true
+              /usr/local/bin/mount-polymarket-ebs.sh || true
 
               # Configure logrotate for /var/log/polymarket-data/data-collector.log
               cat << 'EOF' > /etc/logrotate.d/polymarket-data
@@ -265,6 +263,7 @@ Resources:
               Nice=-20
               LimitMEMLOCK=infinity
               LimitNOFILE=1048576
+              ExecStartPre=+/usr/local/bin/mount-polymarket-ebs.sh
               ExecStart=/usr/lib/jvm/temurin-25/bin/java \
                 -XX:+UseZGC \
                 -XX:+AlwaysPreTouch \
@@ -293,26 +292,18 @@ Resources:
               cat << 'EOF' > /usr/local/bin/deploy-polymarket-data.sh
               #!/bin/bash
               set -euo pipefail
-              S3_ARTIFACT_URI="${!1:?Usage: deploy-polymarket-data.sh s3://<bucket>/releases/data-<version>.tar.gz [--stage-only|--activate-staged]}"
-              ACTION="${!2:-full}"
+              S3_ARTIFACT_URI="${!1:?Usage: deploy-polymarket-data.sh s3://<bucket>/releases/data-<version>.tar.gz}"
               TMP_ARCHIVE="/tmp/polymarket-data-release.tar.gz"
               STAGING_DIR="/opt/polymarket-data.staging"
 
-              if [ "$ACTION" != "--activate-staged" ]; then
-                aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
-                rm -rf "$STAGING_DIR"
-                mkdir -p "$STAGING_DIR"
-                tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
-                rm -f "$TMP_ARCHIVE"
-                chown -R polymarket:polymarket "$STAGING_DIR"
-              fi
+              aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
+              rm -rf "$STAGING_DIR"
+              mkdir -p "$STAGING_DIR"
+              tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
+              rm -f "$TMP_ARCHIVE"
+              chown -R polymarket:polymarket "$STAGING_DIR"
 
-              if [ "$ACTION" = "--stage-only" ]; then
-                echo "Staged release from $S3_ARTIFACT_URI into $STAGING_DIR."
-                exit 0
-              fi
-
-              /usr/local/bin/mount-polymarket-ebs.sh --wait-available
+              /usr/local/bin/mount-polymarket-ebs.sh
 
               systemctl stop polymarket-data || true
               rm -rf /opt/polymarket-data/*
