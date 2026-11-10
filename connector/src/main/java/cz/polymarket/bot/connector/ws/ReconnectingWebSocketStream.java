@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -73,6 +74,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<String> lastCloseReason = new AtomicReference<>("");
     private final AtomicReference<String> lastRemoteAddress = new AtomicReference<>("");
     private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
+    private final AtomicBoolean normalCloseTriggered = new AtomicBoolean(false);
 
     private volatile String dedicatedIoThreadName;
     private volatile Thread ioReaderThread;
@@ -81,6 +83,7 @@ public class ReconnectingWebSocketStream {
     private volatile WebSocket currentWebSocket;
     private volatile long pingTimerId = -1L;
     private volatile WebSocketDisconnectListener disconnectListener;
+    private volatile Consumer<WebSocketStreamTelemetry> normalCloseListener;
 
     /**
      * Constructs a managed, auto-reconnecting WebSocket stream with protocol-level ping frames.
@@ -222,6 +225,18 @@ public class ReconnectingWebSocketStream {
      */
     public void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
         this.disconnectListener = disconnectListener;
+    }
+
+    /**
+     * Registers an optional listener invoked when the remote WebSocket server cleanly terminates
+     * the stream with {@code closeCode == 1000} (Normal Closure). When registered, a {@code 1000} close
+     * drains any remaining queued frames, stops the stream without reconnecting, and does not trigger
+     * the unexpected {@link WebSocketDisconnectListener} or error logs.
+     *
+     * @param normalCloseListener listener receiving the final stream telemetry snapshot upon {@code 1000} closure
+     */
+    public void setNormalCloseListener(Consumer<WebSocketStreamTelemetry> normalCloseListener) {
+        this.normalCloseListener = normalCloseListener;
     }
 
     /**
@@ -614,6 +629,26 @@ public class ReconnectingWebSocketStream {
                                 lastCloseReason.set(closeReason);
                             }
                             if (running.get()) {
+                                if (closeCode == 1000 && this.normalCloseListener != null) {
+                                    normalCloseTriggered.set(true);
+                                    running.set(false);
+                                    cancelPingTimer();
+                                    this.currentWebSocket = null;
+                                    state.set(ConnectionState.DISCONNECTED);
+                                    Thread worker = this.drainThread;
+                                    if (worker != null && externalWorkerThread == null) {
+                                        workerParked.set(false);
+                                        LockSupport.unpark(worker);
+                                    } else if (normalCloseTriggered.compareAndSet(true, false)) {
+                                        List<TimestampedFrame> scratch = new ArrayList<>(64);
+                                        while (!inboundQueue.isEmpty()) {
+                                            drainAvailableBatch(scratch);
+                                        }
+                                        notifyNormalCloseListener(buildTelemetrySnapshot(closeCode, closeReason));
+                                        closeHttpClientQuietly();
+                                    }
+                                    return;
+                                }
                                 long nextDelayMs = computeNextReconnectDelayMs(
                                         consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
                                 WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
@@ -681,6 +716,24 @@ public class ReconnectingWebSocketStream {
             } catch (Exception e) {
                 Log.warnf("[%s] Exception in WebSocketDisconnectListener: %s", streamName, e.getMessage());
             }
+        }
+    }
+
+    private void notifyNormalCloseListener(WebSocketStreamTelemetry snapshot) {
+        Consumer<WebSocketStreamTelemetry> listener = this.normalCloseListener;
+        if (listener != null && snapshot != null) {
+            try {
+                listener.accept(snapshot);
+            } catch (Exception e) {
+                Log.warnf("[%s] Exception in normalCloseListener: %s", streamName, e.getMessage());
+            }
+        }
+    }
+
+    private void closeHttpClientQuietly() {
+        try {
+            httpClient.close();
+        } catch (Exception ignored) {
         }
     }
 
@@ -812,6 +865,13 @@ public class ReconnectingWebSocketStream {
                 LockSupport.park(this);
             }
             workerParked.set(false);
+        }
+        if (normalCloseTriggered.compareAndSet(true, false)) {
+            while (!inboundQueue.isEmpty()) {
+                drainAvailableBatch(scratchBatch);
+            }
+            notifyNormalCloseListener(buildTelemetrySnapshot(lastCloseCode.get(), lastCloseReason.get()));
+            closeHttpClientQuietly();
         }
     }
 

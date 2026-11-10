@@ -93,6 +93,64 @@ class PolymarketClobClientTest {
     }
 
     @Test
+    void shouldCloseMarketStreamCleanlyAndInvokeNormalCloseListenerWhenServerClosesWithCode1000() throws Exception {
+        AtomicInteger connectionCount = new AtomicInteger(0);
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    connectionCount.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        if (msg.contains("token_up_1")) {
+                            ws.writeTextMessage("""
+                                    [{"event_type":"book","asset_id":"token_up_1","bids":[{"price":"0.49","size":"100"}]}]
+                                    """.strip());
+                            ws.writeTextMessage("""
+                                    {"event_type":"market_resolved","winning_asset_id":"token_up_1","winning_outcome":"Up"}
+                                    """.strip());
+                            ws.close((short) 1000, "all subscribed assets resolved");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                "ws://localhost:" + port + "/ws/market",
+                80L,
+                5000L
+        );
+
+        List<WebSocketStreamTelemetry> unexpectedDisconnects = new CopyOnWriteArrayList<>();
+        List<WebSocketStreamTelemetry> normalCloses = new CopyOnWriteArrayList<>();
+        List<String> rawEvents = new CopyOnWriteArrayList<>();
+        client.setDisconnectListener(unexpectedDisconnects::add);
+
+        String slug = "btc-updown-15m-1789041600";
+        client.openMarketStream(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                (rawJson, recvTs) -> rawEvents.add(rawJson),
+                normalCloses::add
+        );
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(normalCloses).hasSize(1);
+                    assertThat(rawEvents).hasSize(2);
+                    assertThat(rawEvents.get(1)).contains("\"event_type\":\"market_resolved\"");
+                    assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+                });
+
+        Thread.sleep(150L);
+        assertThat(connectionCount.get()).isEqualTo(1);
+        assertThat(unexpectedDisconnects).isEmpty();
+        assertThat(normalCloses.getFirst().lastCloseCode()).isEqualTo(1000);
+        assertThat(normalCloses.getFirst().lastCloseReason()).isEqualTo("all subscribed assets resolved");
+
+        client.stopAll();
+    }
+
+    @Test
     void shouldOpenAndCloseAuthenticatedUserStreamDeliveringOrderAndTradeEvents() throws Exception {
         List<String> receivedUserSubMessages = new CopyOnWriteArrayList<>();
 

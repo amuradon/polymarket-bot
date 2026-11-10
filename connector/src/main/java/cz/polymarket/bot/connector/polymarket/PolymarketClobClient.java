@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -155,6 +156,24 @@ public class PolymarketClobClient {
      * @param listener   listener receiving raw JSON frames and receipt timestamps
      */
     public synchronized void openMarketStream(String marketSlug, List<String> tokenIds, RawWebSocketListener listener) {
+        openMarketStream(marketSlug, tokenIds, listener, null);
+    }
+
+    /**
+     * Opens a dedicated CLOB WebSocket connection for a single market subscribed to its token IDs,
+     * forwarding all raw frames directly to the listener without parsing and invoking {@code normalCloseListener}
+     * when the server terminates the resolved market stream with {@code closeCode == 1000}.
+     *
+     * @param marketSlug          Polymarket market slug
+     * @param tokenIds            CLOB asset token IDs belonging to the market
+     * @param listener            listener receiving raw JSON frames and receipt timestamps
+     * @param normalCloseListener optional listener invoked when the server cleanly closes the stream with {@code closeCode == 1000}
+     */
+    public synchronized void openMarketStream(
+            String marketSlug,
+            List<String> tokenIds,
+            RawWebSocketListener listener,
+            Consumer<WebSocketStreamTelemetry> normalCloseListener) {
         if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
             return;
         }
@@ -189,6 +208,12 @@ public class PolymarketClobClient {
         );
         stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
         stream.setDisconnectListener(this.disconnectListener);
+        if (normalCloseListener != null) {
+            stream.setNormalCloseListener(telemetry -> {
+                marketStreams.remove(marketSlug, stream);
+                normalCloseListener.accept(telemetry);
+            });
+        }
         marketStreams.put(marketSlug, stream);
         Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
         stream.start();

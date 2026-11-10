@@ -614,4 +614,62 @@ class ReconnectingWebSocketStreamTest {
 
         stream.stop();
     }
+
+    @Test
+    void shouldDrainRemainingFramesAndInvokeNormalCloseListenerWithoutReconnectingOrWarnOnCloseCode1000() throws Exception {
+        List<String> deliveredPayloads = new CopyOnWriteArrayList<>();
+        List<WebSocketStreamTelemetry> unexpectedDisconnects = new CopyOnWriteArrayList<>();
+        List<WebSocketStreamTelemetry> normalCloses = new CopyOnWriteArrayList<>();
+        AtomicInteger connectionCount = new AtomicInteger(0);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    connectionCount.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        ws.writeTextMessage("{\"event_type\":\"book\",\"seq\":1}");
+                        ws.writeTextMessage("{\"event_type\":\"market_resolved\",\"winning_outcome\":\"Up\"}");
+                        ws.close((short) 1000, "all subscribed assets resolved");
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://localhost:" + port + "/ws/normal-close-1000-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "NORMAL-CLOSE-1000-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> deliveredPayloads.add(rawJson),
+                50L,
+                0L
+        );
+        stream.setDisconnectListener(unexpectedDisconnects::add);
+        stream.setNormalCloseListener(normalCloses::add);
+
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(normalCloses).hasSize(1);
+                    assertThat(deliveredPayloads).containsExactly(
+                            "{\"event_type\":\"book\",\"seq\":1}",
+                            "{\"event_type\":\"market_resolved\",\"winning_outcome\":\"Up\"}"
+                    );
+                    assertThat(stream.getState()).isEqualTo(ConnectionState.DISCONNECTED);
+                });
+
+        // Wait well past the 50ms reconnect delay to verify no reconnect is scheduled
+        Thread.sleep(150L);
+        assertThat(connectionCount.get()).isEqualTo(1);
+        assertThat(unexpectedDisconnects).isEmpty();
+        assertThat(stream.getReconnectCount()).isZero();
+
+        WebSocketStreamTelemetry finalTelemetry = normalCloses.getFirst();
+        assertThat(finalTelemetry.lastCloseCode()).isEqualTo(1000);
+        assertThat(finalTelemetry.lastCloseReason()).isEqualTo("all subscribed assets resolved");
+        assertThat(finalTelemetry.totalFramesReceived()).isEqualTo(2L);
+        assertThat(finalTelemetry.queueDepth()).isZero();
+    }
 }
