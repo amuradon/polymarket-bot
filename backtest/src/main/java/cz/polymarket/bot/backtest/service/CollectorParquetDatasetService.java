@@ -177,6 +177,34 @@ public class CollectorParquetDatasetService {
     }
 
     /**
+     * Resolves the daily Kraken Spot {@code <ASSET>USD} {@code trades} Parquet file for the given symbol and UTC date
+     * (e.g. {@code <collectorDir>/kraken/spot/BTCUSD/trades/BTCUSD-trades-<dateStr>.parquet}).
+     *
+     * @param symbol trading symbol
+     * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @return Parquet file path
+     */
+    public Path getKrakenSpotTradesFile(String symbol, String dateStr) {
+        String pair = extractBaseAsset(symbol) + "USD";
+        return collectorRootDir.resolve("kraken").resolve("spot").resolve(pair)
+                .resolve("trades").resolve(pair + "-trades-" + dateStr + ".parquet");
+    }
+
+    /**
+     * Resolves the daily Coinbase Spot {@code <ASSET>USD} {@code trades} Parquet file for the given symbol and UTC date
+     * (e.g. {@code <collectorDir>/coinbase/spot/BTCUSD/trades/BTCUSD-trades-<dateStr>.parquet}).
+     *
+     * @param symbol trading symbol
+     * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @return Parquet file path
+     */
+    public Path getCoinbaseSpotTradesFile(String symbol, String dateStr) {
+        String pair = extractBaseAsset(symbol) + "USD";
+        return collectorRootDir.resolve("coinbase").resolve("spot").resolve(pair)
+                .resolve("trades").resolve(pair + "-trades-" + dateStr + ".parquet");
+    }
+
+    /**
      * Resolves the daily Binance Futures {@code aggTrades} Parquet file for the given symbol and UTC date.
      *
      * @param symbol trading symbol

@@ -228,4 +228,97 @@ class ChronologicalEventStreamerTest {
             assertThat(streamer.hasNext()).isFalse();
         }
     }
+
+    @Test
+    @DisplayName("Should merge-stream Binance, Coinbase, and Kraken spot trades with Kraken USDT/USD peg into CalculatedSpotTwapEvents")
+    void shouldMergeStreamMultiExchangeSpotTradesIntoCalculatedSpotTwapEvents(@TempDir Path tempDir) throws Exception {
+        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString());
+
+        long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
+        long tEnd = tStart + 900L;
+        long baseMs = tStart * 1000L;
+        String dateStr = "2026-08-01";
+
+        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path binanceSpotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
+        Path coinbaseSpotFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", dateStr);
+        Path krakenSpotFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", dateStr);
+        Path krakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
+
+        assertThat(coinbaseSpotFile).isEqualTo(
+                tempDir.resolve("coinbase").resolve("spot").resolve("BTCUSD").resolve("trades").resolve("BTCUSD-trades-2026-08-01.parquet"));
+        assertThat(krakenSpotFile).isEqualTo(
+                tempDir.resolve("kraken").resolve("spot").resolve("BTCUSD").resolve("trades").resolve("BTCUSD-trades-2026-08-01.parquet"));
+
+        Files.createDirectories(pmDir);
+        Files.createDirectories(binanceSpotFile.getParent());
+        Files.createDirectories(coinbaseSpotFile.getParent());
+        Files.createDirectories(krakenSpotFile.getParent());
+        Files.createDirectories(krakenUsdtFile.getParent());
+
+        Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+             Statement stmt = conn.createStatement()) {
+
+            String normPm = pmFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 500L) + "::UBIGINT, 'clob_ws'::VARCHAR, 'price_change'::VARCHAR, " +
+                    "'0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
+                    "'{\"market\":\"0x1\",\"price_changes\":[{\"asset_id\":\"1001\",\"price\":\"0.52\",\"size\":\"200\",\"side\":\"SELL\"}],\"timestamp\":\"" + (baseMs + 490L) + "\"}'::JSON)" +
+                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm + "' (FORMAT PARQUET)");
+
+            // Kraken USDT/USD peg at 1.0000
+            String normUsdt = krakenUsdtFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 100L) + "::UBIGINT, 1.0000::DOUBLE, 1000.0::DOUBLE)" +
+                    ") AS t(ts, price, qty)) TO '" + normUsdt + "' (FORMAT PARQUET)");
+
+            // Binance BTCUSDT trade at +1000ms ($70,000)
+            String normBinance = binanceSpotFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 1000L) + "::UBIGINT, 1::BIGINT, 70000.0::DOUBLE, 1.0::DOUBLE, false::BOOLEAN)" +
+                    ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normBinance + "' (FORMAT PARQUET)");
+
+            // Coinbase BTCUSD trade at +2000ms ($70,020)
+            String normCoinbase = coinbaseSpotFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 2000L) + "::UBIGINT, " + (baseMs + 2000L) + "::UBIGINT, 'BTCUSD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 70020.0::DOUBLE, 1.0::DOUBLE)" +
+                    ") AS t(ts, trade_timestamp, symbol, trade_id, side, price, qty)) TO '" + normCoinbase + "' (FORMAT PARQUET)");
+
+            // Kraken BTCUSD trade at +3000ms ($70,040)
+            String normKraken = krakenSpotFile.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (baseMs + 3000L) + "::UBIGINT, " + (baseMs + 3000L) + "::UBIGINT, 'BTCUSD'::VARCHAR, 1::BIGINT, 'b'::VARCHAR, 'm'::VARCHAR, 70040.0::DOUBLE, 1.0::DOUBLE)" +
+                    ") AS t(ts, trade_timestamp, symbol, trade_id, side, ord_type, price, qty)) TO '" + normKraken + "' (FORMAT PARQUET)");
+        }
+
+        CollectorMarketMetadata metadata = new CollectorMarketMetadata(
+                tStart, tEnd, "2026-08-01T00:00:00Z", dateStr, pmFile,
+                "1001", "1002", 70000.0, 70030.0, TradeDirection.UP
+        );
+
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
+            streamer.loadCandleEvents(metadata, datasetService, "BTCUSDT", Set.of());
+
+            List<BacktestEvent.CalculatedSpotTwapEvent> calcEvents = new ArrayList<>();
+            while (streamer.hasNext()) {
+                BacktestEvent ev = streamer.next();
+                if (ev instanceof BacktestEvent.CalculatedSpotTwapEvent calcEv) {
+                    calcEvents.add(calcEv);
+                }
+            }
+
+            // 3 spot trades (Binance @ +1000ms, Coinbase @ +2000ms, Kraken @ +3000ms) -> 3 CalculatedSpotTwapEvents
+            assertThat(calcEvents).hasSize(3);
+            assertThat(calcEvents.get(0).timestampMs()).isEqualTo(baseMs + 1000L);
+            assertThat(calcEvents.get(0).spotPrice()).isCloseTo(70000.0, org.assertj.core.api.Assertions.within(1e-4));
+
+            assertThat(calcEvents.get(1).timestampMs()).isEqualTo(baseMs + 2000L);
+            assertThat(calcEvents.get(1).spotPrice()).isBetween(70005.0, 70015.0);
+
+            assertThat(calcEvents.get(2).timestampMs()).isEqualTo(baseMs + 3000L);
+            assertThat(calcEvents.get(2).spotPrice()).isBetween(70010.0, 70030.0);
+        }
+    }
 }
