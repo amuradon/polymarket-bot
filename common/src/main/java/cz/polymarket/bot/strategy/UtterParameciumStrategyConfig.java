@@ -4,8 +4,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+/**
+ * Immutable configuration bean for {@link UtterParameciumStrategy}.
+ * <p>
+ * Encapsulates settlement-window timing, entry price bounds, fat-tail model probability ceiling,
+ * progressive TWAP lock-in inventory staging, single-direction market commitment, adverse momentum
+ * and CLOB toxic-flow guards, multi-horizon realized volatility bounds, and parabolic taker fee settings.
+ */
 @ApplicationScoped
 public class UtterParameciumStrategyConfig {
+
+    private static final long MAX_ALLOWED_TAU_MS = 65_000L;
+    private static final long TWAP_SETTLEMENT_WINDOW_MS = 60_000L;
 
     private final long minTauMs;
     private final long maxTauMs;
@@ -14,6 +24,7 @@ public class UtterParameciumStrategyConfig {
     private final int maxEntryPriceMc;
     private final int maxSpreadMc;
     private final int minModelProbMc;
+    private final int maxModelProbMc;
     private final int minEdgeMc;
     private final int maxSlippageMc;
     private final int minOrderShares;
@@ -21,6 +32,11 @@ public class UtterParameciumStrategyConfig {
     private final int initialBurstShares;
     private final int edgeScalingFactor;
     private final int maxInventorySharesPerSide;
+    private final int earlyInventoryCapBps;
+    private final long fullInventoryTauMs;
+    private final boolean allowDirectionFlip;
+    private final long adverseDrift10sBlockCents;
+    private final int adverseAskDrop8sBlockMc;
     private final long defaultSigma1sCents;
     private final long minSigma1sCents;
     private final long maxSigma1sCents;
@@ -31,15 +47,16 @@ public class UtterParameciumStrategyConfig {
     private final String downToken;
 
     /**
-     * Constructs the Model V1 strategy configuration with injected MicroProfile properties.
+     * Constructs the strategy configuration with injected MicroProfile properties.
      *
      * @param minTauMs minimum remaining time to candle expiry in milliseconds (default {@code 5000} = 5s)
-     * @param maxTauMs maximum remaining time to candle expiry in milliseconds (default {@code 61000} = 61s)
-     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 250})
+     * @param maxTauMs maximum remaining time to candle expiry in milliseconds, strictly {@code < 65000} (default {@code 61000} = 61s)
+     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 400} = 0.4s)
      * @param minEntryPriceMc minimum acceptable best-ask price in millicents (default {@code 380} = $0.38)
-     * @param maxEntryPriceMc maximum acceptable best-ask price in millicents (default {@code 970} = $0.97)
+     * @param maxEntryPriceMc maximum acceptable best-ask price in millicents (default {@code 880} = $0.88)
      * @param maxSpreadMc maximum allowed BBO spread in millicents (default {@code 80} = $0.08)
-     * @param minModelProbMc minimum model probability for favorite entries in millicents (default {@code 650} = 65.0%)
+     * @param minModelProbMc minimum model probability for entries in millicents (default {@code 650} = 65.0%)
+     * @param maxModelProbMc fat-tail ceiling on model probability in millicents (default {@code 975} = 97.5%)
      * @param minEdgeMc minimum net price edge after taker fee in millicents (default {@code 25} = $0.025)
      * @param maxSlippageMc maximum allowed limit price slippage above best ask in millicents (default {@code 50} = $0.05)
      * @param minOrderShares minimum order size in integer shares (default {@code 5})
@@ -47,8 +64,13 @@ public class UtterParameciumStrategyConfig {
      * @param initialBurstShares first-order burst size in shares when {@code tau >= 55s} (default {@code 15})
      * @param edgeScalingFactor scaling factor mapping net edge to additional shares (default {@code 65})
      * @param maxInventorySharesPerSide maximum cumulative shares per direction in one 15m market (default {@code 600})
-     * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents when {@code M < 5} (default {@code 150} = $1.50)
-     * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 80} = $0.80)
+     * @param earlyInventoryCapBps fraction of {@code maxInventorySharesPerSide} allowed at {@code tau >= 60s} in bps (default {@code 5500} = 55%)
+     * @param fullInventoryTauMs remaining time in milliseconds at or below which 100% of inventory is unlocked (default {@code 35000} = 35s)
+     * @param allowDirectionFlip whether opposite-side entries are permitted after opening a position in the market (default {@code false})
+     * @param adverseDrift10sBlockCents 10-second adverse spot drift in USD cents blocking pre-lock-in entries (default {@code 950} = $9.50)
+     * @param adverseAskDrop8sBlockMc 8-second sustained CLOB BBO drop in millicents blocking pre-lock-in entries (default {@code 100} = $0.10)
+     * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents during warm-up (default {@code 160} = $1.60)
+     * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 105} = $1.05)
      * @param maxSigma1sCents upper clamp for 1-second BTC volatility in USD cents (default {@code 3500} = $35.00)
      * @param warmupSecsBeforeExpiry warm-up window before expiry in seconds (default {@code 120})
      * @param takerFeeRateBps Polymarket parabolic taker fee multiplier in basis points (default {@code 700} = 7.00%)
@@ -60,11 +82,12 @@ public class UtterParameciumStrategyConfig {
     public UtterParameciumStrategyConfig(
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-tau-ms", defaultValue = "5000") long minTauMs,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-tau-ms", defaultValue = "61000") long maxTauMs,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "250") long cooldownMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "400") long cooldownMs,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-entry-price-mc", defaultValue = "380") int minEntryPriceMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-entry-price-mc", defaultValue = "970") int maxEntryPriceMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-entry-price-mc", defaultValue = "880") int maxEntryPriceMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-spread-mc", defaultValue = "80") int maxSpreadMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-model-prob-mc", defaultValue = "650") int minModelProbMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-model-prob-mc", defaultValue = "975") int maxModelProbMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-edge-mc", defaultValue = "25") int minEdgeMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-slippage-mc", defaultValue = "50") int maxSlippageMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-order-shares", defaultValue = "5") int minOrderShares,
@@ -72,8 +95,13 @@ public class UtterParameciumStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.initial-burst-shares", defaultValue = "15") int initialBurstShares,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.edge-scaling-factor", defaultValue = "65") int edgeScalingFactor,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-inventory-shares-per-side", defaultValue = "600") int maxInventorySharesPerSide,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "150") long defaultSigma1sCents,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "80") long minSigma1sCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.early-inventory-cap-bps", defaultValue = "5500") int earlyInventoryCapBps,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.full-inventory-tau-ms", defaultValue = "35000") long fullInventoryTauMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.allow-direction-flip", defaultValue = "false") boolean allowDirectionFlip,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.adverse-drift-10s-block-cents", defaultValue = "950") long adverseDrift10sBlockCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.adverse-ask-drop-8s-block-mc", defaultValue = "100") int adverseAskDrop8sBlockMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "160") long defaultSigma1sCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "105") long minSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-sigma-1s-cents", defaultValue = "3500") long maxSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.warmup-secs-before-expiry", defaultValue = "120") long warmupSecsBeforeExpiry,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.taker-fee-rate-bps", defaultValue = "700") int takerFeeRateBps,
@@ -81,17 +109,32 @@ public class UtterParameciumStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.up-token", defaultValue = "BTC-UP") String upToken,
             @ConfigProperty(name = "polymarket.strategy.down-token", defaultValue = "BTC-DOWN") String downToken) {
 
-        if (minTauMs < 0L || maxTauMs <= minTauMs) {
-            throw new IllegalArgumentException("Invalid tau window: minTauMs must be >= 0 and < maxTauMs");
+        if (minTauMs < 0L || maxTauMs <= minTauMs || maxTauMs >= MAX_ALLOWED_TAU_MS) {
+            throw new IllegalArgumentException("Invalid tau window: 0 <= minTauMs < maxTauMs < 65000 required");
         }
         if (minEntryPriceMc <= 0 || maxEntryPriceMc >= 1_000 || minEntryPriceMc > maxEntryPriceMc) {
             throw new IllegalArgumentException("Entry price bounds must be in (0, 1000) with minEntryPriceMc <= maxEntryPriceMc");
+        }
+        if (minModelProbMc <= 0 || maxModelProbMc >= 1_000 || minModelProbMc > maxModelProbMc) {
+            throw new IllegalArgumentException("Model probability bounds must be in (0, 1000) with minModelProbMc <= maxModelProbMc");
         }
         if (maxSlippageMc < 0 || maxSlippageMc >= 1_000) {
             throw new IllegalArgumentException("maxSlippageMc must be in [0, 1000)");
         }
         if (minOrderShares < 5 || maxOrderShares < minOrderShares) {
             throw new IllegalArgumentException("Order shares must satisfy 5 <= minOrderShares <= maxOrderShares");
+        }
+        if (earlyInventoryCapBps <= 0 || earlyInventoryCapBps > 10_000) {
+            throw new IllegalArgumentException("earlyInventoryCapBps must be in (0, 10000]");
+        }
+        if (fullInventoryTauMs < 0L || fullInventoryTauMs >= TWAP_SETTLEMENT_WINDOW_MS) {
+            throw new IllegalArgumentException("fullInventoryTauMs must be in [0, 60000)");
+        }
+        if (adverseDrift10sBlockCents < 0L) {
+            throw new IllegalArgumentException("adverseDrift10sBlockCents must be >= 0");
+        }
+        if (adverseAskDrop8sBlockMc < 0) {
+            throw new IllegalArgumentException("adverseAskDrop8sBlockMc must be >= 0");
         }
         if (minSigma1sCents <= 0L || maxSigma1sCents < minSigma1sCents) {
             throw new IllegalArgumentException("Volatility bounds must satisfy 0 < minSigma1sCents <= maxSigma1sCents");
@@ -104,6 +147,7 @@ public class UtterParameciumStrategyConfig {
         this.maxEntryPriceMc = maxEntryPriceMc;
         this.maxSpreadMc = maxSpreadMc;
         this.minModelProbMc = minModelProbMc;
+        this.maxModelProbMc = maxModelProbMc;
         this.minEdgeMc = minEdgeMc;
         this.maxSlippageMc = maxSlippageMc;
         this.minOrderShares = minOrderShares;
@@ -111,6 +155,11 @@ public class UtterParameciumStrategyConfig {
         this.initialBurstShares = initialBurstShares;
         this.edgeScalingFactor = edgeScalingFactor;
         this.maxInventorySharesPerSide = maxInventorySharesPerSide;
+        this.earlyInventoryCapBps = earlyInventoryCapBps;
+        this.fullInventoryTauMs = fullInventoryTauMs;
+        this.allowDirectionFlip = allowDirectionFlip;
+        this.adverseDrift10sBlockCents = adverseDrift10sBlockCents;
+        this.adverseAskDrop8sBlockMc = adverseAskDrop8sBlockMc;
         this.defaultSigma1sCents = defaultSigma1sCents;
         this.minSigma1sCents = minSigma1sCents;
         this.maxSigma1sCents = maxSigma1sCents;
@@ -122,19 +171,20 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Creates a default configuration instance calibrated to Model V1 empirical parameters.
+     * Creates a default configuration instance calibrated with Iteration 1 loss-mitigation parameters.
      *
-     * @return default Model V1 configuration
+     * @return default strategy configuration
      */
     public static UtterParameciumStrategyConfig defaultModelV1() {
         return new UtterParameciumStrategyConfig(
                 5_000L,
                 61_000L,
-                250L,
+                400L,
                 380,
-                970,
+                880,
                 80,
                 650,
+                975,
                 25,
                 50,
                 5,
@@ -142,8 +192,13 @@ public class UtterParameciumStrategyConfig {
                 15,
                 65,
                 600,
-                150L,
-                80L,
+                5_500,
+                35_000L,
+                false,
+                950L,
+                100,
+                160L,
+                105L,
                 3_500L,
                 120L,
                 700,
@@ -168,7 +223,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Minimum interval between consecutive signals in a batch in milliseconds (default 250 ms).
+     * Minimum interval between consecutive signals in milliseconds (default 400 ms).
      */
     public long cooldownMs() {
         return cooldownMs;
@@ -182,7 +237,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum acceptable ask price in millicents (default 970 mc = $0.97).
+     * Maximum acceptable ask price in millicents (default 880 mc = $0.88).
      */
     public int maxEntryPriceMc() {
         return maxEntryPriceMc;
@@ -203,6 +258,13 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
+     * Maximum fat-tail model probability cap in millicents (default 975 mc = 97.5%).
+     */
+    public int maxModelProbMc() {
+        return maxModelProbMc;
+    }
+
+    /**
      * Minimum net price edge after taker fee in millicents (default 25 mc = $0.025).
      */
     public int minEdgeMc() {
@@ -217,7 +279,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Base order size in integer shares (default 5).
+     * Base minimum order size in integer shares (default 5).
      */
     public int minOrderShares() {
         return minOrderShares;
@@ -252,14 +314,49 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Default 1-second BTC volatility in USD cents when fewer than 5 samples exist (default 150 = $1.50).
+     * Early-window fraction of maximum inventory allowed at {@code tau >= 60s} in basis points (default 5,500 = 55%).
+     */
+    public int earlyInventoryCapBps() {
+        return earlyInventoryCapBps;
+    }
+
+    /**
+     * Remaining time in milliseconds at or below which 100% of maximum inventory is unlocked (default 35,000 ms).
+     */
+    public long fullInventoryTauMs() {
+        return fullInventoryTauMs;
+    }
+
+    /**
+     * Whether opposite-direction entries are allowed once a position is held in the active market (default false).
+     */
+    public boolean allowDirectionFlip() {
+        return allowDirectionFlip;
+    }
+
+    /**
+     * Adverse 10-second spot drift threshold in USD cents blocking pre-lock-in entries (default 950 = $9.50).
+     */
+    public long adverseDrift10sBlockCents() {
+        return adverseDrift10sBlockCents;
+    }
+
+    /**
+     * Adverse 8-second sustained CLOB BBO drop in millicents blocking pre-lock-in entries (default 100 = $0.10).
+     */
+    public int adverseAskDrop8sBlockMc() {
+        return adverseAskDrop8sBlockMc;
+    }
+
+    /**
+     * Default 1-second BTC volatility in USD cents during warm-up (default 160 = $1.60).
      */
     public long defaultSigma1sCents() {
         return defaultSigma1sCents;
     }
 
     /**
-     * Minimum clamp for 1-second BTC volatility in USD cents (default 80 = $0.80).
+     * Minimum clamp for 1-second BTC volatility in USD cents (default 105 = $1.05).
      */
     public long minSigma1sCents() {
         return minSigma1sCents;
