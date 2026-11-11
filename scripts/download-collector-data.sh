@@ -47,7 +47,7 @@ Options:
   -o, --destination-dir <path>  Local root directory for collector data.
                                 (Default: /data/polymarket/collector or ./collector)
   -h, --ec2-host <alias>        EC2 SSH host alias configured in ~/.ssh/config.
-                                (Default: i-058e25a0b3334934d)
+                                (Default: i-0e826b5eb507d87be)
   -r, --remote-base-dir <path>  Root directory of collector data on EC2.
                                 (Default: /mnt/ebs/polymarket-data/collector)
   -n, --dry-run                 Preview matching files and operations without downloading or deleting.

@@ -37,7 +37,7 @@ Usage:
 
 Options:
   -h, --ec2-host <alias>        EC2 SSH host alias configured in ~/.ssh/config.
-                                (Default: i-058e25a0b3334934d)
+                                (Default: i-0e826b5eb507d87be)
   -s, --symbol <sym>            Cryptocurrency symbol to benchmark (e.g. BTC, ETH, SOL, BTCUSDT).
                                 (Default: BTC)
   -c, --sample-count <num>      Target trade event samples per exchange (5-5000, Default: 100).
@@ -60,7 +60,7 @@ EOF
 }
 
 # Defaults
-EC2_HOST="i-058e25a0b3334934d"
+EC2_HOST="i-0e826b5eb507d87be"
 SYMBOL="BTC"
 SAMPLE_COUNT=100
 DURATION_SECONDS=60
