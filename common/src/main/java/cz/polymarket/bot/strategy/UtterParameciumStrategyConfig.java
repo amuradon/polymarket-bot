@@ -4,13 +4,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-/**
- * Configuration bean for {@link UtterParameciumStrategy} (reconstructed Model V1).
- * <p>
- * All parameters are represented in deterministic fixed-point integer units
- * (milliseconds for durations, USD cents for BTC prices/volatility, and millicents {@code 0..1000}
- * for binary contract prices) to guarantee a zero-allocation, floating-point-free hot path.
- */
 @ApplicationScoped
 public class UtterParameciumStrategyConfig {
 
@@ -22,6 +15,7 @@ public class UtterParameciumStrategyConfig {
     private final int maxSpreadMc;
     private final int minModelProbMc;
     private final int minEdgeMc;
+    private final int maxSlippageMc;
     private final int minOrderShares;
     private final int maxOrderShares;
     private final int initialBurstShares;
@@ -47,6 +41,7 @@ public class UtterParameciumStrategyConfig {
      * @param maxSpreadMc maximum allowed BBO spread in millicents (default {@code 80} = $0.08)
      * @param minModelProbMc minimum model probability for favorite entries in millicents (default {@code 650} = 65.0%)
      * @param minEdgeMc minimum net price edge after taker fee in millicents (default {@code 25} = $0.025)
+     * @param maxSlippageMc maximum allowed limit price slippage above best ask in millicents (default {@code 50} = $0.05)
      * @param minOrderShares minimum order size in integer shares (default {@code 5})
      * @param maxOrderShares maximum single-order size in integer shares (default {@code 30})
      * @param initialBurstShares first-order burst size in shares when {@code tau >= 55s} (default {@code 15})
@@ -71,6 +66,7 @@ public class UtterParameciumStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-spread-mc", defaultValue = "80") int maxSpreadMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-model-prob-mc", defaultValue = "650") int minModelProbMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-edge-mc", defaultValue = "25") int minEdgeMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-slippage-mc", defaultValue = "50") int maxSlippageMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-order-shares", defaultValue = "5") int minOrderShares,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-order-shares", defaultValue = "30") int maxOrderShares,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.initial-burst-shares", defaultValue = "15") int initialBurstShares,
@@ -91,6 +87,9 @@ public class UtterParameciumStrategyConfig {
         if (minEntryPriceMc <= 0 || maxEntryPriceMc >= 1_000 || minEntryPriceMc > maxEntryPriceMc) {
             throw new IllegalArgumentException("Entry price bounds must be in (0, 1000) with minEntryPriceMc <= maxEntryPriceMc");
         }
+        if (maxSlippageMc < 0 || maxSlippageMc >= 1_000) {
+            throw new IllegalArgumentException("maxSlippageMc must be in [0, 1000)");
+        }
         if (minOrderShares < 5 || maxOrderShares < minOrderShares) {
             throw new IllegalArgumentException("Order shares must satisfy 5 <= minOrderShares <= maxOrderShares");
         }
@@ -106,6 +105,7 @@ public class UtterParameciumStrategyConfig {
         this.maxSpreadMc = maxSpreadMc;
         this.minModelProbMc = minModelProbMc;
         this.minEdgeMc = minEdgeMc;
+        this.maxSlippageMc = maxSlippageMc;
         this.minOrderShares = minOrderShares;
         this.maxOrderShares = maxOrderShares;
         this.initialBurstShares = initialBurstShares;
@@ -136,6 +136,7 @@ public class UtterParameciumStrategyConfig {
                 80,
                 650,
                 25,
+                50,
                 5,
                 30,
                 15,
@@ -167,7 +168,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Minimum interval between consecutive signals in a batch in milliseconds (default 200 ms).
+     * Minimum interval between consecutive signals in a batch in milliseconds (default 250 ms).
      */
     public long cooldownMs() {
         return cooldownMs;
@@ -209,6 +210,13 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
+     * Maximum allowed limit price slippage above best ask in millicents (default 50 mc = $0.05).
+     */
+    public int maxSlippageMc() {
+        return maxSlippageMc;
+    }
+
+    /**
      * Base order size in integer shares (default 5).
      */
     public int minOrderShares() {
@@ -216,7 +224,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum single-order size in integer shares (default 35).
+     * Maximum single-order size in integer shares (default 30).
      */
     public int maxOrderShares() {
         return maxOrderShares;
@@ -230,7 +238,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Edge scaling coefficient for order sizing (default 70).
+     * Edge scaling coefficient for order sizing (default 65).
      */
     public int edgeScalingFactor() {
         return edgeScalingFactor;

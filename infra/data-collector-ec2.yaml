@@ -1,14 +1,21 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Polymarket Bot Data Collector infrastructure in eu-west-1 (Dublin). Provisions an ECR repository,
-  least-privilege IAM role with SSM Session Manager and Secrets Manager access, encrypted 50 GB gp3
-  EBS volume for Zstandard JSONL stream storage, and a 24/7 t4g.small EC2 instance (Graviton2 ARM64) with Unlimited CPU credits.
+  Polymarket Bot Data Collector Compute Infrastructure in eu-west-1 (Dublin). Provisions a 24/7 t4g.small
+  EC2 instance (Graviton2 ARM64, Unlimited CPU credits) running the Quarkus Market Data Collector directly
+  on Amazon Linux 2023 via systemd (Bare-OS, zero Docker/NAT overhead), with Temurin Java 25, persistent
+  gp3 EBS XFS auto-mounting, non-blocking CloudWatch Agent log streaming, OS kernel TCP/busy-poll tuning,
+  and IMDSv2 token enforcement.
 
 Metadata:
   AWSToolsMetrics:
     AWSAgentToolkit: aws-cloudformation@3
 
 Parameters:
+  BaseStackName:
+    Type: String
+    Default: polymarket-bot-data-base
+    Description: Name of the Data Collector Base Infrastructure CloudFormation stack exporting network, IAM, S3 artifact bucket, EBS volume, and log group resources.
+
   InstanceType:
     Type: String
     Default: t4g.small
@@ -16,244 +23,303 @@ Parameters:
       - t4g.small
       - t4g.medium
       - c7g.large
+      - c8g.large
       - m7g.large
-      - t3.small
-    Description: EC2 instance type (arm64 / Graviton2) for running the Dockerized Quarkus Data Collector.
-
-  EbsVolumeSizeGb:
-    Type: Number
-    Default: 50
-    MinValue: 20
-    MaxValue: 1000
-    Description: Size in GiB of the persistent gp3 EBS volume mounted at /mnt/ebs/polymarket-data.
+    Description: EC2 instance type (arm64 / Graviton) for running the Bare-OS Quarkus Data Collector.
 
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
     Description: Latest Amazon Linux 2023 arm64 AMI ID from SSM Parameter Store.
 
-  PolymarketSecretArn:
-    Type: String
-    Description: ARN of the AWS Secrets Manager secret storing POLYMARKET_API_KEY, POLYMARKET_SECRET, and POLYMARKET_PASSPHRASE.
-
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Default: vpc-0ebc7d75fbfa0bf7f
-    Description: VPC ID in eu-west-1 for the Data Collector security group and instance.
-
   SubnetId:
     Type: AWS::EC2::Subnet::Id
     Default: subnet-0b1537e6f83a86b05
     Description: Public subnet ID in eu-west-1a for the Data Collector EC2 instance.
 
+  PolymarketSecretId:
+    Type: String
+    Default: polymarket-sniper/clob-credentials
+    Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2 and PolyBolt API credentials.
+
+  DeribitSecretId:
+    Type: String
+    Default: polymarket-sniper/deribit-credentials
+    Description: AWS Secrets Manager secret ID storing Deribit v2 API credentials.
+
 Resources:
-  DataCollectorEcrRepository:
-    Type: AWS::ECR::Repository
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Stores versioned Docker images for the Polymarket Bot Data Collector Quarkus application.
-        must: Keep image scanning enabled and retain repository across stack updates.
-    Properties:
-      RepositoryName: !Sub "${AWS::StackName}-repo"
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      EncryptionConfiguration:
-        EncryptionType: AES256
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
-
-  DataCollectorSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Zero-inbound security group for the Data Collector daemon; all management uses AWS Systems Manager (SSM) and all market streams use outbound WSS/HTTPS.
-        must: Do not open inbound SSH port 22 to the internet; allow outbound HTTPS (443) and Binance Spot WebSocket (9443).
-    Properties:
-      GroupDescription: Zero-inbound security group for Polymarket Data Collector EC2 instance
-      VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow outbound traffic for Binance (443/9443), Polymarket (443), ECR, SSM, and Secrets Manager
-
-  DataCollectorIamRole:
-    Type: AWS::IAM::Role
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, pull images from ECR, and read Polymarket API credentials from Secrets Manager.
-        must: Scope Secrets Manager read permission strictly to the PolymarketSecretArn.
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: DataCollectorEcrAndSecretsAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: EcrAuthToken
-                Effect: Allow
-                Action:
-                  - ecr:GetAuthorizationToken
-                Resource: '*'
-              - Sid: EcrPullCollectorImage
-                Effect: Allow
-                Action:
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:BatchGetImage
-                Resource: !GetAtt DataCollectorEcrRepository.Arn
-              - Sid: ReadPolymarketCredentialsSecret
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Ref PolymarketSecretArn
-              - Sid: EbsAttachAndDescribe
-                Effect: Allow
-                Action:
-                  - ec2:DescribeVolumes
-                  - ec2:AttachVolume
-                Resource: '*'
-
-  DataCollectorInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Binds the DataCollectorIamRole to the EC2 instance.
-        must: Reference DataCollectorIamRole.
-    Properties:
-      Roles:
-        - !Ref DataCollectorIamRole
-
-  DataCollectorEbsVolume:
-    Type: AWS::EC2::Volume
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Dedicated persistent gp3 EBS volume for storing compressed .jsonl.zst market streams separately from the root OS volume.
-        must: Must be encrypted, gp3, retained on stack deletion, and created in the same Availability Zone as the EC2 instance.
-        mutability: immutable
-    Properties:
-      AvailabilityZone: !Sub "${AWS::Region}a"
-      VolumeType: gp3
-      Size: !Ref EbsVolumeSizeGb
-      Encrypted: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-ebs-data"
-
   DataCollectorInstance:
     Type: AWS::EC2::Instance
     Metadata:
       com.aws.cloudformation.Context:
-        why: 24/7 EC2 host in eu-west-1 running the Dockerized Quarkus Data Collector with Unlimited CPU credits and IMDSv2 hop limit 2 for container metadata access.
-        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 2) and Unlimited CPU credits to prevent Vert.x event loop throttling.
+        why: 24/7 t4g.small EC2 host in eu-west-1 running the Quarkus Data Collector directly via systemd on Temurin JDK 25 with Unlimited CPU credits, persistent gp3 EBS volume at /mnt/ebs/polymarket-data, OS-level sysctl networking, and CloudWatch Agent log shipping.
+        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 1), Unlimited CPU credits, and preserve existing XFS data on the attached EBS volume without reformatting.
     Properties:
       InstanceType: !Ref InstanceType
       ImageId: !Ref LatestAmiId
       AvailabilityZone: !Sub "${AWS::Region}a"
       SubnetId: !Ref SubnetId
-      IamInstanceProfile: !Ref DataCollectorInstanceProfile
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${BaseStackName}-InstanceProfileName"
       SecurityGroupIds:
-        - !GetAtt DataCollectorSecurityGroup.GroupId
+        - Fn::ImportValue: !Sub "${BaseStackName}-SecurityGroupId"
       CreditSpecification:
         CPUCredits: unlimited
       MetadataOptions:
         HttpEndpoint: enabled
         HttpTokens: required
-        HttpPutResponseHopLimit: 2
+        HttpPutResponseHopLimit: 1
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euxo pipefail
-          dnf update -y
-          dnf install -y docker jq awscli
-          systemctl enable --now docker
-          usermod -aG docker ec2-user || true
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+              dnf update -y
+              dnf install -y jq awscli amazon-cloudwatch-agent tar gzip logrotate xfsprogs
 
-          # Retrieve IMDSv2 token, Instance ID, and Region
-          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-          REGION=$(echo "$AZ" | sed 's/[a-z]$//')
+              # Install Eclipse Temurin 25 (ARM64 / aarch64) directly to /usr/lib/jvm/temurin-25
+              mkdir -p /usr/lib/jvm/temurin-25
+              curl -fsSL "https://api.adoptium.net/v3/binary/latest/25/ga/linux/aarch64/jre/hotspot/normal/eclipse" \
+                -o /tmp/temurin-25-jre-aarch64.tar.gz
+              tar -xzf /tmp/temurin-25-jre-aarch64.tar.gz -C /usr/lib/jvm/temurin-25 --strip-components=1
+              rm -f /tmp/temurin-25-jre-aarch64.tar.gz
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/local/bin/java
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/bin/java
 
-          # Attach the persistent 50 GB gp3 EBS volume when available
-          for i in $(seq 1 60); do
-            VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "${DataCollectorEbsVolume}" --query "Volumes[0].State" --output text || true)
-            if [ "$VOL_STATE" = "available" ]; then
-              aws ec2 attach-volume --region "$REGION" --volume-id "${DataCollectorEbsVolume}" --instance-id "$INSTANCE_ID" --device /dev/sdf || true
-              break
-            elif [ "$VOL_STATE" = "in-use" ]; then
-              ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "${DataCollectorEbsVolume}" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
-              if [ "$ATTACHED_ID" = "$INSTANCE_ID" ]; then
-                break
+              # Create dedicated unprivileged system user and directories for Polymarket Data Collector
+              id -u polymarket >/dev/null 2>&1 || useradd --system --home-dir /opt/polymarket-data --shell /sbin/nologin polymarket
+              usermod -aG polymarket ec2-user || true
+              mkdir -p /opt/polymarket-data /var/log/polymarket-data
+              touch /var/log/polymarket-data/data-collector.log
+              chown -R polymarket:polymarket /opt/polymarket-data /var/log/polymarket-data
+
+              # Configure SSH public key for ec2-user (used by scripts/download-collector-data.ps1 & .sh over SSM)
+              mkdir -p /home/ec2-user/.ssh
+              if ! grep -q "amuradon@gmail.com" /home/ec2-user/.ssh/authorized_keys 2>/dev/null; then
+                echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZCdXFERd9b2J0Y/AaI6cNEzlHOQIXHP6ffee948/aR amuradon@gmail.com' >> /home/ec2-user/.ssh/authorized_keys
               fi
-            fi
-            sleep 2
-          done
+              chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+              chmod 700 /home/ec2-user/.ssh
+              chmod 600 /home/ec2-user/.ssh/authorized_keys
 
-          # Wait for the attached secondary EBS volume (/dev/sdf -> nvme1n1 on Nitro)
-          DATA_DEV=""
-          for i in $(seq 1 30); do
-            for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
-              if [ -b "$candidate" ]; then
-                ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
-                if [ "$candidate" != "$ROOT_DEV" ]; then
-                  DATA_DEV="$candidate"
-                  break 2
+              # Create idempotent EBS volume attach & XFS mount helper (automatically detaches from replaced instance if needed)
+              cat << 'EOF' > /usr/local/bin/mount-polymarket-ebs.sh
+              #!/bin/bash
+              set -euo pipefail
+              REGION="${AWS::Region}"
+              VOLUME_ID="${EbsVolumeId}"
+
+              if mountpoint -q /mnt/ebs/polymarket-data; then
+                mkdir -p /mnt/ebs/polymarket-data/collector
+                chown -R polymarket:polymarket /mnt/ebs/polymarket-data
+                chmod -R 2775 /mnt/ebs/polymarket-data
+                exit 0
+              fi
+
+              TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+              VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+              if [ "$VOL_STATE" = "in-use" ]; then
+                ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
+                if [ -n "$ATTACHED_ID" ] && [ "$ATTACHED_ID" != "None" ] && [ "$ATTACHED_ID" != "$INSTANCE_ID" ]; then
+                  echo "Detaching EBS volume $VOLUME_ID from previous instance $ATTACHED_ID..."
+                  aws ec2 detach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$ATTACHED_ID" || true
+                  for i in $(seq 1 120); do
+                    VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+                    if [ "$VOL_STATE" = "available" ]; then
+                      break
+                    fi
+                    sleep 1
+                  done
                 fi
               fi
-            done
-            sleep 2
-          done
 
-          mkdir -p /mnt/ebs/polymarket-data/collector
-          if [ -n "$DATA_DEV" ]; then
-            if ! blkid "$DATA_DEV"; then
-              mkfs.xfs "$DATA_DEV"
-            fi
-            UUID=$(blkid -s UUID -o value "$DATA_DEV")
-            if ! grep -q "$UUID" /etc/fstab; then
-              echo "UUID=$UUID /mnt/ebs/polymarket-data xfs defaults,nofail 0 2" >> /etc/fstab
-            fi
-            mount -a
-          fi
+              if [ "$VOL_STATE" = "available" ]; then
+                aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/sdf
+              fi
 
-          mkdir -p /mnt/ebs/polymarket-data/collector
-          chown -R 185:185 /mnt/ebs/polymarket-data
-          chmod -R 775 /mnt/ebs/polymarket-data
+              # Wait for the attached secondary EBS volume (/dev/sdf -> nvme1n1 on Nitro)
+              DATA_DEV=""
+              for i in $(seq 1 60); do
+                for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+                  if [ -b "$candidate" ]; then
+                    ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
+                    if [ "$candidate" != "$ROOT_DEV" ]; then
+                      DATA_DEV="$candidate"
+                      break 2
+                    fi
+                  fi
+                done
+                sleep 0.5
+              done
 
-          # Configure SSH public key for ec2-user
-          mkdir -p /home/ec2-user/.ssh
-          echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZCdXFERd9b2J0Y/AaI6cNEzlHOQIXHP6ffee948/aR amuradon@gmail.com' >> /home/ec2-user/.ssh/authorized_keys
-          chown -R ec2-user:ec2-user /home/ec2-user/.ssh
-          chmod 700 /home/ec2-user/.ssh
-          chmod 600 /home/ec2-user/.ssh/authorized_keys
+              if [ -z "$DATA_DEV" ]; then
+                echo "Error: Secondary EBS block device for volume $VOLUME_ID not found." >&2
+                exit 1
+              fi
+
+              mkdir -p /mnt/ebs/polymarket-data
+              if ! blkid "$DATA_DEV" >/dev/null 2>&1; then
+                mkfs.xfs "$DATA_DEV"
+              fi
+              UUID=$(blkid -s UUID -o value "$DATA_DEV")
+              if ! grep -q "$UUID" /etc/fstab; then
+                echo "UUID=$UUID /mnt/ebs/polymarket-data xfs defaults,nofail 0 2" >> /etc/fstab
+              fi
+              if ! mountpoint -q /mnt/ebs/polymarket-data; then
+                mount /mnt/ebs/polymarket-data || mount -a
+              fi
+
+              mkdir -p /mnt/ebs/polymarket-data/collector
+              chown -R polymarket:polymarket /mnt/ebs/polymarket-data
+              chmod -R 2775 /mnt/ebs/polymarket-data
+              EOF
+              chmod +x /usr/local/bin/mount-polymarket-ebs.sh
+              /usr/local/bin/mount-polymarket-ebs.sh || true
+
+              # Configure logrotate for /var/log/polymarket-data/data-collector.log
+              cat << 'EOF' > /etc/logrotate.d/polymarket-data
+              /var/log/polymarket-data/data-collector.log {
+                  daily
+                  rotate 7
+                  size 100M
+                  compress
+                  delaycompress
+                  missingok
+                  notifempty
+                  copytruncate
+              }
+              EOF
+
+              # Configure Amazon CloudWatch Agent for systemd service and host logs
+              mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+              cat << 'EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+              {
+                "logs": {
+                  "logs_collected": {
+                    "files": {
+                      "collect_list": [
+                        {
+                          "file_path": "/var/log/polymarket-data/data-collector.log",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "polymarket-data"
+                        },
+                        {
+                          "file_path": "/var/log/cloud-init-output.log",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "{instance_id}/cloud-init-output"
+                        },
+                        {
+                          "file_path": "/var/log/messages",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "{instance_id}/messages"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+              EOF
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config -m ec2 \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+              # Tune Linux kernel TCP buffers, busy-polling, and direct port 443 binding (zero iptables/nf_conntrack)
+              cat << 'EOF' > /etc/sysctl.d/99-polymarket-network.conf
+              net.core.rmem_default = 16777216
+              net.core.rmem_max = 33554432
+              net.ipv4.tcp_rmem = 4096 16777216 33554432
+              net.ipv4.tcp_moderate_rcvbuf = 1
+              net.ipv4.tcp_slow_start_after_idle = 0
+              net.core.busy_read = 50
+              net.core.busy_poll = 50
+              net.core.netdev_max_backlog = 30000
+              net.ipv4.ip_unprivileged_port_start = 443
+              EOF
+              sysctl --system || true
+
+              # Configure systemd service for Bare-OS 24/7 Market Data Collector execution
+              cat << 'EOF' > /etc/systemd/system/polymarket-data.service
+              [Unit]
+              Description=Polymarket Bot Market Data Collector (Quarkus Bare-OS)
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=simple
+              User=polymarket
+              Group=polymarket
+              UMask=0002
+              WorkingDirectory=/opt/polymarket-data
+              Environment="QUARKUS_PROFILE=prod"
+              Environment="AWS_REGION=${AWS::Region}"
+              Environment="POLYMARKET_COLLECTOR_DATA_DIR=/mnt/ebs/polymarket-data/collector"
+              Environment="POLYMARKET_CREDENTIALS_SECRET_ID=${PolymarketSecretId}"
+              Environment="DERIBIT_CREDENTIALS_SECRET_ID=${DeribitSecretId}"
+              AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              Nice=-20
+              LimitMEMLOCK=infinity
+              LimitNOFILE=1048576
+              ExecStartPre=+/usr/local/bin/mount-polymarket-ebs.sh
+              ExecStart=/usr/lib/jvm/temurin-25/bin/java \
+                -XX:+UseZGC \
+                -XX:+AlwaysPreTouch \
+                -XX:+UseTransparentHugePages \
+                -XX:+UseThreadPriorities \
+                -Xms1g \
+                -Xmx1g \
+                -XX:+DisableExplicitGC \
+                --enable-native-access=ALL-UNNAMED \
+                -Dquarkus.http.host=0.0.0.0 \
+                -Dquarkus.http.port=443 \
+                -Djava.util.logging.manager=org.jboss.logmanager.LogManager \
+                -jar /opt/polymarket-data/quarkus-run.jar
+              StandardOutput=append:/var/log/polymarket-data/data-collector.log
+              StandardError=append:/var/log/polymarket-data/data-collector.log
+              Restart=always
+              RestartSec=2
+              TimeoutStopSec=15
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+
+              # Create atomic S3 release deployment script invoked via AWS SSM Run Command
+              cat << 'EOF' > /usr/local/bin/deploy-polymarket-data.sh
+              #!/bin/bash
+              set -euo pipefail
+              S3_ARTIFACT_URI="${!1:?Usage: deploy-polymarket-data.sh s3://<bucket>/releases/data-<version>.tar.gz}"
+              TMP_ARCHIVE="/tmp/polymarket-data-release.tar.gz"
+              STAGING_DIR="/opt/polymarket-data.staging"
+
+              aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
+              rm -rf "$STAGING_DIR"
+              mkdir -p "$STAGING_DIR"
+              tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
+              rm -f "$TMP_ARCHIVE"
+              chown -R polymarket:polymarket "$STAGING_DIR"
+
+              /usr/local/bin/mount-polymarket-ebs.sh
+
+              systemctl stop polymarket-data || true
+              rm -rf /opt/polymarket-data/*
+              cp -a "$STAGING_DIR"/. /opt/polymarket-data/
+              rm -rf "$STAGING_DIR"
+              chown -R polymarket:polymarket /opt/polymarket-data
+
+              systemctl daemon-reload
+              systemctl enable --now polymarket-data
+              systemctl restart polymarket-data
+              EOF
+              chmod +x /usr/local/bin/deploy-polymarket-data.sh
+            - LogGroupName:
+                Fn::ImportValue: !Sub "${BaseStackName}-LogGroupName"
+              EbsVolumeId:
+                Fn::ImportValue: !Sub "${BaseStackName}-EbsVolumeId"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
@@ -262,12 +328,10 @@ Outputs:
   InstanceId:
     Description: EC2 Instance ID of the Data Collector host
     Value: !Ref DataCollectorInstance
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceId"
   PublicIp:
     Description: Public IPv4 address of the Data Collector EC2 instance
     Value: !GetAtt DataCollectorInstance.PublicIp
-  EcrRepositoryUri:
-    Description: Amazon ECR Repository URI for pushing the Data Collector Docker image
-    Value: !GetAtt DataCollectorEcrRepository.RepositoryUri
-  EbsVolumeId:
-    Description: Persistent gp3 EBS Volume ID mounted at /mnt/ebs/polymarket-data
-    Value: !Ref DataCollectorEbsVolume
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicIp"

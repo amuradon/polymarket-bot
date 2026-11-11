@@ -1,10 +1,10 @@
 package cz.polymarket.bot.data.storage;
 
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -16,18 +16,20 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages separate daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for Polymarket PolyBolt
- * {@code price.crypto} and {@code price.crypto.twap} (60s) streams, automatically rotating files at UTC midnight.
+ * {@code price.crypto} and {@code price.crypto.twap} (60s) streams, automatically rotating files at UTC midnight
+ * with per-stream lock isolation and zero-decode {@code byte[]} writing.
  */
 @ApplicationScoped
 public class DailyPolyBoltStorageManager {
 
-    private static final Logger LOG = Logger.getLogger(DailyPolyBoltStorageManager.class);
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final String STREAM_PRICE_CRYPTO = "price_crypto";
     private static final String STREAM_TWAP_60S = "price_crypto_twap_60s";
 
     private final Path baseDataDir;
     private final String polyBoltSymbol;
+    private final Object cryptoLock = new Object();
+    private final Object twapLock = new Object();
     private final AtomicLong totalRecordsWritten = new AtomicLong(0L);
 
     private LocalDate activeCryptoDate;
@@ -57,17 +59,42 @@ public class DailyPolyBoltStorageManager {
      * @param rawJson         unmodified raw WebSocket JSON payload
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
-    public synchronized void recordCryptoPrice(String rawJson, long recvTimestampMs) {
+    public void recordCryptoPrice(String rawJson, long recvTimestampMs) {
         if (!isJsonObject(rawJson)) {
             return;
         }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
-        try {
-            ZstdJsonlWriter writer = getOrRotateCryptoWriter(utcDate);
-            writer.writeBinanceEvent(recvTimestampMs, rawJson);
-            totalRecordsWritten.incrementAndGet();
-        } catch (IOException e) {
-            LOG.errorf(e, "Failed to write PolyBolt price.crypto event to daily Zstd file");
+        synchronized (cryptoLock) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateCryptoWriter(utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write PolyBolt price.crypto event to daily Zstd file");
+            }
+        }
+    }
+
+    /**
+     * Records a raw UTF-8 {@code byte[]} PolyBolt {@code price.crypto} stream payload directly into its
+     * UTC daily {@code .jsonl.zst} file without allocating a {@link String}.
+     *
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public void recordCryptoPriceBytes(byte[] rawPayloadBytes, long recvTimestampMs) {
+        if (!isJsonObjectBytes(rawPayloadBytes)) {
+            return;
+        }
+        LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
+        synchronized (cryptoLock) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateCryptoWriter(utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write PolyBolt price.crypto byte event to daily Zstd file");
+            }
         }
     }
 
@@ -77,39 +104,71 @@ public class DailyPolyBoltStorageManager {
      * @param rawJson         unmodified raw WebSocket JSON payload
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
-    public synchronized void recordTwap(String rawJson, long recvTimestampMs) {
+    public void recordTwap(String rawJson, long recvTimestampMs) {
         if (!isJsonObject(rawJson)) {
             return;
         }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
-        try {
-            ZstdJsonlWriter writer = getOrRotateTwapWriter(utcDate);
-            writer.writeBinanceEvent(recvTimestampMs, rawJson);
-            totalRecordsWritten.incrementAndGet();
-        } catch (IOException e) {
-            LOG.errorf(e, "Failed to write PolyBolt price.crypto.twap event to daily Zstd file");
+        synchronized (twapLock) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateTwapWriter(utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write PolyBolt price.crypto.twap event to daily Zstd file");
+            }
+        }
+    }
+
+    /**
+     * Records a raw UTF-8 {@code byte[]} PolyBolt {@code price.crypto.twap} (60s) stream payload directly into its
+     * UTC daily {@code .jsonl.zst} file without allocating a {@link String}.
+     *
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public void recordTwapBytes(byte[] rawPayloadBytes, long recvTimestampMs) {
+        if (!isJsonObjectBytes(rawPayloadBytes)) {
+            return;
+        }
+        LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
+        synchronized (twapLock) {
+            try {
+                ZstdJsonlWriter writer = getOrRotateTwapWriter(utcDate);
+                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                totalRecordsWritten.incrementAndGet();
+            } catch (IOException e) {
+                Log.errorf(e, "Failed to write PolyBolt price.crypto.twap byte event to daily Zstd file");
+            }
         }
     }
 
     /**
      * Flushes all currently open daily PolyBolt writers to disk.
      */
-    public synchronized void flushAll() {
-        flushWriter(activeCryptoWriter, STREAM_PRICE_CRYPTO);
-        flushWriter(activeTwapWriter, STREAM_TWAP_60S);
+    public void flushAll() {
+        synchronized (cryptoLock) {
+            flushWriter(activeCryptoWriter, STREAM_PRICE_CRYPTO);
+        }
+        synchronized (twapLock) {
+            flushWriter(activeTwapWriter, STREAM_TWAP_60S);
+        }
     }
 
     /**
      * Closes all currently open daily PolyBolt writers cleanly.
      */
-    public synchronized void closeAll() {
-        closeWriter(activeCryptoWriter, STREAM_PRICE_CRYPTO);
-        activeCryptoWriter = null;
-        activeCryptoDate = null;
-
-        closeWriter(activeTwapWriter, STREAM_TWAP_60S);
-        activeTwapWriter = null;
-        activeTwapDate = null;
+    public void closeAll() {
+        synchronized (cryptoLock) {
+            closeWriter(activeCryptoWriter, STREAM_PRICE_CRYPTO);
+            activeCryptoWriter = null;
+            activeCryptoDate = null;
+        }
+        synchronized (twapLock) {
+            closeWriter(activeTwapWriter, STREAM_TWAP_60S);
+            activeTwapWriter = null;
+            activeTwapDate = null;
+        }
     }
 
     /**
@@ -146,7 +205,7 @@ public class DailyPolyBoltStorageManager {
         Path targetPath = resolveDailyFilePath(STREAM_PRICE_CRYPTO, utcDate);
         activeCryptoWriter = new ZstdJsonlWriter(targetPath);
         activeCryptoDate = utcDate;
-        LOG.infof("Opened PolyBolt %s daily stream file: %s", STREAM_PRICE_CRYPTO, targetPath);
+        Log.infof("Opened PolyBolt %s daily stream file: %s", STREAM_PRICE_CRYPTO, targetPath);
         return activeCryptoWriter;
     }
 
@@ -158,7 +217,7 @@ public class DailyPolyBoltStorageManager {
         Path targetPath = resolveDailyFilePath(STREAM_TWAP_60S, utcDate);
         activeTwapWriter = new ZstdJsonlWriter(targetPath);
         activeTwapDate = utcDate;
-        LOG.infof("Opened PolyBolt %s daily stream file: %s", STREAM_TWAP_60S, targetPath);
+        Log.infof("Opened PolyBolt %s daily stream file: %s", STREAM_TWAP_60S, targetPath);
         return activeTwapWriter;
     }
 
@@ -167,7 +226,7 @@ public class DailyPolyBoltStorageManager {
             try {
                 writer.flush();
             } catch (IOException e) {
-                LOG.warnf("Failed to flush PolyBolt %s writer: %s", label, e.getMessage());
+                Log.warnf("Failed to flush PolyBolt %s writer: %s", label, e.getMessage());
             }
         }
     }
@@ -177,12 +236,25 @@ public class DailyPolyBoltStorageManager {
             try {
                 writer.close();
             } catch (IOException e) {
-                LOG.warnf("Failed to close PolyBolt %s writer: %s", label, e.getMessage());
+                Log.warnf("Failed to close PolyBolt %s writer: %s", label, e.getMessage());
             }
         }
     }
 
     private static boolean isJsonObject(String rawJson) {
         return rawJson != null && !rawJson.isBlank() && rawJson.stripLeading().charAt(0) == '{';
+    }
+
+    private static boolean isJsonObjectBytes(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return false;
+        }
+        for (byte b : bytes) {
+            int u = b & 0xFF;
+            if (u > ' ') {
+                return u == '{';
+            }
+        }
+        return false;
     }
 }

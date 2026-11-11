@@ -27,10 +27,10 @@ class DailyPolyBoltStorageManagerTest {
         long day2Ts = Instant.parse("2026-10-11T00:00:00.100Z").toEpochMilli();
 
         manager.recordCryptoPrice("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":1,\"payload\":{\"symbol\":\"btcusd\",\"value\":78100.0}}", day1Ts);
-        manager.recordCryptoPrice("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":2,\"payload\":{\"symbol\":\"btcusd\",\"value\":78200.0}}", day2Ts);
+        manager.recordCryptoPriceBytes("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":2,\"payload\":{\"symbol\":\"btcusd\",\"value\":78200.0}}".getBytes(java.nio.charset.StandardCharsets.UTF_8), day2Ts);
 
         manager.recordTwap("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":1,\"payload\":{\"symbol\":\"btcusd\",\"value\":78150.0,\"window_seconds\":60}}", day1Ts);
-        manager.recordTwap("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":2,\"payload\":{\"symbol\":\"btcusd\",\"value\":78250.0,\"window_seconds\":60}}", day2Ts);
+        manager.recordTwapBytes("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":2,\"payload\":{\"symbol\":\"btcusd\",\"value\":78250.0,\"window_seconds\":60}}".getBytes(java.nio.charset.StandardCharsets.UTF_8), day2Ts);
 
         manager.closeAll();
 

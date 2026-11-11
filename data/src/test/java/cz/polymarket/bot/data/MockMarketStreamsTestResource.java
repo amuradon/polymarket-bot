@@ -41,21 +41,22 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
         vertx = Vertx.vertx();
         server = vertx.createHttpServer()
                 .requestHandler(req -> {
-                    if (req.path().equals("/gamma/markets")) {
-                        String slug = req.getParam("slug");
-                        if (slug != null && !slug.isBlank()) {
+                    String reqPath = req.path();
+                    String prefix = "/gamma/markets/slug/";
+                    if (reqPath.startsWith(prefix) && reqPath.length() > prefix.length()) {
+                        String slug = reqPath.substring(prefix.length());
+                        if (!slug.isBlank()) {
                             req.response()
                                     .putHeader("Content-Type", "application/json")
                                     .end("""
-                                            [
-                                              {
-                                                "id": "m-%s",
-                                                "slug": "%s",
-                                                "clobTokenIds": ["token_up_%s", "token_down_%s"],
-                                                "closed": false
-                                              }
-                                            ]
-                                            """.formatted(slug, slug, slug, slug));
+                                            {
+                                              "id": "m-%s",
+                                              "conditionId": "0xcond_%s",
+                                              "slug": "%s",
+                                              "clobTokenIds": ["token_up_%s", "token_down_%s"],
+                                              "closed": false
+                                            }
+                                            """.formatted(slug, slug, slug, slug, slug));
                             return;
                         }
                     }

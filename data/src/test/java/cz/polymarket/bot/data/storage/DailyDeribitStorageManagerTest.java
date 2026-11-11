@@ -32,7 +32,7 @@ class DailyDeribitStorageManagerTest {
         String tradePayload2 = "{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.raw\",\"data\":[{\"price\":78200.0,\"amount\":20.0}]}}";
 
         manager.record(tradePayload1, day1Ts);
-        manager.record(tradePayload2, day2Ts);
+        manager.recordBytes(tradePayload2.getBytes(java.nio.charset.StandardCharsets.UTF_8), day2Ts);
 
         manager.closeAll();
 

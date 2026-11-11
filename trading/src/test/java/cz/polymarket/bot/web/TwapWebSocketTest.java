@@ -1,9 +1,14 @@
 package cz.polymarket.bot.web;
 
+import cz.polymarket.bot.domain.Timeframe;
+import cz.polymarket.bot.domain.TwapPoint;
+import cz.polymarket.bot.domain.TwapUpdate;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
@@ -18,6 +23,9 @@ class TwapWebSocketTest {
 
     @TestHTTPResource("/ws/twap")
     URI websocketUri;
+
+    @Inject
+    TwapWebSocketEndpoint endpoint;
 
     @Test
     void shouldConnectToTwapWebSocketAndReceiveOrSendMessages() throws Exception {
@@ -41,7 +49,16 @@ class TwapWebSocketTest {
         webSocket.sendText("{\"action\":\"setTimeframe\",\"timeframe\":\"15m\"}", true)
                 .get(5, TimeUnit.SECONDS);
 
-        // Wait up to 5 seconds for a 1s scheduled TWAP update frame
+        // Give the server a moment to process the setTimeframe frame, then broadcast a synthetic 15m update
+        Thread.sleep(50);
+        endpoint.broadcastUpdate(new TwapUpdate(
+                Timeframe.FIFTEEN_MINUTES,
+                1788444000L,
+                1788444900L,
+                new BigDecimal("78800.00"),
+                new TwapPoint(1788444001L, new BigDecimal("78805.00"), new BigDecimal("78810.00")),
+                false));
+
         String received = receivedFuture.get(5, TimeUnit.SECONDS);
         assertThat(received).isNotNull();
         assertThat(received).contains("timeframe");

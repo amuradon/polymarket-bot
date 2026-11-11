@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Telegram Alert Base Infrastructure in eu-west-1 (Dublin). Provisions the Amazon ECR
+  repository for Java 25 Telegram Alert Lambda container images and least-privilege IAM execution role
+  with Secrets Manager access.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  TelegramSecretId:
+    Type: String
+    Default: polymarket-sniper/telegram-credentials
+    Description: AWS Secrets Manager secret ID storing Telegram Bot authentication credentials (bot_token and chat_id).
+
+Resources:
+  TelegramAlertEcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Docker container images for the Java 25 Telegram Alert Lambda function.
+        must: Keep image scanning enabled and retain repository across stack updates.
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-telegram-alert-repo"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 alert lambda images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  TelegramAlertRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Grants least-privilege execution permissions for the Java 25 Telegram alerting Lambda function and access to Secrets Manager.
+        must: Scope Secrets Manager access strictly to the TelegramSecretId prefix.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-telegram-secret-access"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TelegramSecretId}*"
+
+Outputs:
+  TelegramAlertEcrRepositoryUri:
+    Description: Amazon ECR Repository URI for the Telegram Alert Lambda Docker image
+    Value: !GetAtt TelegramAlertEcrRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-TelegramAlertEcrRepositoryUri"
+  TelegramAlertEcrRepositoryArn:
+    Description: Amazon ECR Repository ARN for the Telegram Alert Lambda Docker image
+    Value: !GetAtt TelegramAlertEcrRepository.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TelegramAlertEcrRepositoryArn"
+  TelegramAlertRoleArn:
+    Description: IAM Role ARN for the Telegram Alert Lambda function
+    Value: !GetAtt TelegramAlertRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TelegramAlertRoleArn"

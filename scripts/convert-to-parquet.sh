@@ -177,8 +177,6 @@ get_stream_type() {
         echo "binance-futures-depthpartial"
     elif [[ "$path_lower" =~ /deribit/ ]] || [[ "$path_lower" =~ trades\.btc-perpetual ]]; then
         echo "deribit-trades"
-    elif [[ "$path_lower" =~ /kraken/spot/.*/trades/ ]] || [[ "$path_lower" =~ kraken.*trades ]]; then
-        echo "kraken-spot-trades"
     elif [[ "$path_lower" =~ price_crypto_twap ]]; then
         echo "polymarket-price-twap"
     elif [[ "$path_lower" =~ price_crypto ]]; then
@@ -286,26 +284,6 @@ FROM (
     FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 )
 ORDER BY ts ASC
-EOF
-            ;;
-        "kraken-spot-trades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(epoch_ms(CAST(t->>'timestamp' AS TIMESTAMPTZ)) AS UBIGINT) AS trade_timestamp,
-    t->>'symbol' AS symbol,
-    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
-    t->>'side' AS side,
-    t->>'ord_type' AS ord_type,
-    CAST(t->>'price' AS DOUBLE) AS price,
-    CAST(t->>'qty' AS DOUBLE) AS qty,
-    t->>'timestamp' AS timestamp
-FROM (
-    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
-    FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-    WHERE payload->>'channel' = 'trade' AND payload->>'type' IN ('update', 'snapshot')
-)
-ORDER BY ts ASC, trade_id ASC
 EOF
             ;;
         "polymarket-price-crypto")
@@ -536,15 +514,24 @@ while IFS=$'\t' read -r src_path src_size; do
 
     SELECT_QUERY=$(get_convert_query "$stream_type" "$src_path")
 
+    effective_threads=$THREADS
+    effective_row_group_size=50000
+    if [ "$stream_type" = "binance-futures-depthdiff" ] || [ "$stream_type" = "binance-futures-depthpartial" ]; then
+        if [ "$effective_threads" -gt 2 ]; then
+            effective_threads=2
+        fi
+        effective_row_group_size=25000
+    fi
+
     cat << EOF > "$TEMP_SQL_FILE"
 SET max_memory = '$MEMORY_LIMIT';
 SET temp_directory = '$DUCKDB_TEMP_DIR';
-SET threads = $THREADS;
+SET threads = $effective_threads;
 SET preserve_insertion_order = true;
 
 COPY (
 $SELECT_QUERY
-) TO '$temp_parquet_path' (FORMAT PARQUET, COMPRESSION $COMPRESSION);
+) TO '$temp_parquet_path' (FORMAT PARQUET, COMPRESSION $COMPRESSION, ROW_GROUP_SIZE $effective_row_group_size);
 EOF
 
     if ! "$DUCKDB_PATH" -c ".read '$TEMP_SQL_FILE'" >/dev/null 2>&1; then

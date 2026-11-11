@@ -15,7 +15,6 @@ import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
-import cz.polymarket.bot.strategy.TWAPArbitrageStrategy;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.runtime.ShutdownEvent;
@@ -25,7 +24,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
+import io.quarkus.logging.Log;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -42,7 +41,6 @@ import java.util.concurrent.atomic.AtomicReference;
 @ApplicationScoped
 public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
-    private static final Logger LOG = Logger.getLogger(PaperTradingEngine.class);
     private static final double TAKER_FEE_RATE = 0.07;
 
     private final StrategyRegistry strategyRegistry;
@@ -98,7 +96,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
         this.activeStrategy = this.strategyRegistry.getStrategy(this.strategyName);
         this.activeStrategy.init(this);
-        LOG.infof("Initialized PaperTradingEngine with strategy '%s' (orderLatencyMs: %d ms)",
+        Log.infof("Initialized PaperTradingEngine with strategy '%s' (orderLatencyMs: %d ms)",
                 this.activeStrategy.getName(), this.orderLatencyMs);
     }
 
@@ -109,7 +107,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     void onStart(@Observes StartupEvent ev) {
         if (!requiresTwapEngine()) {
-            LOG.infof("Active strategy '%s' does not require TWAP_ENGINE; skipping TwapEngine listener and Binance historical seeding",
+            Log.infof("Active strategy '%s' does not require TWAP_ENGINE; skipping TwapEngine listener and Binance historical seeding",
                     activeStrategy.getName());
             return;
         }
@@ -124,7 +122,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         }
 
         if (twapEngine != null) {
-            LOG.infof("Registering PaperTradingEngine listener with TwapEngine...");
+            Log.infof("Registering PaperTradingEngine listener with TwapEngine...");
             twapEngine.registerListener(this::onTwapUpdate);
         }
     }
@@ -141,11 +139,11 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                         count++;
                     }
                 }
-                LOG.infof("Seeded %d historical 15m candles into active strategy '%s'",
+                Log.infof("Seeded %d historical 15m candles into active strategy '%s'",
                         count, activeStrategy.getName());
             }
         } catch (Exception e) {
-            LOG.warnf("Failed to seed initial candles from Binance: %s", e.getMessage());
+            Log.warnf("Failed to seed initial candles from Binance: %s", e.getMessage());
         }
     }
 
@@ -208,18 +206,32 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         double shares = command.size().doubleValue();
         double fillPrice = requestedPrice;
 
-        // If order book quote is available, ensure fill reflects ask side after latency
+        // If order book quote is available, fill at current bestAsk if within limit price, or reject if ask exceeded limit
         if (latestQuote != null) {
             boolean isDown = command.token().toLowerCase().contains("down");
             double bestAsk = isDown ? latestQuote.bestAskDown() : latestQuote.bestAskUp();
             if (bestAsk > 0) {
-                fillPrice = Math.max(requestedPrice, bestAsk);
+                if (bestAsk > requestedPrice + 1e-4) {
+                    Log.warnf("Paper BUY order %s rejected: bestAsk %.4f exceeds limit price %.4f",
+                            command.clientOrderId(), bestAsk, requestedPrice);
+                    activeStrategy.onExecutionReport(new ExecutionReport(
+                            command.clientOrderId(),
+                            "paper-reject-" + UUID.randomUUID(),
+                            "REJECTED",
+                            BigDecimal.ZERO,
+                            BigDecimal.ZERO,
+                            System.currentTimeMillis(),
+                            "Best ask exceeds limit price"
+                    ));
+                    return;
+                }
+                fillPrice = bestAsk;
             }
         }
 
         double sizeUsd = fillPrice * shares;
         if (repository.getCurrentBalance() < sizeUsd) {
-            LOG.warnf("Insufficient virtual balance ($%.2f) for trade size $%.2f",
+            Log.warnf("Insufficient virtual balance ($%.2f) for trade size $%.2f",
                     repository.getCurrentBalance(), sizeUsd);
             activeStrategy.onExecutionReport(new ExecutionReport(
                     command.clientOrderId(),
@@ -271,14 +283,14 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 "Virtual fill after " + orderLatencyMs + "ms latency"
         );
         activeStrategy.onExecutionReport(report);
-        LOG.infof("Opened paper position: %s %s @ %.4f ($%.2f, fee: $%.4f)",
+        Log.infof("Opened paper position: %s %s @ %.4f ($%.2f, fee: $%.4f)",
                 command.clientOrderId(), side, fillPrice, sizeUsd, entryFee);
     }
 
     private void executeSellOrder(OrderCommand command) {
         PaperPosition pos = activePosition.get();
         if (pos == null) {
-            LOG.warnf("Ignoring SELL order %s because no active position exists", command.clientOrderId());
+            Log.warnf("Ignoring SELL order %s because no active position exists", command.clientOrderId());
             return;
         }
 
@@ -399,7 +411,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         repository.recordTrade(trade);
         openPositions.remove(pos);
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
-        LOG.infof("Closed paper trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
+        Log.infof("Closed paper trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, newBalance);
     }
 
@@ -415,8 +427,12 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         }
 
         long start = update.candleStart();
-        if (start != activeCandleStart.get()) {
-            if (activeCandleStart.get() > 0 && (currentSpotPrice > 0 || twapOpenPrice > 0)) {
+        long currentActiveStart = activeCandleStart.get();
+        if (currentActiveStart > 0L && start < currentActiveStart) {
+            return;
+        }
+        if (start != currentActiveStart) {
+            if (currentActiveStart > 0 && (currentSpotPrice > 0 || twapOpenPrice > 0)) {
                 double finalTwap = (update.point() != null && update.point().twap() != null)
                         ? update.point().twap().doubleValue()
                         : currentSpotPrice;
@@ -495,21 +511,26 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 ? activeStrategy.getTimeframe().getDurationSeconds()
                 : 900L;
         long candleStartSec = (effectiveTsMs / 1000L / durationSec) * durationSec;
+        long currentActiveStart = activeCandleStart.get();
+        if (currentActiveStart > 0L && candleStartSec < currentActiveStart) {
+            activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
+            return;
+        }
 
-        if (activeCandleStart.get() > 0 && candleStartSec != activeCandleStart.get()) {
+        if (currentActiveStart > 0L && candleStartSec > currentActiveStart) {
             if (twapOpenPrice > 0.0) {
                 TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
                 resolveCandle(outcome, twapPrice);
             } else {
-                LOG.warnf("Skipping candle resolution for interval %d: target price was missing from PolyBolt 60s TWAP stream",
-                        activeCandleStart.get());
+                Log.warnf("Skipping candle resolution for interval %d: target price was missing from PolyBolt 60s TWAP stream",
+                        currentActiveStart);
                 openPositions.clear();
                 activePosition.set(null);
             }
             activeCandleStart.set(candleStartSec);
             activeCandleEnd.set(candleStartSec + durationSec);
             twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-        } else if (activeCandleStart.get() == 0) {
+        } else if (currentActiveStart == 0L) {
             activeCandleStart.set(candleStartSec);
             activeCandleEnd.set(candleStartSec + durationSec);
             twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
@@ -580,7 +601,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         candleLow = 0.0;
         currentTimestampSec = 0;
         latestQuote = null;
-        LOG.info("Reset PaperTradingEngine internal state");
+        Log.info("Reset PaperTradingEngine internal state");
     }
 
     public String getActiveStrategyName() {

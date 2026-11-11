@@ -15,6 +15,7 @@ import cz.polymarket.bot.exchange.KrakenWebSocketClient;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import io.quarkus.logging.Log;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
@@ -22,7 +23,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -38,8 +38,6 @@ import java.util.function.Consumer;
 
 @ApplicationScoped
 public class TwapEngine {
-
-    private static final Logger LOG = Logger.getLogger(TwapEngine.class);
 
     private final ExchangePriceTracker priceTracker;
     private final HistoricalDataReconstructor reconstructor;
@@ -113,27 +111,27 @@ public class TwapEngine {
 
     void onStart(@Observes StartupEvent ev) {
         if (!enabledForStrategy) {
-            LOG.infof("Skipping TwapEngine startup because active strategy '%s' does not require TWAP_ENGINE external stream",
+            Log.infof("Skipping TwapEngine startup because active strategy '%s' does not require TWAP_ENGINE external stream",
                     strategyName);
             return;
         }
-        LOG.info("Initializing TWAP Engine and starting Exchange WebSocket streams...");
+        Log.info("Initializing TWAP Engine and starting Exchange WebSocket streams...");
         if (vertx != null) {
             vertx.executeBlocking(() -> {
                 initialize(Instant.now());
                 return null;
             }).onComplete(ar -> {
                 if (ar.succeeded()) {
-                    LOG.info("TWAP Engine historical reconstruction completed successfully");
+                    Log.info("TWAP Engine historical reconstruction completed successfully");
                 } else {
-                    LOG.warnf("TWAP Engine historical reconstruction encountered error: %s", ar.cause().getMessage());
+                    Log.errorf("TWAP Engine historical reconstruction encountered error: %s", ar.cause().getMessage());
                 }
             });
         } else {
             try {
                 initialize(Instant.now());
             } catch (Exception e) {
-                LOG.warnf("TWAP Engine historical reconstruction error: %s", e.getMessage());
+                Log.errorf("TWAP Engine historical reconstruction error: %s", e.getMessage());
             }
         }
 
@@ -146,7 +144,7 @@ public class TwapEngine {
         if (!enabledForStrategy) {
             return;
         }
-        LOG.info("Stopping Exchange WebSocket streams...");
+        Log.info("Stopping Exchange WebSocket streams...");
         binanceClient.stop();
         coinbaseClient.stop();
         krakenClient.stop();
@@ -157,10 +155,10 @@ public class TwapEngine {
             try {
                 CandleTwapState state = reconstructor.reconstructCandle(tf, now);
                 candleStates.put(tf, state);
-                LOG.infof("Initialized TWAP engine for timeframe %s, open price: %s, points: %d",
+                Log.infof("Initialized TWAP engine for timeframe %s, open price: %s, points: %d",
                         tf.getCode(), state.openPrice(), state.points().size());
             } catch (Exception e) {
-                LOG.warnf("Failed to reconstruct candle history for %s: %s", tf.getCode(), e.getMessage());
+                Log.errorf("Failed to reconstruct candle history for %s: %s", tf.getCode(), e.getMessage());
             }
         }
         initialized = !candleStates.isEmpty();
@@ -206,7 +204,7 @@ public class TwapEngine {
         // In case of a large gap > 60s (network stall, container unfreeze), clamp forward fill to at most 60 seconds
         long startGap = lastSec + 1;
         if (currentSec - lastSec > 60) {
-            LOG.warnf("Detected time gap of %d seconds in Binance ticks. Clamping forward fill to last 60 seconds.", (currentSec - lastSec));
+            Log.warnf("Detected time gap of %d seconds in Binance ticks. Clamping forward fill to last 60 seconds.", (currentSec - lastSec));
             startGap = currentSec - 60;
         }
 
@@ -332,7 +330,7 @@ public class TwapEngine {
             try {
                 listener.accept(update);
             } catch (Exception e) {
-                LOG.warnf("Error notifying listener: %s", e.getMessage());
+                Log.errorf("Error notifying listener: %s", e.getMessage());
             }
         }
     }

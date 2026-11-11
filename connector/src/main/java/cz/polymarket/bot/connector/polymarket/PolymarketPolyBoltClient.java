@@ -3,12 +3,19 @@ package cz.polymarket.bot.connector.polymarket;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
+import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
+import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.dns.AddressResolverOptions;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -16,30 +23,35 @@ import java.util.function.Supplier;
 /**
  * Resilient WebSocket client for Polymarket PolyBolt v2 ({@code wss://ws-live-v2.polymarket.com/ws}).
  * Manages dedicated authenticated streams for {@code price.crypto.twap} (60-second TWAP) and
- * {@code price.crypto} (spot reference price), performing the mandatory {@code op: "auth"} ->
- * {@code op: "authed"} -> {@code op: "subscribe"} handshake when credentials are provided and
+ * {@code price.crypto} (spot reference price) on an isolated 1-thread Netty EventLoop
+ * ({@code polybolt-ws-io-reader}), performing the mandatory {@code op: "auth"} ->
+ * {@code op: "authed"} -> {@code op: "subscribe"} handshake before subscribing to any channel and
  * forwarding raw WebSocket JSON messages without parsing overhead.
  */
 @ApplicationScoped
 public class PolymarketPolyBoltClient {
 
-    private static final Logger LOG = Logger.getLogger(PolymarketPolyBoltClient.class);
+    /**
+     * Dedicated thread name for the isolated Netty EventLoop servicing PolyBolt v2 oracle streams.
+     */
+    public static final String DEDICATED_POLYBOLT_IO_THREAD_NAME = "polybolt-ws-io-reader";
 
-    private final Vertx vertx;
+    private final Vertx polyBoltVertx;
     private final String wsUrl;
-    private final String apiKey;
-    private final String secret;
-    private final String passphrase;
+    private volatile String apiKey;
+    private volatile String secret;
+    private volatile String passphrase;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
 
     private volatile ReconnectingWebSocketStream twapStream;
     private volatile ReconnectingWebSocketStream cryptoPriceStream;
+    private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Polymarket PolyBolt WebSocket client.
+     * CDI constructor for the Polymarket PolyBolt WebSocket client.
      *
-     * @param vertx            Vert.x runtime instance
+     * @param vertx            shared Vert.x runtime instance
      * @param wsUrl            Polymarket PolyBolt v2 WebSocket endpoint URL
      * @param apiKey           Polymarket CLOB API key required for gated PolyBolt channels
      * @param secret           Polymarket CLOB API secret required for gated PolyBolt channels
@@ -62,13 +74,62 @@ public class PolymarketPolyBoltClient {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
-        this.vertx = vertx;
+        this.polyBoltVertx = Vertx.vertx(new VertxOptions()
+                .setEventLoopPoolSize(1)
+                .setPreferNativeTransport(true)
+                .setAddressResolverOptions(new AddressResolverOptions()
+                        .setRoundRobinInetAddress(true)
+                        .setRotateServers(true)
+                        .setCacheMaxTimeToLive(60)));
+        if (!this.polyBoltVertx.isNativeTransportEnabled()) {
+            Log.warnf("Native Linux Epoll transport is unavailable on polyBoltVertx (os=%s); falling back to JDK NIO EventLoop",
+                    System.getProperty("os.name", "unknown"));
+        }
         this.wsUrl = wsUrl;
         this.apiKey = apiKey.map(String::trim).orElse("");
         this.secret = secret.map(String::trim).orElse("");
         this.passphrase = passphrase.map(String::trim).orElse("");
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+    }
+
+    @PreDestroy
+    void destroy() {
+        stop();
+        try {
+            polyBoltVertx.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Registers a listener notified whenever any active PolyBolt stream disconnects unexpectedly.
+     *
+     * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
+     */
+    public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
+        this.disconnectListener = disconnectListener;
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            twap.setDisconnectListener(disconnectListener);
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            spot.setDisconnectListener(disconnectListener);
+        }
+    }
+
+    /**
+     * Explicitly configures L2 credentials used for the mandatory {@code op: "auth"} handshake.
+     *
+     * @param apiKey     Polymarket CLOB API key
+     * @param secret     Polymarket CLOB API secret
+     * @param passphrase Polymarket CLOB API passphrase
+     */
+    public synchronized void configureCredentials(String apiKey, String secret, String passphrase) {
+        this.apiKey = apiKey != null ? apiKey.trim() : "";
+        this.secret = secret != null ? secret.trim() : "";
+        this.passphrase = passphrase != null ? passphrase.trim() : "";
     }
 
     /**
@@ -80,6 +141,18 @@ public class PolymarketPolyBoltClient {
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
      */
     public synchronized void startTwapStream(String symbol, RawWebSocketListener listener) {
+        startTwapStream(symbol, listener, null);
+    }
+
+    /**
+     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream bound to an optional
+     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     *
+     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
+     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     */
+    public synchronized void startTwapStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
         stopTwapStream();
         String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
         String subscribeMsg = buildTwapSubscribeMessage(polyBoltSymbol);
@@ -89,6 +162,10 @@ public class PolymarketPolyBoltClient {
                 () -> this.twapStream,
                 listener
         );
+        newStream.setDisconnectListener(this.disconnectListener);
+        if (externalWorker != null) {
+            newStream.bindExternalWorker(externalWorker);
+        }
         this.twapStream = newStream;
         newStream.start();
     }
@@ -102,6 +179,18 @@ public class PolymarketPolyBoltClient {
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
      */
     public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener) {
+        startCryptoPriceStream(symbol, listener, null);
+    }
+
+    /**
+     * Starts the PolyBolt {@code price.crypto} WebSocket stream bound to an optional
+     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     *
+     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
+     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     */
+    public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
         stopCryptoPriceStream();
         String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
         String subscribeMsg = buildCryptoPriceSubscribeMessage(polyBoltSymbol);
@@ -111,8 +200,46 @@ public class PolymarketPolyBoltClient {
                 () -> this.cryptoPriceStream,
                 listener
         );
+        newStream.setDisconnectListener(this.disconnectListener);
+        if (externalWorker != null) {
+            newStream.bindExternalWorker(externalWorker);
+        }
         this.cryptoPriceStream = newStream;
         newStream.start();
+    }
+
+    /**
+     * Drains all currently queued frames from both PolyBolt streams ({@code TWAP} and {@code CRYPTO-PRICE})
+     * into {@code scratchBatch}. Called on the dedicated {@code strategy-calculator-worker} thread.
+     *
+     * @param scratchBatch reusable pre-allocated list owned by the caller
+     * @return total number of frames drained across both streams
+     */
+    public int drainStreams(List<TimestampedFrame> scratchBatch) {
+        int total = 0;
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            total += twap.drainAvailableBatch(scratchBatch);
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            total += spot.drainAvailableBatch(scratchBatch);
+        }
+        return total;
+    }
+
+    /**
+     * Returns whether either PolyBolt stream currently has frames waiting in its inbound queue.
+     *
+     * @return {@code true} if either PolyBolt queue is non-empty
+     */
+    public boolean hasQueuedFrames() {
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null && twap.hasQueuedFrames()) {
+            return true;
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        return spot != null && spot.hasQueuedFrames();
     }
 
     /**
@@ -166,6 +293,38 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
+     * Returns telemetry snapshots for active PolyBolt WebSocket streams.
+     *
+     * @return list of {@link WebSocketStreamTelemetry} snapshots
+     */
+    public List<WebSocketStreamTelemetry> getStreamTelemetries() {
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(2);
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null) {
+            result.add(twap.getTelemetrySnapshot());
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null) {
+            result.add(spot.getTelemetrySnapshot());
+        }
+        return result;
+    }
+
+    /**
+     * Returns the Netty I/O reader thread observed by either active PolyBolt stream, or {@code null}.
+     *
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        if (spot != null && spot.getIoReaderThread() != null) {
+            return spot.getIoReaderThread();
+        }
+        ReconnectingWebSocketStream twap = this.twapStream;
+        return twap != null ? twap.getIoReaderThread() : null;
+    }
+
+    /**
      * Checks whether all required Polymarket CLOB API credentials ({@code apiKey}, {@code secret}, {@code passphrase})
      * are configured and non-blank.
      *
@@ -185,47 +344,110 @@ public class PolymarketPolyBoltClient {
                     "[%s] Missing required Polymarket CLOB API credentials (POLYMARKET_API_KEY, POLYMARKET_SECRET, POLYMARKET_PASSPHRASE). All streams must be recorded; aborting startup.",
                     streamName
             );
-            LOG.error(errorMsg);
+            Log.fatal(errorMsg);
             throw new IllegalStateException(errorMsg);
         }
         String initialMessage = buildAuthMessage();
 
-        return new ReconnectingWebSocketStream(
-                vertx,
-                streamName,
-                wsUrl,
-                () -> List.of(initialMessage),
-                (rawJson, recvTs) -> {
-                    if (rawJson == null || rawJson.isBlank()) {
-                        return;
-                    }
-                    if (isAuthedConfirmation(rawJson)) {
-                        ReconnectingWebSocketStream current = streamRef.get();
-                        if (current != null) {
-                            current.sendText(subscribeMsg);
-                        }
-                        return;
-                    }
-                    if (isSubscribedConfirmation(rawJson)) {
-                        return;
-                    }
-                    if (isErrorFrame(rawJson)) {
-                        LOG.warnf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
-                        if (isAuthRequiredError(rawJson)) {
-                            ReconnectingWebSocketStream current = streamRef.get();
-                            if (current != null) {
-                                current.sendText(buildAuthMessage());
-                            }
-                        }
-                        return;
-                    }
+        RawWebSocketListener internalListener = new RawWebSocketListener() {
+            @Override
+            public void onMessage(String rawJson, long recvTs) {
+                if (rawJson == null || rawJson.isBlank()) {
+                    return;
+                }
+                if (!rawJson.contains("\"op\"")) {
                     if (listener != null) {
                         listener.onMessage(rawJson, recvTs);
                     }
-                },
+                    return;
+                }
+                handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, recvTs);
+            }
+
+            @Override
+            public void onMessageBytes(TimestampedFrame frame) {
+                if (frame == null) {
+                    return;
+                }
+                byte[] rawBytes = frame.rawUtf8Bytes();
+                if (rawBytes == null || rawBytes.length == 0) {
+                    return;
+                }
+                if (!containsOpFieldBytes(rawBytes)) {
+                    if (listener != null) {
+                        listener.onMessageBytes(frame);
+                    }
+                    return;
+                }
+                String rawJson = frame.rawText();
+                if (rawJson != null && !rawJson.isBlank()) {
+                    handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, frame.recvTs());
+                }
+            }
+        };
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                polyBoltVertx,
+                streamName,
+                wsUrl,
+                () -> List.of(initialMessage),
+                internalListener,
                 reconnectDelayMs,
-                pingIntervalMs
+                pingIntervalMs,
+                "{\"op\":\"ping\"}"
         );
+        stream.setDedicatedIoThreadName(DEDICATED_POLYBOLT_IO_THREAD_NAME);
+        return stream;
+    }
+
+    private void handleControlFrame(
+            String streamName,
+            String subscribeMsg,
+            Supplier<ReconnectingWebSocketStream> streamRef,
+            RawWebSocketListener listener,
+            String rawJson,
+            long recvTs) {
+        if (isAuthedConfirmation(rawJson)) {
+            Log.infof("[%s] PolyBolt session authenticated successfully; subscribing to channel", streamName);
+            ReconnectingWebSocketStream current = streamRef.get();
+            if (current != null) {
+                current.sendText(subscribeMsg);
+            }
+            return;
+        }
+        if (isSubscribedConfirmation(rawJson)) {
+            Log.infof("[%s] PolyBolt channel subscription confirmed: %s", streamName, rawJson);
+            return;
+        }
+        if (isPongConfirmation(rawJson)) {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] PolyBolt pong received: %s", streamName, rawJson);
+            }
+            return;
+        }
+        if (isErrorFrame(rawJson)) {
+            Log.errorf("[%s] PolyBolt server returned error: %s", streamName, rawJson);
+            if (isAuthRequiredError(rawJson)) {
+                ReconnectingWebSocketStream current = streamRef.get();
+                if (current != null) {
+                    current.sendText(buildAuthMessage());
+                }
+            }
+            return;
+        }
+        if (listener != null) {
+            listener.onMessage(rawJson, recvTs);
+        }
+    }
+
+    static boolean containsOpFieldBytes(byte[] rawBytes) {
+        int limit = Math.min(rawBytes.length, 64) - 4;
+        for (int i = 0; i <= limit; i++) {
+            if (rawBytes[i] == '"' && rawBytes[i + 1] == 'o' && rawBytes[i + 2] == 'p' && rawBytes[i + 3] == '"') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String buildAuthMessage() {
@@ -259,5 +481,9 @@ public class PolymarketPolyBoltClient {
 
     private static boolean isAuthRequiredError(String rawJson) {
         return rawJson.contains("\"code\":\"auth_required\"") || rawJson.contains("\"code\": \"auth_required\"");
+    }
+
+    private static boolean isPongConfirmation(String rawJson) {
+        return rawJson.contains("\"op\":\"pong\"") || rawJson.contains("\"op\": \"pong\"");
     }
 }

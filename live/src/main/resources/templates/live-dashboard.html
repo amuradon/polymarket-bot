@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Bot :: Live Trading &amp; 4-Core Telemetry</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #1e293b;
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --green: #22c55e;
+            --green-bg: rgba(34, 197, 94, 0.15);
+            --red: #ef4444;
+            --red-bg: rgba(239, 68, 68, 0.15);
+            --blue: #3b82f6;
+            --blue-bg: rgba(59, 130, 246, 0.15);
+            --orange: #f59e0b;
+            --orange-bg: rgba(245, 158, 11, 0.15);
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: var(--font-family);
+            line-height: 1.5;
+            padding: 24px;
+        }
+
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-secondary);
+            padding: 16px 24px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-live {
+            background: var(--green-bg);
+            color: var(--green);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-strategy {
+            background: var(--blue-bg);
+            color: var(--blue);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .badge-up {
+            background: var(--green-bg);
+            color: var(--green);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-down {
+            background: var(--red-bg);
+            color: var(--red);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge-armed {
+            background: var(--orange-bg);
+            color: var(--orange);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 14px;
+            flex-wrap: wrap;
+        }
+
+        .header-stat {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value-large {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .metric-card .title {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .metric-card .value {
+            font-size: 20px;
+            font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        .metric-card .subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .text-green { color: var(--green); }
+        .text-red { color: var(--red); }
+        .text-blue { color: var(--blue); }
+        .text-orange { color: var(--orange); }
+
+        .section-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .position-box {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .pos-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .pos-item .pos-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .pos-item .pos-val {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 12px 14px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.04em;
+        }
+
+        td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .no-data {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 28px;
+            font-style: italic;
+        }
+
+        .refresh-btn {
+            background: #334155;
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .refresh-btn:hover {
+            background: #475569;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-left">
+            <h1>Polymarket Bot :: Live Trading</h1>
+            <span class="badge badge-strategy">{strategyName}</span>
+            <span class="badge badge-live">● {status}</span>
+            <span class="badge badge-armed">{orderType}</span>
+            <span class="badge badge-strategy">GC: {telemetry.gcName}</span>
+            <span class="badge {#if telemetry.nativeTransportEnabled}badge-up{#else}badge-armed{/if}">
+                I/O: {#if telemetry.nativeTransportEnabled}EPOLL{#else}NIO{/if}
+            </span>
+            <span class="badge {#if telemetry.openSslAvailable}badge-up{#else}badge-armed{/if}">
+                TLS: {#if telemetry.openSslAvailable}BoringSSL{#else}JDK{/if}
+            </span>
+        </div>
+        <div class="header-right">
+            <div class="header-stat">
+                <span class="stat-label">Active Market</span>
+                <span class="stat-value-large text-blue">{activeMarketSlug}</span>
+            </div>
+            <div class="header-stat">
+                <span class="stat-label">Initial Capital</span>
+                <span class="stat-value-large">${initialCapital}</span>
+            </div>
+            <div class="header-stat">
+                <span class="stat-label">Current Balance</span>
+                <span class="stat-value-large {#if currentBalance >= initialCapital}text-green{#else}text-red{/if}">
+                    ${currentBalance}
+                </span>
+            </div>
+            <button class="refresh-btn" onclick="window.location.reload()">⟳ Refresh</button>
+        </div>
+    </header>
+
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <span class="title">OS TCP Rx Buffer</span>
+            <span class="value {#if telemetry.currentTcpRxQueueBytes > 65536}text-red{#else}text-green{/if}">
+                {telemetry.currentTcpRxQueueBytes} B
+            </span>
+            <span class="subtitle">Peak Rx: {telemetry.maxTcpRxQueueBytes} B | rmem_max: {telemetry.kernelRmemMaxBytes} B</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">OS TCP Tx &amp; Drops</span>
+            <span class="value {#if telemetry.tcpBacklogDrop > 0 || telemetry.tcpRcvCollapsed > 0}text-orange{#else}text-green{/if}">
+                {telemetry.currentTcpTxQueueBytes} B
+            </span>
+            <span class="subtitle">Peak Tx: {telemetry.maxTcpTxQueueBytes} B | Collapsed: {telemetry.tcpRcvCollapsed} | Drops: {telemetry.tcpBacklogDrop}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">JVM CPU &amp; ZGC</span>
+            <span class="value {#if telemetry.processCpuLoadPct > 85}text-orange{#else}text-green{/if}">
+                {telemetry.processCpuLoadPct}%
+            </span>
+            <span class="subtitle">Peak CPU: {telemetry.maxProcessCpuLoadPct}% | GC: {telemetry.gcCount} ({telemetry.totalGcPauseMs} ms)</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">JVM Heap Memory</span>
+            <span class="value text-blue">{telemetry.usedHeapMb} / {telemetry.maxHeapMb} MiB</span>
+            <span class="subtitle">Host CPU: {telemetry.systemCpuLoadPct}% | TCP Sockets: {telemetry.activeTcpSockets}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Quote Freshness</span>
+            <span class="value {#if telemetry.lastQuoteAgeMs > 250}text-red{#else}text-green{/if}">
+                {telemetry.lastQuoteAgeMs} ms
+            </span>
+            <span class="subtitle">Max Age: {telemetry.maxQuoteAgeMsObserved} ms | Stale Skipped: {telemetry.staleQuotesSkipped}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">Quote Conflation</span>
+            <span class="value text-blue">{telemetry.conflatedQuotesCount}</span>
+            <span class="subtitle">Superseded BBO snapshots coalesced on vCPU #2 → #3</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">CLOB Orders</span>
+            <span class="value text-green">{telemetry.ordersFilled} Filled</span>
+            <span class="subtitle">Submitted: {telemetry.ordersSubmitted} | Rejected/FAK-Killed: {telemetry.ordersRejected}</span>
+        </div>
+        <div class="metric-card">
+            <span class="title">CLOB Order RTT</span>
+            <span class="value {#if telemetry.lastOrderRttMs > 250}text-orange{#else}text-green{/if}">
+                {telemetry.lastOrderRttMs} ms
+            </span>
+            <span class="subtitle">Max RTT: {telemetry.maxOrderRttMs} ms (EIP-712 + HTTP POST)</span>
+        </div>
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">4-Core Dedicated Pipeline Utilization (c8gn.xlarge)</span>
+            <a href="/api/live/telemetry" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Raw Telemetry JSON ↗</a>
+        </div>
+        <div style="overflow-x: auto;">
+            <table>
+                <thead>
+                <tr>
+                    <th>vCPU Pipeline Role</th>
+                    <th>JVM Thread Name</th>
+                    <th>State</th>
+                    <th>Core CPU %</th>
+                    <th>Peak Core CPU %</th>
+                    <th>Active Duty Cycle %</th>
+                    <th>Peak Duty Cycle %</th>
+                    <th>Total CPU Time</th>
+                </tr>
+                </thead>
+                <tbody>
+                {#for thread in telemetry.threads}
+                    <tr>
+                        <td><strong>{thread.role}</strong></td>
+                        <td>{thread.threadName}</td>
+                        <td>
+                            <span class="badge {#if thread.threadState == 'RUNNABLE'}badge-up{#else}badge-strategy{/if}">
+                                {thread.threadState}
+                            </span>
+                        </td>
+                        <td class="{#if thread.cpuUtilizationPct > 80}text-red{#else if thread.cpuUtilizationPct > 50}text-orange{#else}text-green{/if}">
+                            {thread.cpuUtilizationPct}%
+                        </td>
+                        <td class="{#if thread.maxCpuUtilizationPct > 85}text-orange{#else}text-blue{/if}">
+                            {thread.maxCpuUtilizationPct}%
+                        </td>
+                        <td>{thread.busyDutyCyclePct}%</td>
+                        <td>{thread.maxBusyDutyCyclePct}%</td>
+                        <td>{thread.totalCpuTimeMs} ms</td>
+                    </tr>
+                {/for}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">WebSocket Stream Inbound Queues &amp; Processing Latency</span>
+            <a href="/api/live/status" target="_blank" style="font-size: 12px; color: var(--blue); text-decoration: none;">View Status JSON ↗</a>
+        </div>
+        {#if telemetry.streams.isEmpty}
+            <div class="no-data">
+                No active WebSocket streams registered yet.
+            </div>
+        {#else}
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Stream Name</th>
+                        <th>State</th>
+                        <th>Remote Edge</th>
+                        <th>Queue Depth (Cur / Max)</th>
+                        <th>Queue Lag (Cur / Max)</th>
+                        <th>Batch Process (Cur / Max)</th>
+                        <th>Frames Enqueued</th>
+                        <th>Coalesced Frames</th>
+                        <th>Reconnects</th>
+                        <th>Last Close</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for s in telemetry.streams}
+                        <tr>
+                            <td><strong>{s.streamName}</strong></td>
+                            <td>
+                                <span class="badge {#if s.state == 'CONNECTED'}badge-up{#else}badge-armed{/if}">{s.state}</span>
+                            </td>
+                            <td style="color: var(--text-secondary);">
+                                {#if s.remoteAddress.isEmpty}—{#else}{s.remoteAddress}{/if}
+                            </td>
+                            <td class="{#if s.queueDepth > 50}text-red{#else if s.maxQueueDepth > 100}text-orange{#else}text-green{/if}">
+                                {s.queueDepth} / {s.maxQueueDepth}
+                            </td>
+                            <td class="{#if s.lastQueueLagMs > 100}text-red{#else if s.maxQueueLagMs > 200}text-orange{#else}text-green{/if}">
+                                {s.lastQueueLagMs} ms / {s.maxQueueLagMs} ms
+                            </td>
+                            <td>{s.lastProcessTimeUs} µs / {s.maxProcessTimeUs} µs</td>
+                            <td>{s.totalFramesReceived}</td>
+                            <td class="text-blue">{s.coalescedFramesCount}</td>
+                            <td class="{#if s.reconnectCount > 0}text-orange{#else}text-green{/if}">{s.reconnectCount}</td>
+                            <td style="color: var(--text-secondary);">
+                                {#if s.lastCloseCode != 0}{s.lastCloseCode} ({s.lastCloseReason}){#else}NONE{/if}
+                            </td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Disconnect &amp; Slow-Consumer Forensics</span>
+            <span style="font-size: 12px; color: var(--text-secondary);">Retained ring buffer (max 50 events)</span>
+        </div>
+        {#if telemetry.disconnectEvents.isEmpty}
+            <div class="no-data">
+                No unexpected WebSocket disconnects recorded since startup.
+            </div>
+        {#else}
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Timestamp (ms)</th>
+                        <th>Stream Name</th>
+                        <th>Remote Edge</th>
+                        <th>Close Code &amp; Reason</th>
+                        <th>Failover Status</th>
+                        <th>Reconnects</th>
+                        <th>Queue Depth (At Close / Max)</th>
+                        <th>Queue Lag (Last / Max)</th>
+                        <th>Process Time (Last / Max)</th>
+                        <th>OS TCP Rx Queue</th>
+                        <th>CPU (Proc / vCPU #1 / vCPU #2)</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for d in telemetry.disconnectEvents}
+                        <tr>
+                            <td>{d.timestampMs}</td>
+                            <td><strong>{d.streamName}</strong></td>
+                            <td style="color: var(--text-secondary);">
+                                {#if d.remoteAddress.isEmpty}—{#else}{d.remoteAddress}{/if}
+                            </td>
+                            <td class="{#if d.closeCode == 1013}text-red{#else}text-orange{/if}">
+                                {d.closeCode} ({d.closeReason})
+                            </td>
+                            <td>
+                                {#if d.failoverActive}
+                                    <span class="badge badge-up">FAILOVER ACTIVE ({d.peerState})</span>
+                                {#else if d.peerState == 'SINGLE_STREAM'}
+                                    <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-secondary);">SINGLE STREAM</span>
+                                {#else}
+                                    <span class="badge badge-down">BOTH DOWN ({d.peerState})</span>
+                                {/if}
+                            </td>
+                            <td>{d.reconnectCount}</td>
+                            <td>{d.queueDepthAtDisconnect} / {d.maxQueueDepth}</td>
+                            <td>{d.lastQueueLagMs} ms / {d.maxQueueLagMs} ms</td>
+                            <td>{d.lastProcessTimeUs} µs / {d.maxProcessTimeUs} µs</td>
+                            <td>{d.tcpRxQueueBytes} B (collapsed: {d.tcpRcvCollapsed})</td>
+                            <td>{d.processCpuLoadPct}% / {d.ioReaderCpuPct}% / {d.clobBookWorkerCpuPct}%</td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Recent Telemetry History (10s Time-Series Ring Buffer)</span>
+            <span style="font-size: 12px; color: var(--text-secondary);">Samples retained: {telemetry.history.size} / 360</span>
+        </div>
+        {#if telemetry.history.isEmpty}
+            <div class="no-data">
+                No historical telemetry samples recorded yet.
+            </div>
+        {#else}
+            <div style="overflow-x: auto; max-height: 300px; overflow-y: auto;">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Timestamp (ms)</th>
+                        <th>JVM CPU %</th>
+                        <th>Host CPU %</th>
+                        <th>vCPU #1 (I/O) %</th>
+                        <th>vCPU #2 (Book) %</th>
+                        <th>vCPU #3 (Strat) %</th>
+                        <th>vCPU #4 (Order) %</th>
+                        <th>TCP Rx Queue</th>
+                        <th>CLOB Queue Depth</th>
+                        <th>CLOB Max Lag</th>
+                        <th>Quote Age</th>
+                        <th>Heap Used</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {#for h in telemetry.history}
+                        <tr>
+                            <td>{h.timestampMs}</td>
+                            <td>{h.processCpuLoadPct}%</td>
+                            <td>{h.systemCpuLoadPct}%</td>
+                            <td class="{#if h.ioReaderCpuPct > 80}text-red{#else}text-green{/if}">{h.ioReaderCpuPct}%</td>
+                            <td>{h.clobBookWorkerCpuPct}%</td>
+                            <td>{h.strategyWorkerCpuPct}%</td>
+                            <td>{h.orderWorkerCpuPct}%</td>
+                            <td>{h.tcpRxQueueBytes} B</td>
+                            <td>{h.clobQueueDepth}</td>
+                            <td>{h.clobMaxQueueLagMs} ms</td>
+                            <td>{h.lastQuoteAgeMs} ms</td>
+                            <td>{h.usedHeapMb} MiB</td>
+                        </tr>
+                    {/for}
+                    </tbody>
+                </table>
+            </div>
+        {/if}
+    </div>
+
+    <div class="section-card">
+        <div class="section-header">
+            <span class="section-title">Active Position</span>
+            {#if activePosition != null}
+                <span class="badge {#if activePosition.side == 'UP'}badge-up{#else}badge-down{/if}">{activePosition.side}</span>
+            {#else}
+                <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-secondary);">IDLE</span>
+            {/if}
+        </div>
+        {#if activePosition != null}
+            <div class="position-box">
+                <div class="pos-item">
+                    <span class="pos-label">Client Order ID</span>
+                    <span class="pos-val">{activePosition.clientOrderId}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">CLOB Order ID</span>
+                    <span class="pos-val">{activePosition.clobOrderId}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Side</span>
+                    <span class="pos-val {#if activePosition.side == 'UP'}text-green{#else}text-red{/if}">{activePosition.side}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Entry Price</span>
+                    <span class="pos-val">${activePosition.entryPrice}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Size (USD)</span>
+                    <span class="pos-val">${activePosition.sizeUsd}</span>
+                </div>
+                <div class="pos-item">
+                    <span class="pos-label">Shares</span>
+                    <span class="pos-val">{activePosition.shares}</span>
+                </div>
+            </div>
+        {#else}
+            <div class="no-data">
+                No active position. Strategy '{strategyName}' is monitoring 15m Polymarket opportunities.
+            </div>
+        {/if}
+    </div>
+</div>
+
+<script>
+    setInterval(() => {
+        if (!document.hidden) {
+            window.location.reload();
+        }
+    }, 5000);
+</script>
+</body>
+</html>

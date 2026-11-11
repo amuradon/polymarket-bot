@@ -33,8 +33,12 @@ class DailyBinanceStorageManagerTest {
         manager.record(BinanceStreamType.FUTURES_PARTIAL_DEPTH_100MS, "{\"e\":\"depthUpdate\",\"levels\":20}", day1Ts);
         manager.record(BinanceStreamType.FUTURES_FORCE_ORDER, "{\"e\":\"forceOrder\",\"o\":{\"s\":\"BTCUSDT\"}}", day1Ts);
 
-        // Next day on Spot aggTrades -> should rotate to 2026-10-11 file
-        manager.record(BinanceStreamType.SPOT_AGG_TRADES, "{\"e\":\"aggTrade\",\"s\":\"BTCUSDT\",\"p\":\"78200\"}", day2Ts);
+        // Next day on Spot aggTrades -> should rotate to 2026-10-11 file using direct byte[] recordBytes
+        manager.recordBytes(
+                BinanceStreamType.SPOT_AGG_TRADES,
+                "{\"e\":\"aggTrade\",\"s\":\"BTCUSDT\",\"p\":\"78200\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                day2Ts
+        );
 
         manager.closeAll();
 

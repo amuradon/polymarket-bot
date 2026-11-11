@@ -15,7 +15,7 @@
     to the designated log directory.
 
 .PARAMETER Ec2Host
-    EC2 SSH host alias configured in ~/.ssh/config. Defaults to 'i-058e25a0b3334934d'.
+    EC2 SSH host alias configured in ~/.ssh/config. Defaults to 'i-0e826b5eb507d87be'.
 
 .PARAMETER Symbol
     Cryptocurrency symbol to benchmark (e.g. 'BTC', 'ETH', 'SOL', or 'BTCUSDT'). Defaults to 'BTC'.
@@ -51,7 +51,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string]$Ec2Host = "i-058e25a0b3334934d",
+    [string]$Ec2Host = "i-0e826b5eb507d87be",
 
     [Parameter(Position = 1)]
     [string]$Symbol = "BTC",

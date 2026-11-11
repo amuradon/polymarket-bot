@@ -99,12 +99,47 @@ Měří jednosměrnou WebSocket síťovou latenci (`t_recv - t_exchange_event`) 
 
 ## 4. Stažení historických obchodů z Kraken Spot (`download_kraken_trades.py`)
 
-Stahuje historické obchody z Kraken public REST API (`/0/public/Trades`), převádí je do schématu odpovídajícího Kraken Spot WebSocket v2 `trade` kanálu (`ts`, `trade_timestamp`, `symbol`, `trade_id`, `side`, `ord_type`, `price`, `qty`, `timestamp`) s přičtenou simulovanou latencí do AWS `eu-west-1` (`ts = trade_timestamp + 15 ms`) a ukládá je jako denní ZSTD-komprimované Parquet soubory.
+Stahuje historické obchody z Kraken public REST API (`/0/public/Trades`) s respektováním HTTP rate limit hlaviček, sbírá data do sloupcových bufferů a ukládá je jako denní ZSTD-komprimované Parquet soubory ve formátu `${Dir}/${Symbol}/trades/${Symbol}-trades-${yyyy-MM-dd}.parquet`.
 
+### Příprava prostředí a spuštění (ze složky `.\scripts`)
 ```powershell
-# Stažení výchozího období 2026-10-12 až 2026-11-03 pro USDT/USD
-.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py
+cd .\scripts
 
-# Vlastní rozsah dat a přepsání existujících souborů
-.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py --pair USDTUSD --start-date 2026-10-12 --end-date 2026-11-03 --latency-ms 15 --overwrite
+# 1. Aktivace virtuálního prostředí
+.\.venv\Scripts\activate
+
+# 2. Instalace závislostí (včetně pyarrow a httpx)
+pip install -r requirements.txt
+
+# 3. Stažení obchodů pro USDTUSD (výchozí výstupní adresář D:\Crypto\data\Polymarket\collector\kraken\spot)
+python download_kraken_trades.py --symbol USDTUSD --from 2026-11-04 --to 2026-11-09
+
+# Stažení obchodů pro BTCUSD
+python download_kraken_trades.py --symbol BTCUSD --from 2026-11-10 --to 2026-11-10
+
+# Stažení obchodů s vlastním kořenovým adresářem
+python download_kraken_trades.py --symbol USDTUSD --from 2026-11-04 --to 2026-11-09 --dir D:\Crypto\data\Polymarket\collector\kraken\spot
+```
+
+---
+
+## 5. Stažení historických obchodů z Coinbase Spot (`download_coinbase_trades.py`)
+
+Stahuje historické obchody z Coinbase Exchange public REST API (`https://api.exchange.coinbase.com/products/<product-id>/trades`) s využitím binárního vyhledávání počátečního `trade_id`, respektováním HTTP rate limit hlaviček, sběrem dat do sloupcových bufferů a ukládáním do denních ZSTD-komprimovaných Parquet souborů ve formátu `${Dir}/${Symbol}/trades/${Symbol}-trades-${yyyy-MM-dd}.parquet`.
+
+### Příprava prostředí a spuštění (ze složky `.\scripts`)
+```powershell
+cd .\scripts
+
+# 1. Aktivace virtuálního prostředí
+.\.venv\Scripts\activate
+
+# 2. Instalace závislostí (včetně pyarrow a httpx)
+pip install -r requirements.txt
+
+# 3. Stažení obchodů pro BTCUSD (výchozí výstupní adresář D:\Crypto\data\Polymarket\collector\coinbase\spot)
+python download_coinbase_trades.py --symbol BTCUSD --from 2026-11-10 --to 2026-11-10
+
+# Stažení obchodů s vlastním kořenovým adresářem
+python download_coinbase_trades.py --symbol BTCUSD --from 2026-11-04 --to 2026-11-09 --dir D:\Crypto\data\Polymarket\collector\coinbase\spot
 ```

@@ -2,10 +2,10 @@ package cz.polymarket.bot.connector.polymarket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -24,8 +24,6 @@ import java.util.Optional;
  */
 @ApplicationScoped
 public class PolymarketGammaClient {
-
-    private static final Logger LOG = Logger.getLogger(PolymarketGammaClient.class);
 
     private final String baseUrl;
     private final HttpClient httpClient;
@@ -50,8 +48,9 @@ public class PolymarketGammaClient {
     }
 
     /**
-     * Queries the Gamma API for a specific market by its slug, extracting only the token IDs
-     * and closed status needed for stream management while preserving the raw JSON response.
+     * Queries the Gamma API ({@code GET /markets/slug/{slug}}) for a specific market by its slug,
+     * extracting the condition ID, token IDs, and closed status needed for stream and order management
+     * while preserving the raw JSON response.
      *
      * @param slug            market slug (e.g. btc-updown-15m-1789041600)
      * @param durationSeconds market interval duration in seconds (e.g. 900 for 15m)
@@ -61,10 +60,13 @@ public class PolymarketGammaClient {
         if (slug == null || slug.isBlank()) {
             return Optional.empty();
         }
-        String encodedSlug = URLEncoder.encode(slug, StandardCharsets.UTF_8);
-        String url = baseUrl + "/markets?slug=" + encodedSlug;
+        String encodedSlug = URLEncoder.encode(slug.trim(), StandardCharsets.UTF_8);
+        String url = baseUrl + "/markets/slug/" + encodedSlug;
 
         try {
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Gamma GET %s", url);
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(10))
@@ -74,16 +76,26 @@ public class PolymarketGammaClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (Log.isTraceEnabled()) {
+                Log.tracef("Gamma GET %s response (HTTP %d): %s", url, response.statusCode(), response.body());
+            }
+            if (response.statusCode() >= 500) {
+                Log.errorf("Gamma API GET %s failed with HTTP %d", url, response.statusCode());
+                return Optional.empty();
+            }
             if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
+                if (Log.isDebugEnabled()) {
+                    Log.debugf("Gamma market %s not found or empty response (HTTP %d)", slug, response.statusCode());
+                }
                 return Optional.empty();
             }
 
             JsonNode root = objectMapper.readTree(response.body());
-            if (root.isArray() && !root.isEmpty()) {
-                return parseMarketNode(root.get(0), durationSeconds);
+            if (root != null && root.isObject()) {
+                return parseMarketNode(root, durationSeconds);
             }
         } catch (Exception e) {
-            LOG.debugf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
+            Log.errorf("Failed to fetch Gamma market for slug %s: %s", slug, e.getMessage());
         }
         return Optional.empty();
     }
@@ -94,6 +106,7 @@ public class PolymarketGammaClient {
         }
         try {
             String slug = item.path("slug").asText("");
+            String conditionId = item.path("conditionId").asText("");
             long startSec = extractStartSecFromSlug(slug);
             long endSec = startSec > 0 ? startSec + durationSeconds : 0L;
             List<String> clobTokens = parseStringListField(item.get("clobTokenIds"));
@@ -103,6 +116,7 @@ public class PolymarketGammaClient {
             boolean closed = item.path("closed").asBoolean(false);
             return Optional.of(new PolymarketMarketInfo(
                     slug,
+                    conditionId,
                     startSec,
                     endSec,
                     List.copyOf(clobTokens),
@@ -110,7 +124,7 @@ public class PolymarketGammaClient {
                     objectMapper.writeValueAsString(item)
             ));
         } catch (Exception e) {
-            LOG.warnf("Failed to parse Gamma market node: %s", e.getMessage());
+            Log.warnf("Failed to parse Gamma market node: %s", e.getMessage());
             return Optional.empty();
         }
     }

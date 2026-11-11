@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Live Trading Base Infrastructure in eu-west-1 (Dublin). Provisions an encrypted private S3
+  release artifact bucket, CloudWatch Logs group, least-privilege IAM role with SSM Session Manager, S3 artifact
+  read, and Secrets Manager access, and a security group restricting inbound HTTPS (port 443) strictly to
+  authorized management IP (178.17.13.13/32).
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  PolymarketSecretId:
+    Type: String
+    Default: polymarket-sniper/clob-credentials
+    Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2 and EIP-712 signing credentials.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: Retention period in days for the CloudWatch Logs log group.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0ebc7d75fbfa0bf7f
+    Description: VPC ID in eu-west-1 for the Live Trading security group.
+
+  AllowedInboundCidr:
+    Type: String
+    Default: 178.17.13.13/32
+    Description: CIDR IP range allowed inbound HTTPS (port 443) access.
+
+Resources:
+  LiveTradingArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Quarkus fast-jar release archives (live-{x.y.z}.tar.gz) for direct Bare-OS systemd deployment on EC2 without Docker or ECR overhead.
+        must: Block all public access, encrypt at rest with AES256, and expire old release archives after 30 days.
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLiveReleaseArchives
+            Prefix: releases/
+            Status: Enabled
+            ExpirationInDays: 30
+
+  LiveTradingArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Enforces TLS-only transport for all requests to LiveTradingArtifactBucket.
+        must: Deny any S3 operation where aws:SecureTransport is false.
+    Properties:
+      Bucket: !Ref LiveTradingArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LiveTradingArtifactBucket.Arn
+              - !Sub "${LiveTradingArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  LiveTradingLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Centralized CloudWatch Logs log group for the Live Trading systemd service and EC2 host logs.
+        must: Retain logs across stack updates and enforce a bounded retention period.
+    Properties:
+      LogGroupName: !Sub "/polymarket-bot/${AWS::StackName}/live-trading"
+      RetentionInDays: !Ref LogRetentionDays
+
+  LiveTradingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Security group restricting inbound HTTPS to authorized management IP and permitting all outbound traffic for market feeds.
+        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound HTTPS (443) for Polymarket CLOB, PolyBolt, S3, SSM, and CloudWatch.
+    Properties:
+      GroupDescription: Security group for Polymarket Live Trading EC2 instance with restricted inbound HTTPS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedInboundCidr
+          Description: Inbound HTTPS access strictly for authorized management IP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound traffic for Polymarket CLOB/Gamma/PolyBolt (443), S3, SSM, CloudWatch Logs, and Secrets Manager
+
+  LiveTradingIamRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, download release archives from S3, and read credentials from Secrets Manager.
+        must: Scope Secrets Manager GetSecretValue permission strictly to the PolymarketSecretId prefix in eu-west-1.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: LiveTradingS3SecretsAndCloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3ListLiveTradingArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt LiveTradingArtifactBucket.Arn
+              - Sid: S3GetLiveTradingArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${LiveTradingArtifactBucket.Arn}/releases/*"
+              - Sid: ListSecretsForQuarkusSecretsManagerConfigSource
+                Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                Resource: '*'
+              - Sid: ReadPolymarketCredentialsSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PolymarketSecretId}*"
+              - Sid: WriteServiceAndHostLogsToCloudWatch
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt LiveTradingLogGroup.Arn
+
+  LiveTradingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Binds the LiveTradingIamRole to the EC2 instance.
+        must: Reference LiveTradingIamRole.
+    Properties:
+      Roles:
+        - !Ref LiveTradingIamRole
+
+Outputs:
+  ArtifactBucketName:
+    Description: S3 Bucket name storing Live Trading release archives (live-{x.y.z}.tar.gz)
+    Value: !Ref LiveTradingArtifactBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketName"
+  ArtifactBucketArn:
+    Description: S3 Bucket ARN storing Live Trading release archives
+    Value: !GetAtt LiveTradingArtifactBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketArn"
+  LogGroupName:
+    Description: CloudWatch Logs log group name for Live Trading logs
+    Value: !Ref LiveTradingLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupName"
+  LogGroupArn:
+    Description: CloudWatch Logs log group ARN for Live Trading logs
+    Value: !GetAtt LiveTradingLogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupArn"
+  SecurityGroupId:
+    Description: Security Group ID for Live Trading EC2 instance
+    Value: !GetAtt LiveTradingSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+  InstanceProfileName:
+    Description: IAM Instance Profile name for Live Trading EC2 instance
+    Value: !Ref LiveTradingInstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceProfileName"

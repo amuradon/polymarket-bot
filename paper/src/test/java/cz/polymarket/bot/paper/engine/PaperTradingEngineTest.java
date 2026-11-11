@@ -3,8 +3,6 @@ package cz.polymarket.bot.paper.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
-import cz.polymarket.bot.calculator.RealizedVolatilityCalculator;
-import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
@@ -31,8 +29,6 @@ import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
@@ -518,5 +514,75 @@ class PaperTradingEngineTest {
         repository.reset();
         assertThat(repository.getTrades()).isEmpty();
         assertThat(repository.getCurrentBalance()).isEqualTo(10000.0);
+    }
+
+    @Test
+    void shouldFillBuyOrderAtCurrentBestAskWhenBelowLimitPriceAndRejectWhenAskExceedsLimitPrice() {
+        PaperTradingEngine engine = new PaperTradingEngine(
+                registry,
+                repository,
+                null,
+                priceCache,
+                "utter_paramecium",
+                0L,
+                vertx,
+                binanceHistoricalClient
+        );
+
+        long tsMs = 1_785_542_400_000L;
+        engine.onOrderBookQuote(new OrderBookQuote(
+                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, tsMs
+        ));
+
+        // 1. Order with looser limit price 0.70 must fill at current bestAskUp = 0.65 (price improvement)
+        engine.submitOrder(new OrderCommand(
+                "buy-price-improved", "0xMarket15m", "BTC-UP",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.70), BigDecimal.valueOf(10.0)
+        ));
+
+        assertThat(engine.getOpenPositions()).hasSize(1);
+        assertThat(engine.getOpenPositions().getFirst().entryPrice()).isEqualTo(0.65);
+
+        // 2. Order with limit price 0.62 (< current bestAskUp 0.65) must be rejected (no match for FAK)
+        engine.submitOrder(new OrderCommand(
+                "buy-rejected-slippage", "0xMarket15m", "BTC-UP",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.62), BigDecimal.valueOf(10.0)
+        ));
+
+        assertThat(engine.getOpenPositions()).hasSize(1);
+    }
+
+    @Test
+    void shouldIgnoreOutOfOrderOlderCandleTwapTicksWithoutRollingActiveCandleBackwards() {
+        PaperTradingEngine engine = new PaperTradingEngine(
+                registry,
+                repository,
+                null,
+                priceCache,
+                "utter_paramecium",
+                0L,
+                vertx,
+                binanceHistoricalClient
+        );
+
+        long activeStartSec = 1_794_240_000L;
+        long activeStartMs = activeStartSec * 1000L;
+
+        engine.onPolymarketCryptoTwap60s(activeStartMs, "btcusd", "chainlink", 85_000.0, 60, activeStartMs);
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(85_000.0);
+
+        engine.submitOrder(new OrderCommand(
+                "up-hold-1", "0xMarket15m", "BTC-UP",
+                Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.55), BigDecimal.valueOf(20.0)
+        ));
+        assertThat(engine.getOpenPositions()).hasSize(1);
+
+        long priorCandleTickMs = (activeStartSec - 48L) * 1000L;
+        engine.onPolymarketCryptoTwap60s(priorCandleTickMs, "btcusd", "chainlink", 84_950.0, 60, priorCandleTickMs);
+        engine.onPolymarketCryptoTwap60s(activeStartMs + 11_000L, "btcusd", "chainlink", 85_010.0, 60, activeStartMs + 11_000L);
+
+        assertThat(engine.getOpenPositions()).hasSize(1);
+        assertThat(repository.getTrades()).isEmpty();
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(85_000.0);
     }
 }

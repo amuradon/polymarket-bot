@@ -37,13 +37,19 @@ class ZstdJsonlWriterTest {
         // Simulate restart appending a new Zstandard frame to the same file
         try (ZstdJsonlWriter writer2 = new ZstdJsonlWriter(file)) {
             writer2.writePolymarketEvent(1789041601789L, "trade", "{\"price\":\"0.54\",\"size\":\"100\"}");
+            writer2.writeBinanceEvent(1789041602000L, "  {\"e\":\"aggTrade\",\"p\":\"78010.00\"}\n ".getBytes(StandardCharsets.UTF_8));
+            writer2.writeDeribitEvent(1789041603000L, "{\"jsonrpc\":\"2.0\",\"method\":\"subscription\"}".getBytes(StandardCharsets.UTF_8));
+            writer2.writePolymarketEvent(1789041604000L, "clob", " [{\"event_type\":\"book\"}] \r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         List<String> lines = readAllZstdLines(file);
         assertThat(lines).containsExactly(
                 "{\"ts\":1789041600123,\"payload\":{\"e\":\"aggTrade\",\"p\":\"78000.50\"}}",
                 "{\"ts\":1789041600456,\"type\":\"twap_60s\",\"payload\":{\"value\":78001.25}}",
-                "{\"ts\":1789041601789,\"type\":\"trade\",\"payload\":{\"price\":\"0.54\",\"size\":\"100\"}}"
+                "{\"ts\":1789041601789,\"type\":\"trade\",\"payload\":{\"price\":\"0.54\",\"size\":\"100\"}}",
+                "{\"ts\":1789041602000,\"payload\":{\"e\":\"aggTrade\",\"p\":\"78010.00\"}}",
+                "{\"ts\":1789041603000,\"payload\":{\"jsonrpc\":\"2.0\",\"method\":\"subscription\"}}",
+                "{\"ts\":1789041604000,\"type\":\"clob\",\"payload\":[{\"event_type\":\"book\"}]}"
         );
     }
 

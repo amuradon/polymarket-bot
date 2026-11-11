@@ -56,6 +56,8 @@ class PolymarketPolyBoltClientTest {
                                 && msg.contains("\"passphrase\":\"test-passphrase\"")) {
                             authenticated.set(true);
                             ws.writeTextMessage("{\"op\":\"authed\",\"rid\":\"a1\"}");
+                        } else if (msg.contains("\"op\":\"ping\"")) {
+                            ws.writeTextMessage("{\"op\":\"pong\"}");
                         } else if (msg.contains("\"op\":\"subscribe\"")) {
                             if (!authenticated.get()) {
                                 ws.writeTextMessage("{\"op\":\"error\",\"code\":\"auth_required\",\"rid\":\"s1\"}");
