@@ -190,17 +190,17 @@ class BacktestLoggingTest {
     }
 
     @Test
-    @DisplayName("Should log ERROR when invalid mandatory argument or missing market data prevents backtest run")
+    @DisplayName("Should log ERROR when invalid strategy name or missing market data prevents backtest run")
     void shouldLogErrorOnInvalidArgumentOrMissingMarkets(@TempDir Path tempDir) throws Exception {
         backtestLogger.setLevel(Level.INFO);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
 
-        assertThatThrownBy(() -> engine.runBacktest("", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, null, 1.0))
+        assertThatThrownBy(() -> engine.runBacktest("UnknownInvalidStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, null, 1.0))
                 .isInstanceOf(IllegalArgumentException.class);
 
         assertThat(logHandler.records()).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.ERROR);
-            assertThat(r.getFormattedMessage()).contains("Strategy name is mandatory");
+            assertThat(r.getFormattedMessage()).contains("Unknown strategy");
         });
 
         logHandler.clear();
@@ -358,6 +358,8 @@ class BacktestLoggingTest {
                 registry,
                 new PerformanceMetricsCalculator(),
                 new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("out").toString()),
+                "TestBatchStrategy",
+                "2026-08-01",
                 tempDir.resolve("out").toString(),
                 10000.0,
                 1.0

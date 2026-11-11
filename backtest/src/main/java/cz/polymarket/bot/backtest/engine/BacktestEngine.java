@@ -27,6 +27,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,6 +55,8 @@ public class BacktestEngine {
     private final StrategyRegistry strategyRegistry;
     private final PerformanceMetricsCalculator metricsCalculator;
     private final BacktestJsonExporter jsonExporter;
+    private final String defaultStrategy;
+    private final String defaultStartDate;
     private final String defaultOutputDir;
     private final double defaultCapital;
     private final double defaultLatencyFactor;
@@ -63,6 +68,8 @@ public class BacktestEngine {
      * @param strategyRegistry registry resolving requested strategies
      * @param metricsCalculator performance metrics calculation service
      * @param jsonExporter exporter serializing backtest results to disk
+     * @param defaultStrategy default trading strategy name configured in application properties
+     * @param defaultStartDate default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
      * @param defaultOutputDir default destination directory for output JSON artifacts
      * @param defaultCapital default initial trading balance in USD
      * @param defaultLatencyFactor default multiplier for simulated order execution latency (default {@code 1.0})
@@ -73,6 +80,10 @@ public class BacktestEngine {
             StrategyRegistry strategyRegistry,
             PerformanceMetricsCalculator metricsCalculator,
             BacktestJsonExporter jsonExporter,
+            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "UtterParameciumStrategy")
+            String defaultStrategy,
+            @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
+            String defaultStartDate,
             @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
             String defaultOutputDir,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
@@ -99,6 +110,12 @@ public class BacktestEngine {
         this.strategyRegistry = strategyRegistry;
         this.metricsCalculator = metricsCalculator;
         this.jsonExporter = jsonExporter;
+        this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
+                ? defaultStrategy.trim()
+                : "UtterParameciumStrategy";
+        this.defaultStartDate = (defaultStartDate != null && !defaultStartDate.isBlank())
+                ? defaultStartDate.trim()
+                : "2026-10-12";
         this.defaultOutputDir = defaultOutputDir;
         this.defaultCapital = defaultCapital;
         this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
@@ -107,7 +124,7 @@ public class BacktestEngine {
     /**
      * Executes an event-driven backtest simulation using the default latency factor.
      *
-     * @param strategyName registered name of trading strategy
+     * @param strategyName registered name of trading strategy (defaults to configured strategy if null/blank)
      * @param symbol trading asset pair (e.g. {@code "BTCUSDT"})
      * @param startDate optional start date string ({@code yyyy-MM-dd})
      * @param endDate optional end date string ({@code yyyy-MM-dd})
@@ -128,13 +145,13 @@ public class BacktestEngine {
     /**
      * Executes an event-driven backtest simulation for a specified strategy over collector Parquet archives.
      *
-     * @param strategyName registered name of trading strategy (e.g. {@code "TWAPArbitrageStrategy"})
+     * @param strategyName registered name of trading strategy (defaults to configured strategy if null/blank)
      * @param symbol trading asset pair (e.g. {@code "BTCUSDT"})
-     * @param startDate optional start date string ({@code yyyy-MM-dd})
-     * @param endDate optional end date string ({@code yyyy-MM-dd})
-     * @param initialCapital optional initial account balance in USD (default 10,000)
-     * @param outputDirectory optional directory path to store output JSON
-     * @param latencyFactor optional multiplier for simulated order execution latency (default 1.0)
+     * @param startDate optional start date string ({@code yyyy-MM-dd}, defaults to configured {@code polymarket.backtest.from})
+     * @param endDate optional end date string ({@code yyyy-MM-dd}, defaults to current UTC date)
+     * @param initialCapital optional initial account balance in USD (defaults to configured {@code polymarket.backtest.initial-capital})
+     * @param outputDirectory optional directory path to store output JSON (defaults to configured {@code polymarket.backtest.output-dir})
+     * @param latencyFactor optional multiplier for simulated order execution latency (defaults to configured {@code polymarket.backtest.latency-factor})
      * @return BacktestResult containing summary metrics, trade records, and exported file path
      */
     public BacktestResult runBacktest(
@@ -146,14 +163,13 @@ public class BacktestEngine {
             String outputDirectory,
             Double latencyFactor) {
 
-        if (strategyName == null || strategyName.isBlank()) {
-            Log.error("Cannot start backtest: Strategy name is mandatory");
-            throw new IllegalArgumentException("Strategy name is mandatory");
-        }
+        String resolvedStrategyName = (strategyName != null && !strategyName.isBlank())
+                ? strategyName.trim()
+                : defaultStrategy;
 
         TradingStrategy strategy;
         try {
-            strategy = strategyRegistry.getStrategy(strategyName);
+            strategy = strategyRegistry.getStrategy(resolvedStrategyName);
         } catch (IllegalArgumentException e) {
             Log.errorf("Cannot start backtest: %s", e.getMessage());
             throw e;
@@ -161,17 +177,55 @@ public class BacktestEngine {
         strategy.reset();
 
         String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
-        double capital = (initialCapital != null && initialCapital > 0) ? initialCapital : defaultCapital;
+        double capital = (initialCapital != null) ? initialCapital : defaultCapital;
+        if (Double.isNaN(capital) || capital <= 0.0) {
+            Log.errorf("Cannot start backtest: initialCapital must be greater than 0 (received %s)", capital);
+            throw new IllegalArgumentException("initialCapital must be greater than 0");
+        }
+
+        String resolvedStartDate = (startDate != null && !startDate.isBlank())
+                ? startDate.trim()
+                : defaultStartDate;
+        String resolvedEndDate = (endDate != null && !endDate.isBlank())
+                ? endDate.trim()
+                : LocalDate.now(ZoneOffset.UTC).toString();
+
+        LocalDate parsedStart;
+        try {
+            parsedStart = LocalDate.parse(resolvedStartDate);
+        } catch (DateTimeParseException e) {
+            Log.errorf("Cannot start backtest: invalid startDate format '%s'", resolvedStartDate);
+            throw new IllegalArgumentException("Invalid startDate format: " + resolvedStartDate, e);
+        }
+
+        LocalDate parsedEnd;
+        try {
+            parsedEnd = LocalDate.parse(resolvedEndDate);
+        } catch (DateTimeParseException e) {
+            Log.errorf("Cannot start backtest: invalid endDate format '%s'", resolvedEndDate);
+            throw new IllegalArgumentException("Invalid endDate format: " + resolvedEndDate, e);
+        }
+
+        if (parsedStart.isAfter(parsedEnd)) {
+            Log.errorf("Cannot start backtest: startDate %s must not be after endDate %s",
+                    resolvedStartDate, resolvedEndDate);
+            throw new IllegalArgumentException("startDate must not be after endDate");
+        }
+
         String resolvedOutputDir = (outputDirectory != null && !outputDirectory.isBlank()) ? outputDirectory : defaultOutputDir;
-        double resolvedLatencyFactor = (latencyFactor != null && latencyFactor >= 0.0) ? latencyFactor : defaultLatencyFactor;
+        double resolvedLatencyFactor = (latencyFactor != null) ? latencyFactor : defaultLatencyFactor;
+        if (Double.isNaN(resolvedLatencyFactor) || resolvedLatencyFactor < 0.0) {
+            Log.errorf("Cannot start backtest: latencyFactor must be non-negative (received %s)", resolvedLatencyFactor);
+            throw new IllegalArgumentException("latencyFactor must be non-negative");
+        }
 
         if (Log.isInfoEnabled()) {
             Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f",
-                    strategy.getName(), sym, startDate != null ? startDate : "ALL", endDate != null ? endDate : "ALL",
+                    strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
                     capital, resolvedLatencyFactor);
         }
 
-        List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, startDate, endDate);
+        List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
         if (markets.isEmpty()) {
             String msg = "No market rows available for backtest for symbol " + sym;
             Log.error(msg);

@@ -75,6 +75,57 @@ Navigate to `http://localhost:8080/btc-usd`.
 Navigate to `http://localhost:8082/btc-usd`.
 
 #### 3. Backtest Engine Application (`backtest` - Port 8083)
+
+The `backtest` module supports two execution modes controlled by the native Quarkus property `polymarket.backtest.batchMode`:
+- **Batch Mode (`polymarket.backtest.batchMode=true`)**: Runs the backtesting process immediately on startup, exports the JSON report (`backtest_<Strategy>_<yyyyMMdd_HHmmss>.json` and `latest.json`), and automatically shuts down the application upon completion.
+- **Server Mode (`polymarket.backtest.batchMode=false`, default)**: Starts the interactive REST API server on port `8083`.
+
+##### Configuration Properties & Defaults (`application.properties`)
+| Property | Default Value | Description |
+| :--- | :--- | :--- |
+| `polymarket.backtest.batchMode` | `false` | `true` = run backtest on startup and exit; `false` = start REST server |
+| `polymarket.backtest.strategy` | `UtterParameciumStrategy` | Trading strategy name (`UtterParameciumStrategy`, `TWAPArbitrageStrategy`, etc.) |
+| `polymarket.backtest.initial-capital` | `10000.0` | Initial starting capital in USD (`$10000`) |
+| `polymarket.backtest.from` | `2026-10-12` | Inclusive start date (`yyyy-MM-dd`) |
+| `polymarket.backtest.to` | Current UTC date | Inclusive end date (`yyyy-MM-dd`); defaults to today when omitted |
+| `polymarket.backtest.output-dir` | `D:/Crypto/data/Polymarket/backtesting` | Output directory for exported JSON reports |
+
+##### Batch Mode Examples (Run on Startup & Auto-Exit)
+
+Run with all default settings (`UtterParameciumStrategy`, `$10000` capital, from `2026-10-12` to today, output in `D:/Crypto/data/Polymarket/backtesting`):
+```powershell
+# Using Maven:
+.\mvnw quarkus:dev -pl backtest "-Dpolymarket.backtest.batchMode=true"
+
+# Or from packaged application JAR:
+.\mvnw package -pl backtest -am -DskipTests
+java "-Dpolymarket.backtest.batchMode=true" -jar backtest/target/quarkus-app/quarkus-run.jar
+```
+
+Run with custom strategy, capital, date range, and output directory:
+```powershell
+# Windows (PowerShell):
+java `
+  "-Dpolymarket.backtest.batchMode=true" `
+  "-Dpolymarket.backtest.strategy=TWAPArbitrageStrategy" `
+  "-Dpolymarket.backtest.initial-capital=25000.0" `
+  "-Dpolymarket.backtest.from=2026-10-15" `
+  "-Dpolymarket.backtest.to=2026-11-10" `
+  "-Dpolymarket.backtest.output-dir=D:/Crypto/data/Polymarket/backtesting" `
+  -jar backtest/target/quarkus-app/quarkus-run.jar
+
+# Linux / macOS (Bash):
+java \
+  -Dpolymarket.backtest.batchMode=true \
+  -Dpolymarket.backtest.strategy=TWAPArbitrageStrategy \
+  -Dpolymarket.backtest.initial-capital=25000.0 \
+  -Dpolymarket.backtest.from=2026-10-15 \
+  -Dpolymarket.backtest.to=2026-11-10 \
+  -Dpolymarket.backtest.output-dir=D:/Crypto/data/Polymarket/backtesting \
+  -jar backtest/target/quarkus-app/quarkus-run.jar
+```
+
+##### Server Mode (Interactive REST API - Port 8083)
 ```bash
 ./mvnw quarkus:dev -pl backtest
 ```

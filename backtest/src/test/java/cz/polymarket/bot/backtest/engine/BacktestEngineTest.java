@@ -232,6 +232,8 @@ class BacktestEngineTest {
                 strategyRegistry,
                 metricsCalculator,
                 jsonExporter,
+                "UtterParameciumStrategy",
+                "2026-08-01",
                 tempDir.resolve("export").toString(),
                 10000.0,
                 1.0
@@ -368,6 +370,8 @@ class BacktestEngineTest {
                 localRegistry,
                 new PerformanceMetricsCalculator(),
                 new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_utter").toString()),
+                "UtterParameciumStrategy",
+                "2026-08-01",
                 tempDir.resolve("export_utter").toString(),
                 10000.0,
                 1.0
@@ -408,5 +412,35 @@ class BacktestEngineTest {
         assertThatThrownBy(() -> backtestEngine.runBacktest("TWAPArbitrageStrategy", "UNKNOWN_SYMBOL", null, null, 10000.0, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
+    }
+
+    @Test
+    @DisplayName("Should resolve default strategy, default startDate, current UTC endDate, default capital, and default outputDir when omitted")
+    void shouldResolveDefaultParametersWhenOmitted(@TempDir Path tempDir) {
+        BacktestResult result = backtestEngine.runBacktest(
+                null,
+                "BTCUSDT",
+                null,
+                null,
+                null,
+                tempDir.toString(),
+                null
+        );
+
+        assertThat(result).isNotNull();
+        assertThat(result.strategyName()).isEqualTo("UtterParameciumStrategy");
+        assertThat(result.totalMarkets()).isEqualTo(3);
+        assertThat(result.metrics().initialCapital()).isEqualTo(10000.0);
+        assertThat(result.jsonFilePath()).isNotBlank();
+        assertThat(Files.exists(Path.of(result.jsonFilePath()))).isTrue();
+    }
+
+    @Test
+    @DisplayName("Should throw IllegalArgumentException when startDate is after endDate")
+    void shouldThrowWhenStartDateIsAfterEndDate() {
+        assertThatThrownBy(() -> backtestEngine.runBacktest(
+                "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01", 10000.0, null, 1.0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("startDate must not be after endDate");
     }
 }

@@ -43,16 +43,19 @@ class BacktestResourceTest {
     }
 
     @Test
-    @DisplayName("POST /api/backtest/run should return 400 Bad Request when strategyName is missing")
-    void shouldReturn400WhenStrategyNameIsMissing() {
+    @DisplayName("POST /api/backtest/run should use default strategy UtterParameciumStrategy when strategyName is omitted")
+    void shouldUseDefaultStrategyWhenStrategyNameIsOmitted() {
         given()
                 .contentType(ContentType.JSON)
-                .body(Map.of("initialCapital", 10000.0))
+                .body(Map.of(
+                        "startDate", "2026-08-10",
+                        "endDate", "2026-08-01"
+                ))
                 .when().post("/api/backtest/run")
                 .then()
                 .statusCode(400)
                 .contentType(ContentType.JSON)
-                .body("error", containsString("strategyName is mandatory"));
+                .body("error", containsString("startDate must not be after endDate"));
     }
 
     @Test
