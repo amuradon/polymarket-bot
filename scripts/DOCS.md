@@ -101,10 +101,22 @@ Měří jednosměrnou WebSocket síťovou latenci (`t_recv - t_exchange_event`) 
 
 Stahuje historické obchody z Kraken public REST API (`/0/public/Trades`) s respektováním HTTP rate limit hlaviček, sbírá data do sloupcových bufferů a ukládá je jako denní ZSTD-komprimované Parquet soubory ve formátu `${Dir}/${Symbol}/trades/${Symbol}-trades-${yyyy-MM-dd}.parquet`.
 
+### Příprava prostředí a spuštění (ze složky `.\scripts`)
 ```powershell
-# Stažení obchodů pro BTCUSD (výchozí výstupní adresář D:\Crypto\data\Polymarket\collector\kraken\spot)
-.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py --symbol BTCUSD --from 2026-11-10 --to 2026-11-10
+cd .\scripts
 
-# Stažení obchodů pro USDTUSD s vlastním kořenovým adresářem
-.\.venv\Scripts\python.exe .\scripts\download_kraken_trades.py --symbol USDTUSD --from 2026-11-10 --to 2026-11-10 --dir D:\Crypto\data\Polymarket\collector\kraken\spot
+# 1. Aktivace virtuálního prostředí
+.\.venv\Scripts\activate
+
+# 2. Instalace závislostí (včetně pyarrow a httpx)
+pip install -r requirements.txt
+
+# 3. Stažení obchodů pro USDTUSD (výchozí výstupní adresář D:\Crypto\data\Polymarket\collector\kraken\spot)
+python download_kraken_trades.py --symbol USDTUSD --from 2026-11-04 --to 2026-11-09
+
+# Stažení obchodů pro BTCUSD
+python download_kraken_trades.py --symbol BTCUSD --from 2026-11-10 --to 2026-11-10
+
+# Stažení obchodů s vlastním kořenovým adresářem
+python download_kraken_trades.py --symbol USDTUSD --from 2026-11-04 --to 2026-11-09 --dir D:\Crypto\data\Polymarket\collector\kraken\spot
 ```
