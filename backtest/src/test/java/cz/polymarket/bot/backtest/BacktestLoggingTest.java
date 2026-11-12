@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.BacktestJob;
 import cz.polymarket.bot.backtest.data.BacktestJobStatus;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
@@ -8,9 +9,8 @@ import cz.polymarket.bot.backtest.engine.BacktestEngine;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
-import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
+import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
-import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
@@ -26,6 +26,7 @@ import org.jboss.logmanager.ExtHandler;
 import org.jboss.logmanager.ExtLogRecord;
 import org.jboss.logmanager.Level;
 import org.jboss.logmanager.Logger;
+import org.jboss.logmanager.formatters.PatternFormatter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -39,7 +40,6 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
@@ -66,10 +66,17 @@ import static org.mockito.Mockito.when;
 class BacktestLoggingTest {
 
     private static final long BASE_START = 1785542400L; // 2026-08-01 00:00:00 UTC
+    private static final PatternFormatter MESSAGE_FORMATTER = new PatternFormatter("%s");
+
+    private static String formatRecord(ExtLogRecord record) {
+        return MESSAGE_FORMATTER.format(record);
+    }
 
     private Logger backtestLogger;
     private java.util.logging.Level originalLevel;
     private CapturingLogHandler logHandler;
+    private DuckDbSessionManager activeDuckDb;
+    private BacktestEngine activeEngine;
 
     @BeforeEach
     void setUpLogger() {
@@ -82,6 +89,14 @@ class BacktestLoggingTest {
 
     @AfterEach
     void tearDownLogger() {
+        if (activeEngine != null) {
+            activeEngine.shutdown();
+            activeEngine = null;
+        }
+        if (activeDuckDb != null) {
+            activeDuckDb.close();
+            activeDuckDb = null;
+        }
         if (backtestLogger != null && logHandler != null) {
             backtestLogger.removeHandler(logHandler);
             backtestLogger.setLevel(originalLevel != null ? originalLevel : Level.INFO);
@@ -131,7 +146,7 @@ class BacktestLoggingTest {
     }
 
     @Test
-    @DisplayName("At INFO level, should log INFO (market processing) and WARN (skipped market), while DEBUG and TRACE do not execute")
+    @DisplayName("At INFO level, should log INFO (UTC day progress & completion) and WARN (skipped market), while DEBUG and TRACE do not execute")
     void shouldLogInfoAndWarnWhileSkippingDebugAndTraceWhenLevelIsInfo(@TempDir Path tempDir) throws Exception {
         backtestLogger.setLevel(Level.INFO);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
@@ -141,11 +156,11 @@ class BacktestLoggingTest {
         List<ExtLogRecord> records = logHandler.records();
         assertThat(records).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.INFO);
-            assertThat(r.getFormattedMessage()).contains("Processing market");
+            assertThat(formatRecord(r)).contains("Processing UTC day");
         });
         assertThat(records).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.WARN);
-            assertThat(r.getFormattedMessage()).contains("Skipping market");
+            assertThat(formatRecord(r)).contains("Skipping market");
         });
         assertThat(records)
                 .filteredOn(r -> r.getLevel().intValue() < Level.INFO.intValue())
@@ -154,7 +169,7 @@ class BacktestLoggingTest {
     }
 
     @Test
-    @DisplayName("At DEBUG level, should log per-market summary results at DEBUG while skipping TRACE trade details")
+    @DisplayName("At DEBUG level, should log per-market processing and summary results at DEBUG while skipping TRACE trade details")
     void shouldLogMarketSummaryAtDebugWhileSkippingTrace(@TempDir Path tempDir) throws Exception {
         backtestLogger.setLevel(Level.DEBUG);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
@@ -164,7 +179,11 @@ class BacktestLoggingTest {
         List<ExtLogRecord> records = logHandler.records();
         assertThat(records).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.DEBUG);
-            assertThat(r.getFormattedMessage()).contains("Market summary");
+            assertThat(formatRecord(r)).contains("Processing market");
+        });
+        assertThat(records).anySatisfy(r -> {
+            assertThat(r.getLevel()).isEqualTo(Level.DEBUG);
+            assertThat(formatRecord(r)).contains("Market summary");
         });
         assertThat(records)
                 .filteredOn(r -> r.getLevel().equals(Level.TRACE))
@@ -185,7 +204,7 @@ class BacktestLoggingTest {
                 .toList();
         assertThat(traceRecords).isNotEmpty();
         assertThat(traceRecords).anySatisfy(r ->
-                assertThat(r.getFormattedMessage()).contains("Trade executed")
+                assertThat(formatRecord(r)).contains("Trade executed")
         );
     }
 
@@ -200,7 +219,7 @@ class BacktestLoggingTest {
 
         assertThat(logHandler.records()).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.ERROR);
-            assertThat(r.getFormattedMessage()).contains("Unknown strategy");
+            assertThat(formatRecord(r)).contains("Unknown strategy");
         });
 
         logHandler.clear();
@@ -210,21 +229,21 @@ class BacktestLoggingTest {
 
         assertThat(logHandler.records()).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.ERROR);
-            assertThat(r.getFormattedMessage()).contains("No market rows available");
+            assertThat(formatRecord(r)).contains("No market rows available");
         });
     }
 
     @Test
-    @DisplayName("Should log ERROR on malformed JSON payload in PolymarketOrderBook")
-    void shouldLogErrorOnMalformedOrderBookJsonPayload() {
+    @DisplayName("Should log ERROR on out-of-bounds tick level in PolymarketOrderBook")
+    void shouldLogErrorOnInvalidOrderBookTickLevel() {
         backtestLogger.setLevel(Level.INFO);
         PolymarketOrderBook book = new PolymarketOrderBook();
 
-        book.applySnapshot("{malformed_bids", "[{\"price\":\"0.50\",\"size\":\"100\"}]", 1000L);
+        book.applyTickDelta(true, false, 15_000, 100.0, 1000L);
 
         assertThat(logHandler.records()).anySatisfy(r -> {
             assertThat(r.getLevel()).isEqualTo(Level.ERROR);
-            assertThat(r.getFormattedMessage()).contains("JSON");
+            assertThat(formatRecord(r)).contains("Invalid order book level");
         });
     }
 
@@ -251,7 +270,7 @@ class BacktestLoggingTest {
 
             assertThat(logHandler.records()).anySatisfy(r -> {
                 assertThat(r.getLevel()).isEqualTo(Level.FATAL);
-                assertThat(r.getFormattedMessage()).contains("Fatal error");
+                assertThat(formatRecord(r)).contains("Fatal error");
             });
         } finally {
             executor.shutdownNow();
@@ -259,8 +278,9 @@ class BacktestLoggingTest {
     }
 
     private BacktestEngine createSyntheticBacktestEngine(Path tempDir) throws Exception {
+        activeDuckDb = new DuckDbSessionManager("256MB");
         Path collectorDir = tempDir.resolve("collector_log_test");
-        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString());
+        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), activeDuckDb);
 
         long c1Start = BASE_START;
         long c2MissingOpenStart = BASE_START + 1800L;
@@ -273,7 +293,7 @@ class BacktestLoggingTest {
         Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
         Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2MissingOpenStart + ".parquet");
 
-        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+        try (Connection conn = activeDuckDb.openSession();
              Statement stmt = conn.createStatement()) {
 
             String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
@@ -282,19 +302,15 @@ class BacktestLoggingTest {
                     "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60100.0::DOUBLE, '60100.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
                     ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
 
-            String normPm1 = pmFile1.toAbsolutePath().toString().replace('\\', '/');
-            stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (c1Start * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"clobTokenIds\":\"[\\\"101\\\", \\\"102\\\"]\"}'::JSON), " +
-                    "(" + ((c1Start + 60L) * 1000L + 10L) + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"asset_id\":\"101\",\"timestamp\":\"" + ((c1Start + 60L) * 1000L) + "\",\"bids\":[{\"price\":\"0.49\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.50\",\"size\":\"300.0\"}]}'::JSON)" +
-                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm1 + "' (FORMAT PARQUET)");
+            TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
+                    ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
+                    ClobRow.bookLevel((c1Start + 60L) * 1000L + 10L, (c1Start + 60L) * 1000L, 4, true, true, 4900, 300.0),
+                    ClobRow.bookLevel((c1Start + 60L) * 1000L + 10L, (c1Start + 60L) * 1000L, 4, true, false, 5000, 300.0)
+            ));
 
-            String normPm2 = pmFile2.toAbsolutePath().toString().replace('\\', '/');
-            stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (c2MissingOpenStart * 1000L - 5000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x2'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                    "'{\"clobTokenIds\":\"[\\\"201\\\", \\\"202\\\"]\"}'::JSON)" +
-                    ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm2 + "' (FORMAT PARQUET)");
+            TypedClobParquetTestHelper.writeParquet(stmt, pmFile2, List.of(
+                    ClobRow.discovered(c2MissingOpenStart * 1000L - 5000L, "201", "202")
+            ));
         }
 
         TradingStrategy testStrategy = new TradingStrategy() {
@@ -318,7 +334,7 @@ class BacktestLoggingTest {
 
             @Override
             public TradingStrategy createInstance() {
-                return this; // single-worker deterministic execution for log assertions
+                return this;
             }
 
             @Override
@@ -353,7 +369,7 @@ class BacktestLoggingTest {
         };
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(testStrategy.getName(), testStrategy));
-        return new BacktestEngine(
+        activeEngine = new BacktestEngine(
                 datasetService,
                 registry,
                 new PerformanceMetricsCalculator(),
@@ -362,8 +378,10 @@ class BacktestLoggingTest {
                 "2026-08-01",
                 tempDir.resolve("out").toString(),
                 10000.0,
-                1.0
+                1.0,
+                2
         );
+        return activeEngine;
     }
 
     private static final class CapturingLogHandler extends ExtHandler {

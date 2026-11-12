@@ -15,9 +15,9 @@ import java.nio.file.Path;
  * @param marketParquetFile path to the market Parquet file on disk
  * @param upTokenId Polymarket CLOB token ID corresponding to the UP ("Up" / YES) outcome
  * @param downTokenId Polymarket CLOB token ID corresponding to the DOWN ("Down" / NO) outcome
- * @param twapOpen opening 60-second Chainlink TWAP reference price in USD (or {@link Double#NaN} if determined dynamically)
- * @param twapClose closing 60-second Chainlink TWAP settlement price in USD (or {@link Double#NaN} if determined dynamically)
- * @param actualOutcome resolved binary outcome ({@link TradeDirection#UP} or {@link TradeDirection#DOWN})
+ * @param twapOpen opening 60-second Chainlink TWAP target price in USD at {@code tStart}
+ * @param twapClose closing 60-second Chainlink TWAP settlement price in USD at {@code tEnd}
+ * @param actualOutcome binary settlement outcome evaluated strictly as {@code twapClose >= twapOpen ? UP : DOWN}
  */
 public record CollectorMarketMetadata(
         long tStart,

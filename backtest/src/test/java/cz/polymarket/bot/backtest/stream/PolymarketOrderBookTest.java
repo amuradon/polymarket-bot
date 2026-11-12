@@ -10,14 +10,16 @@ import static org.assertj.core.api.Assertions.within;
 class PolymarketOrderBookTest {
 
     @Test
-    @DisplayName("Should apply snapshot and track best bid and ask for UP and DOWN")
+    @DisplayName("Should apply typed snapshot levels and derive complementary DOWN prices when only UP side is populated")
     void shouldApplySnapshotAndDeriveDown() {
         PolymarketOrderBook book = new PolymarketOrderBook();
 
-        String bidsJson = "[{\"price\":\"0.51\",\"size\":\"200.0\"},{\"price\":\"0.50\",\"size\":\"100.0\"}]";
-        String asksJson = "[{\"price\":\"0.53\",\"size\":\"150.0\"},{\"price\":\"0.54\",\"size\":\"250.0\"}]";
-
-        book.applySnapshot(bidsJson, asksJson, 1000L);
+        book.clearSideForSnapshot(true);
+        book.setSnapshotLevel(true, true, 5100, 200.0);
+        book.setSnapshotLevel(true, true, 5000, 100.0);
+        book.setSnapshotLevel(true, false, 5300, 150.0);
+        book.setSnapshotLevel(true, false, 5400, 250.0);
+        book.finishBookSnapshot(true);
 
         assertThat(book.getBestBidUp()).isCloseTo(0.51, within(0.0001));
         assertThat(book.getBestAskUp()).isCloseTo(0.53, within(0.0001));
@@ -35,21 +37,36 @@ class PolymarketOrderBookTest {
     }
 
     @Test
-    @DisplayName("Should apply collector clob, book, price_change, and track real-time observed one-way latency")
-    void shouldApplyCollectorEventsAndTrackObservedLatency() {
+    @DisplayName("Should apply typed CLOB frames (book, price_change, last_trade_price) and track observed one-way latency")
+    void shouldApplyTypedClobFramesAndTrackObservedLatency() {
         PolymarketOrderBook book = new PolymarketOrderBook();
         book.setMarketTokenIds("95285", "18701");
 
-        String clobPayload = "[" +
-                "{\"market\":\"0xabc\",\"asset_id\":\"95285\",\"timestamp\":\"1775939386039\"," +
-                "\"bids\":[{\"price\":\"0.49\",\"size\":\"200\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"250\"}]}," +
-                "{\"market\":\"0xabc\",\"asset_id\":\"18701\",\"timestamp\":\"1775939386039\"," +
-                "\"bids\":[{\"price\":\"0.49\",\"size\":\"250\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"200\"}]}" +
-                "]";
-
-        // Receipt ts = 1775939386058 -> observed latency = 1775939386058 - 1775939386039 = 19ms
-        book.applyCollectorEvent(new BacktestEvent.PolymarketClobEvent(
-                1775939386058L, 1L, "clob", null, 0.0, 0.0, null, clobPayload
+        // Frame 1: UP book snapshot (receipt 1775939386058 - server 1775939386039 = 19ms latency)
+        book.applyClobFrame(new BacktestEvent.PolymarketClobFrameEvent(
+                1775939386058L,
+                1775939386039L,
+                1L,
+                BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK,
+                true,
+                2,
+                new boolean[]{true, true},
+                new boolean[]{true, false},
+                new int[]{4900, 5100},
+                new double[]{200.0, 250.0}
+        ));
+        // Frame 2: DOWN book snapshot
+        book.applyClobFrame(new BacktestEvent.PolymarketClobFrameEvent(
+                1775939386058L,
+                1775939386039L,
+                2L,
+                BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK,
+                false,
+                2,
+                new boolean[]{false, false},
+                new boolean[]{true, false},
+                new int[]{4900, 5100},
+                new double[]{250.0, 200.0}
         ));
 
         assertThat(book.getLastObservedOneWayLatencyMs()).isEqualTo(19L);
@@ -58,42 +75,94 @@ class PolymarketOrderBookTest {
         assertThat(book.getBestBidDown()).isCloseTo(0.49, within(0.0001));
         assertThat(book.getBestAskDown()).isCloseTo(0.51, within(0.0001));
 
-        // Apply price_change event with server timestamp 1775939406635 and receipt ts 1775939406647 (12ms latency)
-        String priceChangePayload = "{\"market\":\"0xabc\",\"price_changes\":[" +
-                "{\"asset_id\":\"95285\",\"price\":\"0.52\",\"size\":\"346\",\"side\":\"SELL\",\"best_bid\":\"0.49\",\"best_ask\":\"0.51\"}," +
-                "{\"asset_id\":\"95285\",\"price\":\"0.51\",\"size\":\"0\",\"side\":\"SELL\",\"best_bid\":\"0.49\",\"best_ask\":\"0.52\"}," +
-                "{\"asset_id\":\"18701\",\"price\":\"0.48\",\"size\":\"346\",\"side\":\"BUY\",\"best_bid\":\"0.48\",\"best_ask\":\"0.51\"}" +
-                "],\"timestamp\":\"1775939406635\"}";
-
-        book.applyCollectorEvent(new BacktestEvent.PolymarketClobEvent(
-                1775939406647L, 2L, "price_change", null, 0.0, 0.0, null, priceChangePayload
+        // Frame 3: multi-item price_change batch (receipt 1775939406647 - server 1775939406635 = 12ms latency)
+        book.applyClobFrame(new BacktestEvent.PolymarketClobFrameEvent(
+                1775939406647L,
+                1775939406635L,
+                3L,
+                BacktestEvent.PolymarketClobFrameEvent.EVENT_PRICE_CHANGE,
+                false,
+                3,
+                new boolean[]{true, true, false},
+                new boolean[]{false, false, true},
+                new int[]{5200, 5100, 4800},
+                new double[]{346.0, 0.0, 346.0}
         ));
 
         assertThat(book.getLastObservedOneWayLatencyMs()).isEqualTo(12L);
         assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
+
+        // Frame 4: last_trade_price updates observed latency without altering book levels
+        book.applyClobFrame(new BacktestEvent.PolymarketClobFrameEvent(
+                1775939407015L,
+                1775939407000L,
+                4L,
+                BacktestEvent.PolymarketClobFrameEvent.EVENT_LAST_TRADE,
+                false,
+                0,
+                new boolean[0],
+                new boolean[0],
+                new int[0],
+                new double[0]
+        ));
+        assertThat(book.getLastObservedOneWayLatencyMs()).isEqualTo(15L);
+        assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
+
+        // Frame 5: empty book snapshot on DOWN side clears DOWN bids and asks cleanly
+        book.applyClobFrame(new BacktestEvent.PolymarketClobFrameEvent(
+                1775939408010L,
+                1775939408000L,
+                5L,
+                BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK,
+                false,
+                0,
+                new boolean[0],
+                new boolean[0],
+                new int[0],
+                new double[0]
+        ));
+        // DOWN falls back to UP complementarity (1 - 0.52 = 0.48 bid, 1 - 0.49 = 0.51 ask)
+        assertThat(book.getBestBidDown()).isCloseTo(0.48, within(0.0001));
+        assertThat(book.getBestAskDown()).isCloseTo(0.51, within(0.0001));
     }
 
     @Test
-    @DisplayName("Should apply delta updates, adding and removing price levels")
-    void shouldApplyDeltaUpdates() {
+    @DisplayName("Should handle boundary ticks 0 and 10000 and sparse jumps across 64-bit bitset words")
+    void shouldHandleBoundaryTicksAndSparseBitsetJumps() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        book.applyDelta("BUY", 0.55, 300.0, 2000L);
-        book.applyDelta("SELL", 0.58, 200.0, 2000L);
+        book.applyTickDelta(true, true, 0, 50.0, 1000L);
+        book.applyTickDelta(true, true, 63, 75.0, 1000L);
+        book.applyTickDelta(true, true, 64, 80.0, 1000L);
+        book.applyTickDelta(true, false, 9999, 60.0, 1000L);
+        book.applyTickDelta(true, false, 10_000, 90.0, 1000L);
 
-        assertThat(book.getBestBidUp()).isCloseTo(0.55, within(0.0001));
-        assertThat(book.getBestAskUp()).isCloseTo(0.58, within(0.0001));
+        assertThat(book.getBestBidUp()).isCloseTo(0.0064, within(0.00001));
+        assertThat(book.getBestAskUp()).isCloseTo(0.9999, within(0.00001));
 
-        // Remove level with size 0
-        book.applyDelta("BUY", 0.55, 0.0, 2100L);
+        book.applyTickDelta(true, true, 64, 0.0, 1010L);
+        assertThat(book.getBestBidUp()).isCloseTo(0.0063, within(0.00001));
+
+        book.applyTickDelta(true, true, 63, 0.0, 1020L);
+        assertThat(book.getBestBidUp()).isCloseTo(0.0, within(0.00001));
+
+        book.applyTickDelta(true, true, 0, 0.0, 1030L);
         assertThat(book.getBestBidUp()).isNaN();
+
+        book.applyTickDelta(true, false, 9999, 0.0, 1040L);
+        assertThat(book.getBestAskUp()).isCloseTo(1.0, within(0.00001));
+
+        book.applyTickDelta(true, false, 10_000, 0.0, 1050L);
+        assertThat(book.getBestAskUp()).isNaN();
     }
 
     @Test
     @DisplayName("Should simulate market buy fill and compute crypto taker fee")
     void shouldSimulateFillWithFee() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        String asksJson = "[{\"price\":\"0.50\",\"size\":\"50.0\"},{\"price\":\"0.52\",\"size\":\"50.0\"}]";
-        book.applySnapshot("[]", asksJson, 3000L);
+        book.clearSideForSnapshot(true);
+        book.setSnapshotLevel(true, false, 5000, 50.0);
+        book.setSnapshotLevel(true, false, 5200, 50.0);
+        book.finishBookSnapshot(true);
 
         // Buy 100 UP shares: 50 @ 0.50 + 50 @ 0.52 -> avg price 0.51
         PolymarketOrderBook.FillResult fill = book.simulateFill(true, true, 100.0, 1.0);
@@ -115,8 +184,9 @@ class PolymarketOrderBookTest {
         assertThat(emptyFill.avgPrice()).isEqualTo(0.0);
         assertThat(emptyFill.fee()).isEqualTo(0.0);
 
-        String asksJson = "[{\"price\":\"0.50\",\"size\":\"40.0\"}]";
-        book.applySnapshot("[]", asksJson, 3000L);
+        book.clearSideForSnapshot(true);
+        book.setSnapshotLevel(true, false, 5000, 40.0);
+        book.finishBookSnapshot(true);
 
         PolymarketOrderBook.FillResult partialFill = book.simulateFill(true, true, 100.0, 1.0);
         assertThat(partialFill.executedShares()).isEqualTo(40.0);
@@ -127,8 +197,10 @@ class PolymarketOrderBookTest {
     @DisplayName("Should deplete liquidity across 200ms batch buys, clamp on partial reductions, and reset when level disappears")
     void shouldDepleteLiquidityAcrossBatchPurchasesAndResetWhenLevelDisappears() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        String asksJson = "[{\"price\":\"0.50\",\"size\":\"100.0\"},{\"price\":\"0.52\",\"size\":\"100.0\"}]";
-        book.applySnapshot("[]", asksJson, 1000L);
+        book.clearSideForSnapshot(true);
+        book.setSnapshotLevel(true, false, 5000, 100.0);
+        book.setSnapshotLevel(true, false, 5200, 100.0);
+        book.finishBookSnapshot(true);
 
         // Batch 1 at t=1000ms: buy 40 shares -> takes 40 @ 0.50, 60 remaining at 0.50
         PolymarketOrderBook.FillResult batch1 = book.executeFill(true, true, 40.0, 0.55);
@@ -147,28 +219,77 @@ class PolymarketOrderBookTest {
         PolymarketOrderBook.FillResult batch3 = book.executeFill(true, true, 40.0, 0.55);
         assertThat(batch3.executedShares()).isEqualTo(40.0);
         assertThat(batch3.avgPrice()).isCloseTo(0.51, within(0.0001));
-        // Level 0.50 is now completely depleted -> best ask is 0.52 with 80 shares remaining
         assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
         assertThat(book.getDepth1cUp()).isCloseTo(80.0, within(0.0001));
 
-        // External delta updates 0.50 to size 90 (below our 100 consumed, level has not disappeared):
-        // consumed is clamped to 90 -> effective size at 0.50 is still 0
-        book.applyDelta("SELL", 0.50, 90.0, 1500L);
+        // External delta updates 0.50 to size 90 (below our 100 consumed): consumed clamped to 90 -> effective still 0
+        book.applyTickDelta(true, false, 5000, 90.0, 1500L);
         assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
 
-        // External maker adds 25 shares at 0.50 (size becomes 115):
-        // since consumed was clamped to 90, 25 new shares become available at 0.50
-        book.applyDelta("SELL", 0.50, 115.0, 1600L);
+        // External maker adds 25 shares at 0.50 (size becomes 115): 25 new shares become available at 0.50
+        book.applyTickDelta(true, false, 5000, 115.0, 1600L);
         assertThat(book.getBestAskUp()).isCloseTo(0.50, within(0.0001));
         assertThat(book.getDepth1cUp()).isCloseTo(25.0, within(0.0001));
 
         // Level 0.50 completely disappears from the order book (size = 0) -> resets consumed memory
-        book.applyDelta("SELL", 0.50, 0.0, 1700L);
+        book.applyTickDelta(true, false, 5000, 0.0, 1700L);
         assertThat(book.getBestAskUp()).isCloseTo(0.52, within(0.0001));
 
         // Level 0.50 reappears with size 50 -> full 50 shares available because consumed memory was reset
-        book.applyDelta("SELL", 0.50, 50.0, 1800L);
+        book.applyTickDelta(true, false, 5000, 50.0, 1800L);
         assertThat(book.getBestAskUp()).isCloseTo(0.50, within(0.0001));
         assertThat(book.getDepth1cUp()).isCloseTo(50.0, within(0.0001));
+    }
+
+    @Test
+    @DisplayName("Dirty-flag cached toOrderBookQuote must produce identical quotes to uncached recomputation across deep and BBO mutations")
+    void shouldProduceBitIdenticalQuotesWithDirtyFlagCaching() {
+        PolymarketOrderBook cachedBook = new PolymarketOrderBook();
+
+        cachedBook.clearSideForSnapshot(true);
+        cachedBook.setSnapshotLevel(true, true, 4900, 120.0);
+        cachedBook.setSnapshotLevel(true, true, 4000, 500.0);
+        cachedBook.setSnapshotLevel(true, false, 5100, 60.0);
+        cachedBook.setSnapshotLevel(true, false, 5200, 80.0);
+        cachedBook.setSnapshotLevel(true, false, 7500, 400.0);
+        cachedBook.finishBookSnapshot(true);
+
+        cachedBook.clearSideForSnapshot(false);
+        cachedBook.setSnapshotLevel(false, true, 4800, 150.0);
+        cachedBook.setSnapshotLevel(false, false, 5000, 70.0);
+        cachedBook.setSnapshotLevel(false, false, 5150, 90.0);
+        cachedBook.setSnapshotLevel(false, false, 8000, 300.0);
+        cachedBook.finishBookSnapshot(false);
+
+        OrderBookQuote q1 = cachedBook.toOrderBookQuote(1000L);
+        assertThat(q1.bestAskUp()).isCloseTo(0.51, within(1e-6));
+        assertThat(q1.estimatedFillPriceUp()).isCloseTo((60.0 * 0.51 + 40.0 * 0.52) / 100.0, within(1e-6));
+        assertThat(q1.estimatedFillPriceDown()).isCloseTo((70.0 * 0.50 + 30.0 * 0.515) / 100.0, within(1e-6));
+
+        // 1. Deep ask & deep bid updates far outside BBO / 1c depth / 100-share slippage range
+        cachedBook.applyTickDelta(true, false, 7500, 900.0, 1010L);
+        cachedBook.applyTickDelta(true, true, 4000, 250.0, 1010L);
+        cachedBook.applyTickDelta(false, false, 8000, 600.0, 1010L);
+        OrderBookQuote q2 = cachedBook.toOrderBookQuote(1010L);
+        assertThat(q2.bestAskUp()).isEqualTo(q1.bestAskUp());
+        assertThat(q2.bestBidUp()).isEqualTo(q1.bestBidUp());
+        assertThat(q2.depth1cUp()).isEqualTo(q1.depth1cUp());
+        assertThat(q2.depth1cDown()).isEqualTo(q1.depth1cDown());
+        assertThat(q2.estimatedFillPriceUp()).isEqualTo(q1.estimatedFillPriceUp());
+        assertThat(q2.estimatedFillPriceDown()).isEqualTo(q1.estimatedFillPriceDown());
+        assertThat(q2.timestampMs()).isEqualTo(1010L);
+
+        // 2. Better ask inserted inside active range -> must invalidate and recompute immediately
+        cachedBook.applyTickDelta(true, false, 5050, 100.0, 1020L);
+        OrderBookQuote q3 = cachedBook.toOrderBookQuote(1020L);
+        assertThat(q3.bestAskUp()).isCloseTo(0.505, within(1e-6));
+        assertThat(q3.estimatedFillPriceUp()).isCloseTo(0.505, within(1e-6));
+        assertThat(q3.depth1cUp()).isCloseTo(160.0, within(1e-6));
+
+        // 3. Execute fill consuming 50 shares -> must invalidate and update effective depth & slippage
+        cachedBook.executeFill(true, true, 50.0, 0.55);
+        OrderBookQuote q4 = cachedBook.toOrderBookQuote(1030L);
+        assertThat(q4.depth1cUp()).isCloseTo(110.0, within(1e-6));
+        assertThat(q4.estimatedFillPriceUp()).isCloseTo((50.0 * 0.505 + 50.0 * 0.51) / 100.0, within(1e-6));
     }
 }

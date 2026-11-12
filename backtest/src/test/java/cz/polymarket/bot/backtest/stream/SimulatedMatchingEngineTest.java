@@ -21,7 +21,7 @@ class SimulatedMatchingEngineTest {
     @DisplayName("Should schedule pending order with 2x round-trip latency scaled by latencyFactor and match against delayed book state")
     void shouldSimulateOrderWithTimeVaryingLatencyAndLatencyFactor() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        book.applyDelta("SELL", 0.50, 1000.0, 1000L);
+        book.applyTickDelta(true, false, 5000, 1000.0, 1000L);
         book.setLastObservedOneWayLatencyMs(15L); // 15ms one-way latency -> 30ms round-trip at factor 1.0
 
         // Configure latencyFactor = 2.0 -> expected execution delay = 2 * 15ms * 2.0 = 60ms
@@ -47,8 +47,8 @@ class SimulatedMatchingEngineTest {
 
         // Simulate the book moving at t = 1030ms (before order reaches exchange at 1060ms):
         // 0.50 ask disappears, new best ask is 0.52
-        book.applyDelta("SELL", 0.50, 0.0, 1030L);
-        book.applyDelta("SELL", 0.52, 1000.0, 1030L);
+        book.applyTickDelta(true, false, 5000, 0.0, 1030L);
+        book.applyTickDelta(true, false, 5200, 1000.0, 1030L);
 
         // Now execute pending order at t = 1060ms
         ExecutionReport report = engine.executePendingOrder((BacktestEvent.PendingOrderExecutionEvent) event);
@@ -73,9 +73,9 @@ class SimulatedMatchingEngineTest {
     @DisplayName("Should support multiple simultaneous positions in a single market and deplete book liquidity across orders")
     void shouldSupportMultipleSimultaneousPositionsAndDepleteLiquidity() {
         PolymarketOrderBook book = new PolymarketOrderBook();
-        book.applyDelta("SELL", 0.50, 50.0, 1000L);
-        book.applyDelta("SELL", 0.52, 100.0, 1000L);
-        book.applyDelta("BUY", 0.75, 100.0, 1000L);
+        book.applyTickDelta(true, false, 5000, 50.0, 1000L);
+        book.applyTickDelta(true, false, 5200, 100.0, 1000L);
+        book.applyTickDelta(true, true, 7500, 100.0, 1000L);
         book.setLastObservedOneWayLatencyMs(15L);
 
         SimulatedMatchingEngine engine = new SimulatedMatchingEngine(book, 1.0);

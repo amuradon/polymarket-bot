@@ -2,6 +2,7 @@ package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.Timeframe;
@@ -10,13 +11,11 @@ import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
-import org.duckdb.DuckDBDriver;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -26,7 +25,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.PriorityQueue;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
@@ -34,40 +32,36 @@ import java.util.function.BiConsumer;
 /**
  * High-performance chronological event multiplexer and streamer for backtesting.
  * <p>
- * Streams captured events from collector Parquet archives ordered strictly by the local EC2
- * capture timestamp {@code ts} ({@link BacktestEvent#timestampMs()}).
- * <p>
- * Optimizes multi-candle backtesting over millions of rows by:
- * <ul>
- *   <li>Reusing a single DuckDB connection across candles,</li>
- *   <li>Reading daily stream Parquet files at most once per UTC day and slicing candle intervals
- *       via {@code O(log N)} binary search, and</li>
- *   <li>Loading external (Binance, Deribit) streams strictly when declared in
- *       {@code requiredExternalStreams}.</li>
- * </ul>
+ * Streams captured events from typed collector Parquet archives ordered strictly by the local EC2
+ * capture timestamp {@code ts} ({@link BacktestEvent#timestampMs()}) using a zero-copy 3-way merge
+ * over:
+ * <ol>
+ *   <li>Lazy DuckDB streaming cursor grouping typed Polymarket CLOB {@code frame_id} rows,</li>
+ *   <li>Direct array cursor over shared daily stream events ({@code O(log N)} binary search slice), and</li>
+ *   <li>Small priority queue for candle lifecycle milestones and dynamically scheduled pending orders.</li>
+ * </ol>
  */
 public class ChronologicalEventStreamer implements AutoCloseable {
 
     private static final BacktestEvent[] EMPTY_EVENTS = new BacktestEvent[0];
+    private static final boolean[] EMPTY_BOOLEANS = new boolean[0];
+    private static final int[] EMPTY_INTS = new int[0];
+    private static final double[] EMPTY_DOUBLES = new double[0];
+    private static final long BOUNDARY_TWAP_OFFSET_MS = 10_000L;
+    private static final long FAST_SNAPSHOT_LOOKBACK_MS = 30_000L;
     private static final long SPOT_TWAP_WARMUP_MS = 65_000L;
     private static final long KRAKEN_USDT_WARMUP_MS = 1_800_000L;
 
-    static {
-        try {
-            Class.forName("org.duckdb.DuckDBDriver");
-        } catch (ClassNotFoundException e) {
-            Log.fatal("Fatal error: DuckDB JDBC driver not found on classpath; event streamer cannot run", e);
-        }
-    }
-
-    private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(4096);
+    private final DuckDbSessionManager duckDbSessionManager;
+    private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(16);
     private final CalculatedSpotTwapEngine calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
+
     private Connection sharedConnection;
     private Statement clobStatement;
     private ResultSet clobResultSet;
     private Path activeClobFile;
     private long clobSeq;
-    private BacktestEvent.PolymarketClobEvent nextClobEvent;
+    private BacktestEvent.PolymarketClobFrameEvent nextClobEvent;
 
     private final SpotVenueCursor[] venueCursors = {
             new SpotVenueCursor(CalculatedSpotTwapEngine.SpotVenue.BINANCE),
@@ -84,7 +78,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private long calcSpotSeq;
     private BacktestEvent.CalculatedSpotTwapEvent nextCalculatedSpotTwapEvent;
 
-    private static final class SpotVenueCursor {
+    private final class SpotVenueCursor {
         final CalculatedSpotTwapEngine.SpotVenue venue;
         Connection connection;
         Statement statement;
@@ -101,7 +95,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         void open(String sql) throws SQLException {
             closeStream();
             if (connection == null || connection.isClosed()) {
-                connection = openStreamingConnection();
+                connection = duckDbSessionManager.openSession();
             }
             statement = connection.createStatement();
             resultSet = statement.executeQuery(sql);
@@ -149,70 +143,100 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    // Rolling single-day cache for daily Parquet streams to avoid re-scanning 96 times per UTC day
-    private String cachedDateStr;
-    private String cachedSymbol;
-    private Set<ExternalStreamType> cachedExternalStreams;
-    private BacktestEvent[] cachedDailyStreamEvents = EMPTY_EVENTS;
+    // 1-row lookahead state and reusable scratch buffers for grouping consecutive frame_id rows
+    private boolean hasLookaheadClobRow;
+    private boolean clobResultSetExhausted;
+    private long laTs;
+    private long laServerTs;
+    private long laFrameId;
+    private byte laEventCode;
+    private boolean laIsUp;
+    private boolean laIsUpNull;
+    private boolean laIsBid;
+    private boolean laIsBidNull;
+    private int laTick;
+    private boolean laTickNull;
+    private double laSize;
+    private boolean laSizeNull;
+
+    private boolean[] scratchUpFlags = new boolean[128];
+    private boolean[] scratchBidFlags = new boolean[128];
+    private int[] scratchTicks = new int[128];
+    private double[] scratchSizes = new double[128];
+
+    // Zero-copy daily event array slice cursor
+    private BacktestEvent[] activeDailyEvents = EMPTY_EVENTS;
+    private int dailyCursorIdx = 0;
+    private int dailyEndIdx = 0;
 
     /**
-     * Opens a new in-memory DuckDB JDBC connection configured for single-threaded,
-     * lazy vector result streaming ({@code jdbc_stream_results = true}, {@code threads = 1})
-     * so large Parquet files are never materialized in native C++ memory.
+     * Constructs a chronological event streamer backed by the shared DuckDB session manager.
      *
-     * @return configured DuckDB {@link Connection}
-     * @throws SQLException if connection creation or configuration fails
+     * @param duckDbSessionManager shared DuckDB session manager providing streaming connections
      */
-    public static Connection openStreamingConnection() throws SQLException {
-        Properties props = new Properties();
-        props.setProperty(DuckDBDriver.JDBC_STREAM_RESULTS, "true");
-        Connection conn = DriverManager.getConnection("jdbc:duckdb:", props);
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("SET threads = 1;");
+    public ChronologicalEventStreamer(DuckDbSessionManager duckDbSessionManager) {
+        if (duckDbSessionManager == null) {
+            Log.error("Invalid argument in ChronologicalEventStreamer: duckDbSessionManager cannot be null");
+            throw new IllegalArgumentException("duckDbSessionManager cannot be null");
         }
-        return conn;
+        this.duckDbSessionManager = duckDbSessionManager;
     }
 
     /**
-     * Checks if there are pending events in the active CLOB stream, calculated Spot/TWAP stream, or priority queue.
+     * Checks if there are pending events in the CLOB stream, calculated Spot/TWAP stream, daily slice cursor, or priority queue.
      *
      * @return true if more events exist
      */
     public boolean hasNext() {
-        return nextClobEvent != null || nextCalculatedSpotTwapEvent != null || !queue.isEmpty();
+        return nextClobEvent != null || nextCalculatedSpotTwapEvent != null || dailyCursorIdx < dailyEndIdx || !queue.isEmpty();
     }
 
     /**
-     * Retrieves and removes the next chronological event by merge-streaming the heads of the
-     * active CLOB cursor, the calculated Spot/TWAP cursor, and the priority queue of daily/lifecycle/order events.
+     * Retrieves and removes the next chronological event via {@code O(1)} merge across
+     * the active CLOB cursor, the zero-copy daily stream cursor, the calculated Spot/TWAP cursor, and the dynamic priority queue.
      *
      * @return next event, or null if no events remain
      */
     public BacktestEvent next() {
-        BacktestEvent queuedHead = queue.peek();
-        BacktestEvent best = queuedHead;
-        int source = 0; // 0 = queue, 1 = clob, 2 = calculatedSpotTwap
+        BacktestEvent a = nextClobEvent;
+        BacktestEvent b = (dailyCursorIdx < dailyEndIdx) ? activeDailyEvents[dailyCursorIdx] : null;
+        BacktestEvent c = nextCalculatedSpotTwapEvent;
+        BacktestEvent d = queue.peek();
 
-        if (nextClobEvent != null && (best == null || nextClobEvent.compareTo(best) <= 0)) {
-            best = nextClobEvent;
-            source = 1;
+        int winner = 0;
+        BacktestEvent best = null;
+        if (a != null) {
+            best = a;
+            winner = 1;
         }
-        if (nextCalculatedSpotTwapEvent != null && (best == null || nextCalculatedSpotTwapEvent.compareTo(best) < 0)) {
-            best = nextCalculatedSpotTwapEvent;
-            source = 2;
+        if (b != null && (best == null || b.compareTo(best) < 0)) {
+            best = b;
+            winner = 2;
+        }
+        if (c != null && (best == null || c.compareTo(best) < 0)) {
+            best = c;
+            winner = 3;
+        }
+        if (d != null && (best == null || d.compareTo(best) < 0)) {
+            winner = 4;
         }
 
-        if (source == 1) {
-            BacktestEvent.PolymarketClobEvent current = nextClobEvent;
-            advanceClobCursor();
-            return current;
-        }
-        if (source == 2) {
-            BacktestEvent.CalculatedSpotTwapEvent current = nextCalculatedSpotTwapEvent;
-            advanceCalculatedSpotTwapCursor();
-            return current;
-        }
-        return queue.poll();
+        return switch (winner) {
+            case 1 -> {
+                advanceClobCursor();
+                yield a;
+            }
+            case 2 -> {
+                dailyCursorIdx++;
+                yield b;
+            }
+            case 3 -> {
+                advanceCalculatedSpotTwapCursor();
+                yield c;
+            }
+            case 4 -> queue.poll();
+            default -> null;
+        };
     }
 
     /**
@@ -227,18 +251,21 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Clears all pending events and closes any active streaming cursors for the current candle.
+     * Clears all pending events, resets the daily slice cursor, and closes any active CLOB and calculated Spot/TWAP cursors.
      */
     public void clear() {
         closeClobStream();
         closeCalculatedSpotTwapStream();
+        activeDailyEvents = EMPTY_EVENTS;
+        dailyCursorIdx = 0;
+        dailyEndIdx = 0;
         queue.clear();
     }
 
     /**
      * Loads all shared daily stream events ({@code polymarket/price_crypto}, {@code polymarket/price_crypto_twap_60s},
      * and any strategy-requested external Binance/Deribit streams) for a single UTC day into a sorted,
-     * immutable array that can be shared read-only across all parallel 15-minute market workers of that day.
+     * immutable array shared read-only across all parallel 15-minute market workers of that day.
      *
      * @param datasetService collector Parquet dataset service
      * @param symbol trading asset symbol
@@ -256,6 +283,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             return EMPTY_EVENTS;
         }
 
+        DuckDbSessionManager sessionManager = datasetService.getDuckDbSessionManager();
         Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
 
         record DailyLoaderTask(Path file, BiConsumer<Statement, List<BacktestEvent>> loader) {}
@@ -317,7 +345,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
         if (tasks.size() == 1) {
             List<BacktestEvent> singleList = new ArrayList<>(16_384);
-            try (Connection conn = openStreamingConnection();
+            try (Connection conn = sessionManager.openSession();
                  Statement stmt = conn.createStatement()) {
                 tasks.getFirst().loader().accept(stmt, singleList);
             } catch (SQLException e) {
@@ -338,7 +366,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             DailyLoaderTask task = tasks.get(i);
             futures[i] = CompletableFuture.supplyAsync(() -> {
                 List<BacktestEvent> localEvents = new ArrayList<>(16_384);
-                try (Connection conn = openStreamingConnection();
+                try (Connection conn = sessionManager.openSession();
                      Statement stmt = conn.createStatement()) {
                     task.loader().accept(stmt, localEvents);
                 } catch (SQLException e) {
@@ -379,7 +407,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
      * @param sharedDailyEvents sorted array of daily stream events
      * @param tStart candle start epoch seconds
      * @param tEnd candle end epoch seconds
-     * @return constructed MarketCandle
+     * @return constructed MarketCandle, or {@code null} if no spot trades exist
      */
     public static MarketCandle buildSpotCandleFromDailyEvents(BacktestEvent[] sharedDailyEvents, long tStart, long tEnd) {
         if (sharedDailyEvents == null || sharedDailyEvents.length == 0) {
@@ -466,33 +494,40 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Loads all chronological events for a specific 15-minute market interval using pre-loaded
-     * shared daily stream events for the UTC day and loading only the market-specific Polymarket CLOB file.
+     * Loads chronological events for a specific 15-minute market interval using pre-loaded shared daily
+     * stream events (always covering the full {@code [tStartMs, tEndMs]} interval including boundary 60s TWAP)
+     * while optionally pruning Polymarket CLOB frames to the final {@code clobLookbackMs} window seeded
+     * from the latest pre-window {@code book} snapshots.
      *
      * @param metadata market metadata descriptor
      * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
+     * @param clobLookbackMs lookback window before {@code tEndMs} in milliseconds (or {@link Long#MAX_VALUE} for full stream)
      */
     public void loadCandleEvents(
             CollectorMarketMetadata metadata,
-            BacktestEvent[] sharedDailyStreamEvents) {
-        loadCandleEvents(metadata, sharedDailyStreamEvents, null, null);
+            BacktestEvent[] sharedDailyStreamEvents,
+            long clobLookbackMs) {
+        loadCandleEvents(metadata, sharedDailyStreamEvents, null, null, clobLookbackMs);
     }
 
     /**
      * Loads all chronological events for a specific 15-minute market interval using pre-loaded
      * shared daily stream events for the UTC day and lazily streaming the Polymarket CLOB file
-     * plus the calculated USD Spot &amp; 60s TWAP from Binance Spot and Kraken Spot Parquet files.
+     * (optionally pruned to {@code clobLookbackMs}) plus the calculated USD Spot &amp; 60s TWAP
+     * from Binance, Coinbase, and Kraken Spot Parquet files.
      *
      * @param metadata market metadata descriptor
      * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
-     * @param datasetService optional collector Parquet dataset service for streaming Binance/Kraken files
+     * @param datasetService optional collector Parquet dataset service for streaming Binance/Coinbase/Kraken files
      * @param symbol optional trading asset symbol
+     * @param clobLookbackMs lookback window before {@code tEndMs} in milliseconds (or {@link Long#MAX_VALUE} for full stream)
      */
     public void loadCandleEvents(
             CollectorMarketMetadata metadata,
             BacktestEvent[] sharedDailyStreamEvents,
             CollectorParquetDatasetService datasetService,
-            String symbol) {
+            String symbol,
+            long clobLookbackMs) {
 
         if (metadata == null) {
             return;
@@ -505,59 +540,11 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         TradeDirection actualOutcome = metadata.actualOutcome() != null ? metadata.actualOutcome() : TradeDirection.UP;
 
         scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
-
-        if (sharedDailyStreamEvents != null && sharedDailyStreamEvents.length > 0) {
-            scheduleDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
-        }
-
-        openPolymarketClobStream(metadata.marketParquetFile(), tEndMs);
+        prepareDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
+        openPolymarketClobStream(metadata.marketParquetFile(), tStartMs, tEndMs, clobLookbackMs);
         if (datasetService != null && metadata.dateStr() != null && !metadata.dateStr().isBlank()) {
             openCalculatedSpotTwapStream(datasetService, symbol, metadata.dateStr(), tStartMs, tEndMs);
         }
-    }
-
-    /**
-     * Loads all chronological events for a specific 15-minute market interval from the collector
-     * Parquet archives, loading only the external streams requested by the active strategy.
-     *
-     * @param metadata market metadata descriptor
-     * @param datasetService collector Parquet dataset service
-     * @param symbol trading asset symbol
-     * @param requiredExternalStreams set of external streams required by the strategy
-     */
-    public void loadCandleEvents(
-            CollectorMarketMetadata metadata,
-            CollectorParquetDatasetService datasetService,
-            String symbol,
-            Set<ExternalStreamType> requiredExternalStreams) {
-
-        if (metadata == null) {
-            return;
-        }
-
-        long tStart = metadata.tStart();
-        long tEnd = metadata.tEnd();
-        long tStartMs = tStart * 1000L;
-        long tEndMs = tEnd * 1000L;
-        TradeDirection actualOutcome = metadata.actualOutcome() != null ? metadata.actualOutcome() : TradeDirection.UP;
-        Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
-
-        scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
-
-        if (datasetService == null) {
-            return;
-        }
-
-        // Slice daily PolyBolt & External streams for [tStartMs, tEndMs] from day cache
-        String dateStr = metadata.dateStr();
-        if (dateStr != null && !dateStr.isBlank()) {
-            ensureDailyStreamsLoaded(datasetService, symbol, dateStr, extStreams);
-            scheduleDailySlice(this.cachedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
-            openCalculatedSpotTwapStream(datasetService, symbol, dateStr, tStartMs, tEndMs);
-        }
-
-        // Lazily stream 15m Polymarket CLOB market file (including pre-open subscription snapshots <= tEndMs)
-        openPolymarketClobStream(metadata.marketParquetFile(), tEndMs);
     }
 
     private void scheduleMandatoryLifecycleEvents(
@@ -600,58 +587,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                     )
             ));
         }
-    }
-
-    private void openPolymarketClobStream(Path marketFile, long tEndMs) {
-        closeClobStream();
-        if (marketFile == null || !Files.exists(marketFile)) {
-            Log.warnf("Polymarket CLOB market file does not exist: %s", marketFile);
-            return;
-        }
-        String normPath = marketFile.toAbsolutePath().toString().replace('\\', '/');
-        String sql = "SELECT ts, event_type, asset_id, COALESCE(price, 0.0), COALESCE(size, 0.0), side, CAST(payload AS VARCHAR) " +
-                "FROM read_parquet('" + normPath + "') " +
-                "WHERE ts <= " + tEndMs +
-                " AND event_type IN ('clob', 'book', 'price_change', 'last_trade_price')";
-
-        try {
-            this.activeClobFile = marketFile;
-            this.clobSeq = 0L;
-            this.clobStatement = getOrCreateStatement();
-            this.clobResultSet = this.clobStatement.executeQuery(sql);
-            advanceClobCursor();
-        } catch (SQLException e) {
-            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
-            closeClobStream();
-        }
-    }
-
-    private void advanceClobCursor() {
-        if (clobResultSet == null) {
-            nextClobEvent = null;
-            return;
-        }
-        try {
-            while (clobResultSet.next()) {
-                long ts = clobResultSet.getLong(1);
-                String eventType = clobResultSet.getString(2);
-                String assetId = clobResultSet.getString(3);
-                double price = clobResultSet.getDouble(4);
-                double size = clobResultSet.getDouble(5);
-                String side = clobResultSet.getString(6);
-                String payload = clobResultSet.getString(7);
-                if ("clob".equals(eventType) && (payload == null || "[]".equals(payload.trim()))) {
-                    continue;
-                }
-                nextClobEvent = new BacktestEvent.PolymarketClobEvent(
-                        ts, ++clobSeq, eventType, assetId, price, size, side, payload
-                );
-                return;
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", activeClobFile, e.getMessage());
-        }
-        closeClobStream();
     }
 
     private void openCalculatedSpotTwapStream(
@@ -842,45 +777,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private void closeClobStream() {
-        nextClobEvent = null;
-        activeClobFile = null;
-        if (clobResultSet != null) {
-            try {
-                clobResultSet.close();
-            } catch (SQLException ignored) {
-            }
-            clobResultSet = null;
-        }
-        if (clobStatement != null) {
-            try {
-                clobStatement.close();
-            } catch (SQLException ignored) {
-            }
-            clobStatement = null;
-        }
-    }
-
-    private void ensureDailyStreamsLoaded(
-            CollectorParquetDatasetService datasetService,
-            String symbol,
-            String dateStr,
-            Set<ExternalStreamType> extStreams) {
-
-        String symKey = CollectorParquetDatasetService.extractBaseAsset(symbol);
-        if (dateStr.equals(cachedDateStr)
-                && symKey.equals(cachedSymbol)
-                && extStreams.equals(cachedExternalStreams)) {
-            return;
-        }
-
-        this.cachedDateStr = dateStr;
-        this.cachedSymbol = symKey;
-        this.cachedExternalStreams = Set.copyOf(extStreams);
-        this.cachedDailyStreamEvents = loadSharedDailyStreams(datasetService, symbol, dateStr, extStreams);
-    }
-
-    private void scheduleDailySlice(
+    private void prepareDailySlice(
             BacktestEvent[] events,
             long tStartMs,
             long tEndMs,
@@ -889,29 +786,48 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             long tEnd) {
 
         if (events == null || events.length == 0) {
+            this.activeDailyEvents = EMPTY_EVENTS;
+            this.dailyCursorIdx = 0;
+            this.dailyEndIdx = 0;
+            if (!Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0) {
+                scheduleBoundaryTwapEvent(tStartMs, metadata.twapOpen(), resolveCryptoSymbol(metadata));
+            }
             return;
         }
 
         int startIdx = findFirstIndexAtOrAfter(events, tStartMs);
+        int endIdx = findFirstIndexAfter(events, tEndMs);
+        this.activeDailyEvents = events;
+        this.dailyCursorIdx = startIdx;
+        this.dailyEndIdx = endIdx;
+
+        boolean hasOpeningTwapSample = false;
+        String observedCryptoSymbol = null;
         double lastObservedPrice = Double.NaN;
         double twapOpen = metadata.twapOpen();
         long t60Ms = (tStart + 60L) * 1000L;
         boolean emitted60sTwapUpdate = false;
 
-        for (int i = startIdx; i < events.length; i++) {
+        for (int i = startIdx; i < endIdx; i++) {
             BacktestEvent ev = events[i];
             long ts = ev.timestampMs();
-            if (ts > tEndMs) {
-                break;
-            }
-            scheduleEvent(ev);
 
             if (ev instanceof BacktestEvent.PolymarketCryptoTwap60sEvent twapEv) {
+                if (observedCryptoSymbol == null && twapEv.symbol() != null && !twapEv.symbol().isBlank()) {
+                    observedCryptoSymbol = twapEv.symbol();
+                }
+                long effTs = twapEv.twapTimestampMs() > 0L ? twapEv.twapTimestampMs() : ts;
+                if (effTs >= tStartMs && effTs <= tStartMs + BOUNDARY_TWAP_OFFSET_MS) {
+                    hasOpeningTwapSample = true;
+                }
                 if (Double.isNaN(twapOpen) || twapOpen <= 0.0) {
                     twapOpen = twapEv.twapPrice();
                 }
                 lastObservedPrice = twapEv.twapPrice();
             } else if (ev instanceof BacktestEvent.PolymarketCryptoPriceEvent priceEv) {
+                if (observedCryptoSymbol == null && priceEv.symbol() != null && !priceEv.symbol().isBlank()) {
+                    observedCryptoSymbol = priceEv.symbol();
+                }
                 lastObservedPrice = priceEv.price();
             } else if (ev instanceof BacktestEvent.BinanceSpotTradeEvent spotEv) {
                 lastObservedPrice = spotEv.price();
@@ -935,6 +851,11 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             }
         }
 
+        if (!hasOpeningTwapSample && !Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0) {
+            String sym = observedCryptoSymbol != null ? observedCryptoSymbol : resolveCryptoSymbol(metadata);
+            scheduleBoundaryTwapEvent(tStartMs, metadata.twapOpen(), sym);
+        }
+
         if (!emitted60sTwapUpdate && !Double.isNaN(twapOpen) && twapOpen > 0.0 && !Double.isNaN(lastObservedPrice)) {
             BigDecimal openBd = BigDecimal.valueOf(twapOpen);
             BigDecimal spotBd = BigDecimal.valueOf(lastObservedPrice);
@@ -949,6 +870,234 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                             false
                     )
             ));
+        }
+    }
+
+    private void scheduleBoundaryTwapEvent(long tStartMs, double twapOpen, String cryptoSymbol) {
+        scheduleEvent(new BacktestEvent.PolymarketCryptoTwap60sEvent(
+                tStartMs,
+                0L,
+                cryptoSymbol,
+                "chainlink",
+                twapOpen,
+                60,
+                tStartMs
+        ));
+    }
+
+    private static String resolveCryptoSymbol(CollectorMarketMetadata metadata) {
+        if (metadata != null && metadata.marketParquetFile() != null) {
+            Path fileName = metadata.marketParquetFile().getFileName();
+            if (fileName != null) {
+                String name = fileName.toString();
+                int dashIdx = name.indexOf('-');
+                if (dashIdx > 0) {
+                    return name.substring(0, dashIdx).toLowerCase(Locale.ROOT) + "usd";
+                }
+            }
+        }
+        return "btcusd";
+    }
+
+    private void openPolymarketClobStream(Path marketFile, long tStartMs, long tEndMs, long clobLookbackMs) {
+        closeClobStream();
+        if (marketFile == null || !Files.exists(marketFile)) {
+            Log.warnf("Polymarket CLOB market file does not exist: %s", marketFile);
+            return;
+        }
+        String normPath = marketFile.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
+
+        try {
+            Statement stmt = getOrCreateStatement();
+            long seedStartTs = 0L;
+            if (clobLookbackMs > 0L && clobLookbackMs < (tEndMs - tStartMs)) {
+                long clobWindowStartMs = Math.max(tStartMs, tEndMs - clobLookbackMs);
+                seedStartTs = resolveClobSeedStartTs(stmt, normPath, clobWindowStartMs);
+            }
+
+            String sql = "SELECT ts, server_ts, frame_id, event_code, is_up, is_bid, tick, size " +
+                    "FROM read_parquet('" + normPath + "') " +
+                    "WHERE ts >= " + seedStartTs + " AND ts <= " + tEndMs + " AND event_code > 0";
+
+            this.activeClobFile = marketFile;
+            this.clobSeq = 0L;
+            this.hasLookaheadClobRow = false;
+            this.clobResultSetExhausted = false;
+            this.clobStatement = stmt;
+            this.clobResultSet = stmt.executeQuery(sql);
+            advanceClobCursor();
+        } catch (SQLException e) {
+            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", marketFile, e.getMessage());
+            closeClobStream();
+        }
+    }
+
+    private static long resolveClobSeedStartTs(Statement stmt, String normPath, long clobWindowStartMs) throws SQLException {
+        long fastFloorMs = Math.max(0L, clobWindowStartMs - FAST_SNAPSHOT_LOOKBACK_MS);
+        String fastSql = "SELECT MAX(ts) FILTER (WHERE is_up = true), MAX(ts) FILTER (WHERE is_up = false) " +
+                "FROM read_parquet('" + normPath + "') " +
+                "WHERE ts >= " + fastFloorMs + " AND ts <= " + clobWindowStartMs + " AND event_code = 1";
+
+        try (ResultSet rs = stmt.executeQuery(fastSql)) {
+            if (rs.next()) {
+                long upTs = rs.getLong(1);
+                boolean upNull = rs.wasNull();
+                long downTs = rs.getLong(2);
+                boolean downNull = rs.wasNull();
+                if (!upNull && !downNull && upTs > 0L && downTs > 0L) {
+                    return Math.min(upTs, downTs);
+                }
+            }
+        }
+
+        String fullPreSql = "SELECT " +
+                "MAX(ts) FILTER (WHERE event_code = 1 AND is_up = true), " +
+                "BOOL_OR(is_up = true), " +
+                "MAX(ts) FILTER (WHERE event_code = 1 AND is_up = false), " +
+                "BOOL_OR(is_up = false) " +
+                "FROM read_parquet('" + normPath + "') " +
+                "WHERE ts <= " + clobWindowStartMs + " AND event_code IN (1, 2)";
+
+        try (ResultSet rs = stmt.executeQuery(fullPreSql)) {
+            if (rs.next()) {
+                long upBookTs = rs.getLong(1);
+                boolean upBookNull = rs.wasNull();
+                boolean hasUp = rs.getBoolean(2) && !rs.wasNull();
+                long downBookTs = rs.getLong(3);
+                boolean downBookNull = rs.wasNull();
+                boolean hasDown = rs.getBoolean(4) && !rs.wasNull();
+
+                if (!hasUp && !hasDown) {
+                    return clobWindowStartMs;
+                }
+                long reqTs = clobWindowStartMs;
+                if (hasUp) {
+                    if (upBookNull || upBookTs <= 0L) {
+                        return 0L;
+                    }
+                    reqTs = Math.min(reqTs, upBookTs);
+                }
+                if (hasDown) {
+                    if (downBookNull || downBookTs <= 0L) {
+                        return 0L;
+                    }
+                    reqTs = Math.min(reqTs, downBookTs);
+                }
+                return reqTs;
+            }
+        }
+        return 0L;
+    }
+
+    private boolean readNextClobRowIntoLookahead() throws SQLException {
+        if (clobResultSet == null || clobResultSetExhausted) {
+            hasLookaheadClobRow = false;
+            return false;
+        }
+        if (!clobResultSet.next()) {
+            clobResultSetExhausted = true;
+            hasLookaheadClobRow = false;
+            return false;
+        }
+        laTs = clobResultSet.getLong(1);
+        laServerTs = clobResultSet.getLong(2);
+        laFrameId = clobResultSet.getLong(3);
+        laEventCode = clobResultSet.getByte(4);
+        laIsUp = clobResultSet.getBoolean(5);
+        laIsUpNull = clobResultSet.wasNull();
+        laIsBid = clobResultSet.getBoolean(6);
+        laIsBidNull = clobResultSet.wasNull();
+        laTick = clobResultSet.getInt(7);
+        laTickNull = clobResultSet.wasNull();
+        laSize = clobResultSet.getDouble(8);
+        laSizeNull = clobResultSet.wasNull();
+        hasLookaheadClobRow = true;
+        return true;
+    }
+
+    private void ensureScratchCapacity(int required) {
+        if (required <= scratchTicks.length) {
+            return;
+        }
+        int newCap = Math.max(required, scratchTicks.length << 1);
+        scratchUpFlags = Arrays.copyOf(scratchUpFlags, newCap);
+        scratchBidFlags = Arrays.copyOf(scratchBidFlags, newCap);
+        scratchTicks = Arrays.copyOf(scratchTicks, newCap);
+        scratchSizes = Arrays.copyOf(scratchSizes, newCap);
+    }
+
+    private void advanceClobCursor() {
+        if (clobResultSet == null) {
+            nextClobEvent = null;
+            return;
+        }
+        try {
+            if (!hasLookaheadClobRow && !readNextClobRowIntoLookahead()) {
+                closeClobStream();
+                return;
+            }
+
+            long frameTs = laTs;
+            long frameServerTs = laServerTs;
+            long frameId = laFrameId;
+            byte eventCode = laEventCode;
+            boolean bookIsUp = !laIsUpNull && laIsUp;
+            int levelCount = 0;
+
+            while (hasLookaheadClobRow
+                    && laFrameId == frameId
+                    && laTs == frameTs
+                    && laEventCode == eventCode) {
+                if ((eventCode == BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK
+                        || eventCode == BacktestEvent.PolymarketClobFrameEvent.EVENT_PRICE_CHANGE)
+                        && !laIsUpNull && !laIsBidNull && !laTickNull && !laSizeNull) {
+                    ensureScratchCapacity(levelCount + 1);
+                    scratchUpFlags[levelCount] = laIsUp;
+                    scratchBidFlags[levelCount] = laIsBid;
+                    scratchTicks[levelCount] = laTick;
+                    scratchSizes[levelCount] = laSize;
+                    levelCount++;
+                }
+                readNextClobRowIntoLookahead();
+            }
+
+            nextClobEvent = new BacktestEvent.PolymarketClobFrameEvent(
+                    frameTs,
+                    frameServerTs,
+                    ++clobSeq,
+                    eventCode,
+                    bookIsUp,
+                    levelCount,
+                    levelCount == 0 ? EMPTY_BOOLEANS : Arrays.copyOf(scratchUpFlags, levelCount),
+                    levelCount == 0 ? EMPTY_BOOLEANS : Arrays.copyOf(scratchBidFlags, levelCount),
+                    levelCount == 0 ? EMPTY_INTS : Arrays.copyOf(scratchTicks, levelCount),
+                    levelCount == 0 ? EMPTY_DOUBLES : Arrays.copyOf(scratchSizes, levelCount)
+            );
+            return;
+        } catch (SQLException e) {
+            Log.warnf("Could not stream Polymarket CLOB events from %s: %s", activeClobFile, e.getMessage());
+        }
+        closeClobStream();
+    }
+
+    private void closeClobStream() {
+        nextClobEvent = null;
+        activeClobFile = null;
+        hasLookaheadClobRow = false;
+        clobResultSetExhausted = false;
+        if (clobResultSet != null) {
+            try {
+                clobResultSet.close();
+            } catch (SQLException ignored) {
+            }
+            clobResultSet = null;
+        }
+        if (clobStatement != null) {
+            try {
+                clobStatement.close();
+            } catch (SQLException ignored) {
+            }
+            clobStatement = null;
         }
     }
 
@@ -968,11 +1117,27 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         return result;
     }
 
+    private static int findFirstIndexAfter(BacktestEvent[] events, long targetTsMs) {
+        int low = 0;
+        int high = events.length - 1;
+        int result = events.length;
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            if (events[mid].timestampMs() > targetTsMs) {
+                result = mid;
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        }
+        return result;
+    }
+
     private static void loadDailyPolymarketCryptoPrice(Statement stmt, Path file, List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(seq, 0), symbol, source, price, COALESCE(price_timestamp, ts) " +
                 "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
@@ -995,7 +1160,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(seq, 0), symbol, source, twap_price, COALESCE(window_seconds, 60), COALESCE(twap_timestamp, ts) " +
                 "FROM read_parquet('" + norm + "') WHERE twap_price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
@@ -1019,7 +1184,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
                 "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
@@ -1041,7 +1206,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
                 "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
@@ -1063,7 +1228,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(final_update_id, 0), bids[1].price, asks[1].price, " +
                 "COALESCE(list_sum([x.quantity FOR x IN bids]), 0.0), " +
                 "COALESCE(list_sum([x.quantity FOR x IN asks]), 0.0) " +
@@ -1091,7 +1256,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, side, COALESCE(price, 0.0), COALESCE(average_price, 0.0), COALESCE(accumulated_quantity, original_quantity, 0.0) " +
                 "FROM read_parquet('" + norm + "')";
         long seq = 0L;
@@ -1115,7 +1280,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (file == null || !Files.exists(file)) {
             return;
         }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/');
+        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
         String sql = "SELECT ts, COALESCE(trade_seq, 0), instrument_name, direction, price, COALESCE(amount, 0.0), " +
                 "COALESCE(mark_price, 0.0), COALESCE(index_price, 0.0) " +
                 "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
@@ -1139,25 +1304,21 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
     private Statement getOrCreateStatement() throws SQLException {
         if (sharedConnection == null || sharedConnection.isClosed()) {
-            sharedConnection = openStreamingConnection();
+            sharedConnection = duckDbSessionManager.openSession();
         }
         return sharedConnection.createStatement();
     }
 
     private Statement getOrCreateCalcKrakenStatement() throws SQLException {
         if (calcKrakenConnection == null || calcKrakenConnection.isClosed()) {
-            calcKrakenConnection = openStreamingConnection();
+            calcKrakenConnection = duckDbSessionManager.openSession();
         }
         return calcKrakenConnection.createStatement();
     }
 
     @Override
     public void close() {
-        closeClobStream();
-        closeCalculatedSpotTwapStream();
-        queue.clear();
-        cachedDailyStreamEvents = EMPTY_EVENTS;
-        cachedDateStr = null;
+        clear();
         if (sharedConnection != null) {
             try {
                 sharedConnection.close();

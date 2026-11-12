@@ -628,4 +628,21 @@ class UtterParameciumStrategyTest {
         ));
         assertThat(submittedOrders).isEmpty();
     }
+
+    @Test
+    @DisplayName("Should declare bounded CLOB lookback window while default TradingStrategy requests full candle")
+    void shouldDeclareBoundedClobLookbackWindowWhileDefaultStrategyRequestsFullCandle() {
+        TradingStrategy defaultStrategy = new TradingStrategy() {
+            @Override
+            public void init(StrategyContext context) {
+            }
+
+            @Override
+            public void onExecutionReport(ExecutionReport report) {
+            }
+        };
+
+        assertThat(defaultStrategy.getRequiredClobLookbackMs()).isEqualTo(Long.MAX_VALUE);
+        assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(76_000L);
+    }
 }

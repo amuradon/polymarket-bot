@@ -10,6 +10,7 @@ import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
+import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
@@ -20,6 +21,7 @@ import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.logging.Log;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -36,7 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -45,8 +48,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * Orders all events strictly by the local EC2 receipt timestamp ({@code ts}), simulates
  * time-varying execution latency derived from Polymarket CLOB server-vs-receipt timestamps
- * scaled by {@code latencyFactor}, and loads external (Binance, Deribit) streams and indicators
- * strictly when requested by the active {@link TradingStrategy}.
+ * scaled by {@code latencyFactor}, supports optional pre-seeded CLOB lookback windows while
+ * preserving full-candle 60s TWAP / crypto price streams, and executes parallel market workers
+ * on a bounded physical-core thread pool backed by a single shared DuckDB buffer manager.
  */
 @ApplicationScoped
 public class BacktestEngine {
@@ -60,9 +64,11 @@ public class BacktestEngine {
     private final String defaultOutputDir;
     private final double defaultCapital;
     private final double defaultLatencyFactor;
+    private final int workerCount;
+    private final ExecutorService workerPool;
 
     /**
-     * Primary constructor with all dependencies injected.
+     * Primary constructor with all dependencies and worker pool sizing injected.
      *
      * @param datasetService collector Parquet dataset discovery and path resolution service
      * @param strategyRegistry registry resolving requested strategies
@@ -73,6 +79,7 @@ public class BacktestEngine {
      * @param defaultOutputDir default destination directory for output JSON artifacts
      * @param defaultCapital default initial trading balance in USD
      * @param defaultLatencyFactor default multiplier for simulated order execution latency (default {@code 1.0})
+     * @param configuredWorkers number of parallel simulation workers (default {@code 4} physical cores)
      */
     @Inject
     public BacktestEngine(
@@ -89,7 +96,9 @@ public class BacktestEngine {
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultCapital,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double defaultLatencyFactor) {
+            double defaultLatencyFactor,
+            @ConfigProperty(name = "polymarket.backtest.workers", defaultValue = "4")
+            int configuredWorkers) {
         if (datasetService == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: datasetService cannot be null");
             throw new IllegalArgumentException("datasetService cannot be null");
@@ -119,27 +128,22 @@ public class BacktestEngine {
         this.defaultOutputDir = defaultOutputDir;
         this.defaultCapital = defaultCapital;
         this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
+        this.workerCount = configuredWorkers > 0 ? configuredWorkers : 4;
+
+        AtomicInteger threadSeq = new AtomicInteger(0);
+        this.workerPool = Executors.newFixedThreadPool(this.workerCount, runnable -> {
+            Thread t = new Thread(runnable, "backtest-worker-" + threadSeq.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
-     * Executes an event-driven backtest simulation using the default latency factor.
-     *
-     * @param strategyName registered name of trading strategy (defaults to configured strategy if null/blank)
-     * @param symbol trading asset pair (e.g. {@code "BTCUSDT"})
-     * @param startDate optional start date string ({@code yyyy-MM-dd})
-     * @param endDate optional end date string ({@code yyyy-MM-dd})
-     * @param initialCapital optional initial account balance in USD
-     * @param outputDirectory optional directory path to store output JSON
-     * @return BacktestResult containing summary metrics, trade records, and exported file path
+     * Shuts down the dedicated parallel market worker pool upon application teardown.
      */
-    public BacktestResult runBacktest(
-            String strategyName,
-            String symbol,
-            String startDate,
-            String endDate,
-            Double initialCapital,
-            String outputDirectory) {
-        return runBacktest(strategyName, symbol, startDate, endDate, initialCapital, outputDirectory, null);
+    @PreDestroy
+    public void shutdown() {
+        workerPool.shutdownNow();
     }
 
     /**
@@ -220,9 +224,9 @@ public class BacktestEngine {
         }
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f",
+            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d",
                     strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
-                    capital, resolvedLatencyFactor);
+                    capital, resolvedLatencyFactor, workerCount);
         }
 
         List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
@@ -262,7 +266,9 @@ public class BacktestEngine {
         double brierSum = 0.0;
         int evaluatedCount = 0;
 
-        List<MarketCandle> rollingCandleHistory = needCandleHistory ? new ArrayList<>(markets.size()) : List.of();
+        List<MarketCandle> rollingCandleHistory = needCandleHistory
+                ? new ArrayList<>(VwapCalculator.MAX_WINDOW_CANDLES * 2)
+                : List.of();
 
         for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
             String dateStr = dayEntry.getKey();
@@ -279,13 +285,15 @@ public class BacktestEngine {
                     ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr, requiredExternalStreams)
                     : new BacktestEvent[0];
 
-            // 2. Pre-build prior MarketCandle snapshots if strategy uses multi-candle indicators
+            // 2. Pre-build bounded (<= 96 candles) prior MarketCandle snapshots if strategy uses multi-candle indicators
             @SuppressWarnings("unchecked")
             List<MarketCandle>[] priorCandlesPerMarket = needCandleHistory ? new List[dayMarketCount] : null;
             if (needCandleHistory) {
                 for (int i = 0; i < dayMarketCount; i++) {
                     CollectorMarketMetadata m = dayMarkets.get(i);
-                    priorCandlesPerMarket[i] = List.copyOf(rollingCandleHistory);
+                    int histSize = rollingCandleHistory.size();
+                    int fromIdx = Math.max(0, histSize - VwapCalculator.MAX_WINDOW_CANDLES);
+                    priorCandlesPerMarket[i] = List.copyOf(rollingCandleHistory.subList(fromIdx, histSize));
                     MarketCandle built = ChronologicalEventStreamer.buildSpotCandleFromDailyEvents(
                             sharedDailyEvents, m.tStart(), m.tEnd());
                     if (built != null) {
@@ -294,11 +302,9 @@ public class BacktestEngine {
                 }
             }
 
-            // 3. Process the day's 15-minute Polymarket markets in parallel across CPU cores
+            // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
             MarketSimulationOutcome[] dayOutcomes = new MarketSimulationOutcome[dayMarketCount];
-            int numWorkers = parallelCapable
-                    ? Math.min(dayMarketCount, Math.max(1, Runtime.getRuntime().availableProcessors()))
-                    : 1;
+            int numWorkers = parallelCapable ? Math.min(dayMarketCount, workerCount) : 1;
 
             if (numWorkers <= 1) {
                 executeWorkerLoop(
@@ -338,7 +344,7 @@ public class BacktestEngine {
                             needMicroPrice,
                             resolvedLatencyFactor,
                             sym
-                    ), ForkJoinPool.commonPool());
+                    ), workerPool);
                 }
                 CompletableFuture.allOf(workers).join();
             }
@@ -429,7 +435,7 @@ public class BacktestEngine {
             List<MarketCandle>[] priorCandlesPerMarket,
             MarketSimulationOutcome[] dayOutcomes,
             TradingStrategy templateStrategy,
-            boolean createFreshStrategyPerMarket,
+            boolean createWorkerStrategyCopy,
             Set<IndicatorType> reqIndicatorsSet,
             IndicatorType[] requiredIndicators,
             boolean hasIndicators,
@@ -444,14 +450,16 @@ public class BacktestEngine {
         SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
         DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(reqIndicatorsSet);
 
-        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer()) {
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(datasetService.getDuckDbSessionManager())) {
             matchingEngine.setEventScheduler(streamer::scheduleEvent);
             BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
 
-            TradingStrategy workerStrategy = createFreshStrategyPerMarket ? null : templateStrategy;
-            if (workerStrategy != null) {
-                workerStrategy.init(context);
-            }
+            TradingStrategy activeStrategy = createWorkerStrategyCopy
+                    ? templateStrategy.createInstance()
+                    : templateStrategy;
+            activeStrategy.reset();
+            activeStrategy.init(context);
+            long clobLookbackMs = activeStrategy.getRequiredClobLookbackMs();
 
             while (true) {
                 int idx = cursor.getAndIncrement();
@@ -467,21 +475,21 @@ public class BacktestEngine {
                     continue;
                 }
 
-                if (Log.isInfoEnabled()) {
-                    Log.infof("Processing market at %d (%s): twapOpen=%.2f, twapClose=%.2f, outcome=%s",
+                if (Log.isDebugEnabled()) {
+                    Log.debugf("Processing market at %d (%s): twapOpen=%.2f, twapClose=%.2f, outcome=%s",
                             market.tStart(), market.datetimeUtc(), market.twapOpen(), market.twapClose(), market.actualOutcome());
                 }
 
-                TradingStrategy activeStrategy = createFreshStrategyPerMarket
-                        ? templateStrategy.createInstance()
-                        : workerStrategy;
-                if (createFreshStrategyPerMarket) {
-                    activeStrategy.reset();
-                    activeStrategy.init(context);
-                }
+                activeStrategy.reset();
 
                 long tStart = market.tStart();
+                long tEnd = market.tEnd();
                 long tStartMs = tStart * 1000L;
+                long tEndMs = tEnd * 1000L;
+                boolean windowedClob = clobLookbackMs > 0L && clobLookbackMs < (tEndMs - tStartMs);
+                long quoteStartMs = windowedClob
+                        ? Math.max(tStartMs, tEndMs - clobLookbackMs)
+                        : 0L;
                 TradeDirection actualOutcome = market.actualOutcome() != null ? market.actualOutcome() : TradeDirection.UP;
 
                 orderBook.clear();
@@ -497,23 +505,36 @@ public class BacktestEngine {
                 }
 
                 streamer.clear();
-                streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol);
+                streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol, clobLookbackMs);
 
                 List<TradeRecord> marketTrades = List.of();
                 double brierDiffSq = 0.0;
                 boolean evaluated = false;
+                long lastSeededClobTs = -1L;
+                boolean quoteWindowEntered = !windowedClob;
 
                 while (streamer.hasNext()) {
                     BacktestEvent event = streamer.next();
                     long evTs = event.timestampMs();
                     context.setCurrentTimestampMs(evTs);
 
+                    if (!quoteWindowEntered && evTs >= quoteStartMs) {
+                        quoteWindowEntered = true;
+                        if (!(event instanceof BacktestEvent.PolymarketClobFrameEvent) && lastSeededClobTs >= 0L) {
+                            activeStrategy.onOrderBookQuote(orderBook.toOrderBookQuote(lastSeededClobTs));
+                            lastSeededClobTs = -1L;
+                        }
+                    }
+
                     switch (event) {
-                        case BacktestEvent.PolymarketClobEvent e -> {
-                            orderBook.applyCollectorEvent(e);
-                            if (evTs >= tStartMs) {
+                        case BacktestEvent.PolymarketClobFrameEvent e -> {
+                            orderBook.applyClobFrame(e);
+                            if (evTs >= quoteStartMs) {
+                                lastSeededClobTs = -1L;
                                 OrderBookQuote quote = orderBook.toOrderBookQuote(evTs);
                                 activeStrategy.onOrderBookQuote(quote);
+                            } else {
+                                lastSeededClobTs = evTs;
                             }
                         }
                         case BacktestEvent.CalculatedSpotTwapEvent e -> {
@@ -570,7 +591,7 @@ public class BacktestEngine {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);
                             if (report != null) {
                                 activeStrategy.onExecutionReport(report);
-                                if ("FILLED".equalsIgnoreCase(report.status()) && evTs >= tStartMs) {
+                                if ("FILLED".equalsIgnoreCase(report.status()) && evTs >= quoteStartMs) {
                                     activeStrategy.onOrderBookQuote(orderBook.toOrderBookQuote(evTs));
                                 }
                             }

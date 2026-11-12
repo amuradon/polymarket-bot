@@ -72,28 +72,39 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     }
 
     /**
-     * Raw Polymarket CLOB collector event ({@code clob}, {@code book}, {@code price_change}, {@code last_trade_price})
-     * read directly from {@code polymarket/<market>/<market>-<tStart>.parquet}.
+     * Typed Polymarket CLOB WebSocket frame ({@code book}, {@code price_change}, {@code last_trade_price})
+     * grouped by monotonic {@code frame_id} from the compact 10-column CLOB Parquet archive.
      *
      * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC
-     * @param sequenceNumber capture sequence number
-     * @param eventType collector event type ({@code clob}, {@code book}, {@code price_change}, {@code last_trade_price})
-     * @param assetId top-level asset token ID (nullable for multi-asset events like {@code price_change} or {@code clob})
-     * @param price top-level price (used for {@code last_trade_price})
-     * @param size top-level size (used for {@code last_trade_price})
-     * @param side top-level side (used for {@code last_trade_price})
-     * @param payload raw JSON payload captured from Polymarket WebSocket/REST
+     * @param serverTimestampMs exchange server timestamp ({@code server_ts}) in milliseconds UTC
+     * @param sequenceNumber capture frame sequence tiebreaker
+     * @param eventCode {@link #EVENT_BOOK} ({@code 1}), {@link #EVENT_PRICE_CHANGE} ({@code 2}), or {@link #EVENT_LAST_TRADE} ({@code 3})
+     * @param bookIsUp for {@link #EVENT_BOOK}, whether this snapshot targets the UP ({@code true}) or DOWN ({@code false}) book
+     * @param levelCount number of valid level entries in {@code isUpFlags}, {@code isBidFlags}, {@code ticks}, and {@code sizes}
+     * @param isUpFlags token side flags per level ({@code true} = UP, {@code false} = DOWN)
+     * @param isBidFlags order side flags per level ({@code true} = bid/BUY, {@code false} = ask/SELL)
+     * @param ticks integer price ticks ({@code 0..10000}) per level
+     * @param sizes order book share depths per level ({@code 0.0} removes the level)
      */
-    record PolymarketClobEvent(
+    record PolymarketClobFrameEvent(
             long timestampMs,
+            long serverTimestampMs,
             long sequenceNumber,
-            String eventType,
-            String assetId,
-            double price,
-            double size,
-            String side,
-            String payload
+            byte eventCode,
+            boolean bookIsUp,
+            int levelCount,
+            boolean[] isUpFlags,
+            boolean[] isBidFlags,
+            int[] ticks,
+            double[] sizes
     ) implements BacktestEvent {
+        /** Full L2 order book snapshot frame ({@code event_code = 1}). */
+        public static final byte EVENT_BOOK = 1;
+        /** Incremental L2 price level delta batch frame ({@code event_code = 2}). */
+        public static final byte EVENT_PRICE_CHANGE = 2;
+        /** Trade print timestamp frame ({@code event_code = 3}). */
+        public static final byte EVENT_LAST_TRADE = 3;
+
         @Override
         public int priority() {
             return 5;
@@ -190,18 +201,6 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
             double quantity,
             boolean isBuyerMaker
     ) implements BacktestEvent {
-        /**
-         * Convenience constructor without explicit sequence number.
-         *
-         * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
-         * @param price trade execution price
-         * @param quantity trade volume in base asset
-         * @param isBuyerMaker true if maker was buyer, false if aggressive buy
-         */
-        public BinanceSpotTradeEvent(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-            this(timestampMs, 0L, price, quantity, isBuyerMaker);
-        }
-
         @Override
         public int priority() {
             return 10;
@@ -224,18 +223,6 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
             double quantity,
             boolean isBuyerMaker
     ) implements BacktestEvent {
-        /**
-         * Convenience constructor without explicit sequence number.
-         *
-         * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
-         * @param price futures execution price
-         * @param quantity trade volume
-         * @param isBuyerMaker true if maker was buyer, false if aggressive buy
-         */
-        public BinanceFuturesTradeEvent(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-            this(timestampMs, 0L, price, quantity, isBuyerMaker);
-        }
-
         @Override
         public int priority() {
             return 10;
@@ -262,26 +249,6 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
             double depthAsks,
             double obi
     ) implements BacktestEvent {
-        /**
-         * Convenience constructor without explicit sequence number.
-         *
-         * @param timestampMs event timestamp in milliseconds UTC
-         * @param bestBid best bid price
-         * @param bestAsk best ask price
-         * @param depthBids total top-level bid liquidity
-         * @param depthAsks total top-level ask liquidity
-         * @param obi order book imbalance ratio
-         */
-        public BinanceFuturesOrderBookEvent(
-                long timestampMs,
-                double bestBid,
-                double bestAsk,
-                double depthBids,
-                double depthAsks,
-                double obi) {
-            this(timestampMs, 0L, bestBid, bestAsk, depthBids, depthAsks, obi);
-        }
-
         @Override
         public int priority() {
             return 15;

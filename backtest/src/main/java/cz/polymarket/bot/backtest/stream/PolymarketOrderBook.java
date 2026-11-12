@@ -3,26 +3,27 @@ package cz.polymarket.bot.backtest.stream;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import io.quarkus.logging.Log;
 
-import java.util.Arrays;
 import java.util.Locale;
 
 /**
- * High-performance, zero-allocation L2 Order Book for Polymarket binary options.
+ * High-performance, L1d-cache-friendly L2 Order Book for Polymarket binary options.
  * <p>
  * Uses flat primitive tick arrays ({@code 0..10000} representing prices {@code 0.0000..1.0000}
- * at 1-bps resolution) and a custom allocation-free JSON character scanner to process
- * millions of collector {@code clob}, {@code book}, {@code price_change}, and
- * {@code last_trade_price} events without boxing or heap tree allocations.
+ * at 1-bps resolution) paired with compact 64-bit active-tick and consumed-tick bitsets
+ * ({@code long[157]} = {@code 1.25 KB}) and dirty-flag quote caching to apply typed CLOB frames
+ * with zero JSON parsing, zero full-array zeroing sweeps, and {@code O(1)} BBO jumps.
  * <p>
  * Simultaneously tracks the real-time one-way network/processing latency
- * ({@code ts - serverTimestampMs}) observed on incoming Polymarket CLOB messages.
+ * ({@code ts - serverTimestampMs}) observed on incoming Polymarket CLOB frames.
  */
 public class PolymarketOrderBook {
 
     private static final int MAX_TICK = 10_000;
+    private static final int MASK_WORDS = (MAX_TICK >>> 6) + 1;
     private static final double TICK_SCALE = 10_000.0;
     private static final double TICK_INV = 0.0001;
     private static final int ONE_CENT_TICKS = 100;
+    private static final double QUOTE_SLIPPAGE_SHARES = 100.0;
     private static final double EPS = 1e-9;
     private static final long DEFAULT_INITIAL_ONE_WAY_LATENCY_MS = 10L;
 
@@ -30,6 +31,10 @@ public class PolymarketOrderBook {
     private final double[] upAsks = new double[MAX_TICK + 1];
     private final double[] upBidsConsumed = new double[MAX_TICK + 1];
     private final double[] upAsksConsumed = new double[MAX_TICK + 1];
+    private final long[] upBidMask = new long[MASK_WORDS];
+    private final long[] upAskMask = new long[MASK_WORDS];
+    private final long[] upBidConsumedMask = new long[MASK_WORDS];
+    private final long[] upAskConsumedMask = new long[MASK_WORDS];
     private int bestUpBidTick = -1;
     private int bestUpAskTick = MAX_TICK + 1;
 
@@ -37,8 +42,25 @@ public class PolymarketOrderBook {
     private final double[] downAsks = new double[MAX_TICK + 1];
     private final double[] downBidsConsumed = new double[MAX_TICK + 1];
     private final double[] downAsksConsumed = new double[MAX_TICK + 1];
+    private final long[] downBidMask = new long[MASK_WORDS];
+    private final long[] downAskMask = new long[MASK_WORDS];
+    private final long[] downBidConsumedMask = new long[MASK_WORDS];
+    private final long[] downAskConsumedMask = new long[MASK_WORDS];
     private int bestDownBidTick = -1;
     private int bestDownAskTick = MAX_TICK + 1;
+
+    // Dirty-flag quote cache for depth1c and 100-share slippage metrics
+    private boolean upAskCacheDirty = true;
+    private int upAskWatchMaxTick = MAX_TICK;
+    private double cachedDepth1cUp = 0.0;
+    private double cachedFillUpAvgPrice = 0.0;
+
+    private boolean downCacheDirty = true;
+    private boolean downUsesUpBidsComplement = true;
+    private int downAskWatchMaxTick = MAX_TICK;
+    private int upBidWatchMinTick = 0;
+    private double cachedDepth1cDown = 0.0;
+    private double cachedFillDownAvgPrice = 0.0;
 
     private String upTokenId = "BTC-UP";
     private String downTokenId = "BTC-DOWN";
@@ -49,10 +71,11 @@ public class PolymarketOrderBook {
      * Clears all bids, asks, consumed liquidity memory, and resets active candle book state.
      */
     public void clear() {
-        clearUpBook(true);
-        clearDownBook(true);
+        clearSideInternal(true, true);
+        clearSideInternal(false, true);
         lastUpdateTimeMs = 0L;
         lastObservedOneWayLatencyMs = DEFAULT_INITIAL_ONE_WAY_LATENCY_MS;
+        invalidateQuoteCache();
     }
 
     /**
@@ -120,126 +143,184 @@ public class PolymarketOrderBook {
     }
 
     /**
-     * Processes a raw Polymarket collector event ({@code clob}, {@code book}, {@code price_change}, {@code last_trade_price})
-     * using zero-allocation character scanning.
+     * Applies a typed Polymarket CLOB frame ({@code book} snapshot, {@code price_change} delta batch,
+     * or {@code last_trade_price} latency sample) directly from primitive arrays.
      *
-     * @param event collector CLOB event
+     * @param frame typed CLOB WebSocket frame event
      */
-    public void applyCollectorEvent(BacktestEvent.PolymarketClobEvent event) {
-        if (event == null) {
+    public void applyClobFrame(BacktestEvent.PolymarketClobFrameEvent frame) {
+        if (frame == null) {
             return;
         }
-        long ts = event.timestampMs();
+        long ts = frame.timestampMs();
         this.lastUpdateTimeMs = ts;
-        String et = event.eventType();
-        String payload = event.payload();
-        if (et == null) {
-            return;
-        }
+        updateObservedLatency(ts, frame.serverTimestampMs());
 
-        switch (et) {
-            case "price_change" -> applyPriceChangePayload(payload, ts);
-            case "book" -> {
-                if (payload != null && !payload.isEmpty()) {
-                    applyBookObject(payload, 0, payload.length(), ts);
-                }
+        byte code = frame.eventCode();
+        if (code == BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK) {
+            boolean isUp = frame.bookIsUp();
+            clearSideForSnapshot(isUp);
+            int n = frame.levelCount();
+            boolean[] bidFlags = frame.isBidFlags();
+            int[] ticks = frame.ticks();
+            double[] sizes = frame.sizes();
+            for (int i = 0; i < n; i++) {
+                setSnapshotLevel(isUp, bidFlags[i], ticks[i], sizes[i]);
             }
-            case "clob" -> applyClobSnapshotArray(payload, ts);
-            case "last_trade_price" -> {
-                long serverTs = extractServerTimestampMs(payload, 0, payload != null ? payload.length() : 0);
-                updateObservedLatency(ts, serverTs);
-                applyTrade(event.price(), event.size(), event.side(), ts);
-            }
-            default -> {
-                long serverTs = extractServerTimestampMs(payload, 0, payload != null ? payload.length() : 0);
-                updateObservedLatency(ts, serverTs);
+            finishBookSnapshot(isUp);
+        } else if (code == BacktestEvent.PolymarketClobFrameEvent.EVENT_PRICE_CHANGE) {
+            int n = frame.levelCount();
+            boolean[] upFlags = frame.isUpFlags();
+            boolean[] bidFlags = frame.isBidFlags();
+            int[] ticks = frame.ticks();
+            double[] sizes = frame.sizes();
+            for (int i = 0; i < n; i++) {
+                applyTickDelta(upFlags[i], bidFlags[i], ticks[i], sizes[i], ts);
             }
         }
     }
 
     /**
-     * Replaces the UP book depth from raw JSON snapshot strings while preserving consumed liquidity
-     * memory for levels that remain non-empty in the snapshot.
+     * Clears only the active raw levels on the specified token side prior to populating a new
+     * {@code book} snapshot, preserving consumed liquidity memory for reconciliation in
+     * {@link #finishBookSnapshot(boolean)}.
      *
-     * @param bidsJson JSON array string of bid price/size objects
-     * @param asksJson JSON array string of ask price/size objects
-     * @param timestampMs snapshot timestamp in milliseconds UTC
+     * @param isUp true for UP book, false for DOWN book
      */
-    public void applySnapshot(String bidsJson, String asksJson, long timestampMs) {
-        clearUpBook(false);
-        this.lastUpdateTimeMs = timestampMs;
-
-        if (bidsJson != null && !bidsJson.isEmpty()) {
-            parseBookLevelsSlice(bidsJson, 0, bidsJson.length(), true, true);
-        }
-        if (asksJson != null && !asksJson.isEmpty()) {
-            parseBookLevelsSlice(asksJson, 0, asksJson.length(), true, false);
-        }
-        reconcileBookAfterSnapshot(true);
-    }
-
-    /**
-     * Applies an incremental Level 2 delta update to the UP book.
-     *
-     * @param side order side ("BUY" modifies bids, "SELL" modifies asks)
-     * @param price price level
-     * @param size updated depth size (0 removes level and resets consumed shares at that level)
-     * @param timestampMs delta update timestamp in milliseconds UTC
-     */
-    public void applyDelta(String side, double price, double size, long timestampMs) {
-        boolean isBuy = "BUY".equalsIgnoreCase(side);
-        if (!isBuy && !"SELL".equalsIgnoreCase(side)) {
-            this.lastUpdateTimeMs = timestampMs;
-            return;
-        }
-        applyDeltaForToken(true, isBuy, price, size, timestampMs);
-    }
-
-    /**
-     * Applies an incremental Level 2 delta update to either the UP or DOWN token book.
-     * <p>
-     * If {@code size <= 0}, the level completely disappears from the book and its consumed
-     * shares memory is reset to {@code 0}. If {@code size < consumed}, consumed shares are
-     * clamped to {@code size} so subsequent maker liquidity additions become available.
-     *
-     * @param isUp true for UP token book, false for DOWN token book
-     * @param isBuy true for BUY (bids), false for SELL (asks)
-     * @param price price level in (0.0, 1.0)
-     * @param size updated depth size (0 removes level)
-     * @param timestampMs delta update timestamp in milliseconds UTC
-     */
-    public void applyDeltaForToken(boolean isUp, boolean isBuy, double price, double size, long timestampMs) {
-        this.lastUpdateTimeMs = timestampMs;
-        int tick = priceToTick(price);
-        if (tick < 0 || tick > MAX_TICK) {
-            return;
-        }
-        double cleanSize = size > 0.0 ? size : 0.0;
+    public void clearSideForSnapshot(boolean isUp) {
+        clearSideInternal(isUp, false);
         if (isUp) {
-            if (isBuy) {
-                setBidLevel(upBids, upBidsConsumed, tick, cleanSize, true);
-            } else {
-                setAskLevel(upAsks, upAsksConsumed, tick, cleanSize, true);
+            upAskCacheDirty = true;
+            if (downUsesUpBidsComplement) {
+                downCacheDirty = true;
             }
         } else {
-            if (isBuy) {
-                setBidLevel(downBids, downBidsConsumed, tick, cleanSize, false);
+            downCacheDirty = true;
+        }
+    }
+
+    /**
+     * Populates a single raw bid or ask level during a {@code book} snapshot before calling
+     * {@link #finishBookSnapshot(boolean)}.
+     *
+     * @param isUp true for UP book, false for DOWN book
+     * @param isBid true for bid level, false for ask level
+     * @param tick integer price tick in {@code [0, 10000]}
+     * @param size share depth at this tick
+     */
+    public void setSnapshotLevel(boolean isUp, boolean isBid, int tick, double size) {
+        if (tick < 0 || tick > MAX_TICK || Double.isNaN(size)) {
+            Log.errorf("Invalid order book level: tick=%d, size=%s", tick, size);
+            return;
+        }
+        int w = tick >>> 6;
+        long bitMask = 1L << (tick & 63);
+        if (isUp) {
+            if (isBid) {
+                if (size > 0.0) {
+                    upBids[tick] = size;
+                    upBidMask[w] |= bitMask;
+                } else {
+                    upBids[tick] = 0.0;
+                    upBidMask[w] &= ~bitMask;
+                }
             } else {
-                setAskLevel(downAsks, downAsksConsumed, tick, cleanSize, false);
+                if (size > 0.0) {
+                    upAsks[tick] = size;
+                    upAskMask[w] |= bitMask;
+                } else {
+                    upAsks[tick] = 0.0;
+                    upAskMask[w] &= ~bitMask;
+                }
+            }
+        } else {
+            if (isBid) {
+                if (size > 0.0) {
+                    downBids[tick] = size;
+                    downBidMask[w] |= bitMask;
+                } else {
+                    downBids[tick] = 0.0;
+                    downBidMask[w] &= ~bitMask;
+                }
+            } else {
+                if (size > 0.0) {
+                    downAsks[tick] = size;
+                    downAskMask[w] |= bitMask;
+                } else {
+                    downAsks[tick] = 0.0;
+                    downAskMask[w] &= ~bitMask;
+                }
             }
         }
     }
 
     /**
-     * Applies a reported trade execution to update the last update timestamp.
+     * Reconciles strategy-consumed liquidity memory against newly populated snapshot levels
+     * and recomputes BBO pointers via {@code O(1)} bitset scans.
      *
-     * @param price execution price
-     * @param size trade size
-     * @param side aggressor side
-     * @param timestampMs trade timestamp in milliseconds UTC
+     * @param isUp true for UP book, false for DOWN book
      */
-    public void applyTrade(double price, double size, String side, long timestampMs) {
+    public void finishBookSnapshot(boolean isUp) {
+        if (isUp) {
+            reconcileConsumed(upBids, upBidsConsumed, upBidConsumedMask);
+            reconcileConsumed(upAsks, upAsksConsumed, upAskConsumedMask);
+            bestUpBidTick = findNextBidFrom(MAX_TICK, upBids, upBidMask, upBidsConsumed);
+            bestUpAskTick = findNextAskFrom(0, upAsks, upAskMask, upAsksConsumed);
+            upAskCacheDirty = true;
+            if (downUsesUpBidsComplement) {
+                downCacheDirty = true;
+            }
+        } else {
+            reconcileConsumed(downBids, downBidsConsumed, downBidConsumedMask);
+            reconcileConsumed(downAsks, downAsksConsumed, downAskConsumedMask);
+            bestDownBidTick = findNextBidFrom(MAX_TICK, downBids, downBidMask, downBidsConsumed);
+            bestDownAskTick = findNextAskFrom(0, downAsks, downAskMask, downAsksConsumed);
+            downCacheDirty = true;
+        }
+    }
+
+    /**
+     * Applies an incremental Level 2 tick delta update directly to the UP or DOWN token book.
+     * <p>
+     * If {@code size <= 0}, the level is removed and its consumed shares memory is reset to {@code 0}.
+     * If {@code size < consumed}, consumed shares are clamped to {@code size} so subsequent maker
+     * liquidity additions become available.
+     *
+     * @param isUp true for UP token book, false for DOWN token book
+     * @param isBid true for BUY (bids), false for SELL (asks)
+     * @param tick integer price tick in {@code [0, 10000]}
+     * @param size updated depth size ({@code 0.0} removes level)
+     * @param timestampMs delta receipt timestamp in milliseconds UTC
+     */
+    public void applyTickDelta(boolean isUp, boolean isBid, int tick, double size, long timestampMs) {
+        if (tick < 0 || tick > MAX_TICK || Double.isNaN(size)) {
+            Log.errorf("Invalid order book level: tick=%d, size=%s", tick, size);
+            return;
+        }
         this.lastUpdateTimeMs = timestampMs;
+        double cleanSize = size > 0.0 ? size : 0.0;
+        if (isUp) {
+            if (isBid) {
+                setBidLevel(upBids, upBidMask, upBidsConsumed, upBidConsumedMask, tick, cleanSize, true);
+                if (downUsesUpBidsComplement && tick >= upBidWatchMinTick) {
+                    downCacheDirty = true;
+                }
+            } else {
+                setAskLevel(upAsks, upAskMask, upAsksConsumed, upAskConsumedMask, tick, cleanSize, true);
+                if (tick <= upAskWatchMaxTick) {
+                    upAskCacheDirty = true;
+                }
+            }
+        } else {
+            if (isBid) {
+                setBidLevel(downBids, downBidMask, downBidsConsumed, downBidConsumedMask, tick, cleanSize, false);
+            } else {
+                setAskLevel(downAsks, downAskMask, downAsksConsumed, downAskConsumedMask, tick, cleanSize, false);
+                if (tick <= downAskWatchMaxTick) {
+                    downCacheDirty = true;
+                }
+            }
+        }
     }
 
     /**
@@ -297,18 +378,10 @@ public class PolymarketOrderBook {
      * @return 1-cent effective ask depth for UP
      */
     public double getDepth1cUp() {
-        if (bestUpAskTick > MAX_TICK) {
-            return 0.0;
+        if (upAskCacheDirty) {
+            refreshUpAskQuoteCache();
         }
-        int limitTick = Math.min(MAX_TICK, bestUpAskTick + ONE_CENT_TICKS);
-        double sum = 0.0;
-        for (int t = bestUpAskTick; t <= limitTick; t++) {
-            double eff = upAsks[t] - upAsksConsumed[t];
-            if (eff > EPS) {
-                sum += eff;
-            }
-        }
-        return sum;
+        return cachedDepth1cUp;
     }
 
     /**
@@ -319,64 +392,49 @@ public class PolymarketOrderBook {
      * @return 1-cent effective depth for DOWN
      */
     public double getDepth1cDown() {
-        if (bestDownAskTick <= MAX_TICK) {
-            int limitTick = Math.min(MAX_TICK, bestDownAskTick + ONE_CENT_TICKS);
-            double sum = 0.0;
-            for (int t = bestDownAskTick; t <= limitTick; t++) {
-                double eff = downAsks[t] - downAsksConsumed[t];
-                if (eff > EPS) {
-                    sum += eff;
-                }
-            }
-            return sum;
+        if (downCacheDirty) {
+            refreshDownQuoteCache();
         }
-        if (bestUpBidTick < 0) {
-            return 0.0;
-        }
-        int limitTick = Math.max(0, bestUpBidTick - ONE_CENT_TICKS);
-        double sum = 0.0;
-        for (int t = bestUpBidTick; t >= limitTick; t--) {
-            double eff = upBids[t] - upBidsConsumed[t];
-            if (eff > EPS) {
-                sum += eff;
-            }
-        }
-        return sum;
+        return cachedDepth1cDown;
     }
 
     /**
-     * Converts current book state into a unified {@link OrderBookQuote} snapshot.
+     * Converts current book state into a unified {@link OrderBookQuote} snapshot, reusing cached
+     * 1-cent depth and 100-share slippage metrics whenever mutations occurred outside the active
+     * BBO/slippage tick window.
      *
      * @param timestampMs current clock timestamp in milliseconds UTC
      * @return constructed OrderBookQuote
      */
     public OrderBookQuote toOrderBookQuote(long timestampMs) {
+        if (upAskCacheDirty) {
+            refreshUpAskQuoteCache();
+        }
+        if (downCacheDirty) {
+            refreshDownQuoteCache();
+        }
+
         double bAskUp = getBestAskUp();
         double bBidUp = getBestBidUp();
         double bAskDown = getBestAskDown();
         double bBidDown = getBestBidDown();
-        double depthUp = getDepth1cUp();
-        double depthDown = getDepth1cDown();
-
-        FillResult fillUp = simulateFill(true, true, 100.0, 1.0);
-        FillResult fillDown = simulateFill(false, true, 100.0, 1.0);
 
         return new OrderBookQuote(
                 bAskUp,
                 bBidUp,
                 bAskDown,
                 bBidDown,
-                depthUp,
-                depthDown,
-                fillUp.avgPrice() > 0 ? fillUp.avgPrice() : bAskUp,
-                fillDown.avgPrice() > 0 ? fillDown.avgPrice() : bAskDown,
-                timestampMs > 0 ? timestampMs : lastUpdateTimeMs
+                cachedDepth1cUp,
+                cachedDepth1cDown,
+                cachedFillUpAvgPrice > 0.0 ? cachedFillUpAvgPrice : bAskUp,
+                cachedFillDownAvgPrice > 0.0 ? cachedFillDownAvgPrice : bAskDown,
+                timestampMs > 0L ? timestampMs : lastUpdateTimeMs
         );
     }
 
     /**
      * Read-only simulation of order execution against current effective book depth without mutating
-     * consumed liquidity arrays (used for quote slippage inspection).
+     * consumed liquidity arrays.
      *
      * @param isUpToken true for UP contract, false for DOWN contract
      * @param isBuy true for BUY (taker buying), false for SELL (taker selling)
@@ -422,57 +480,99 @@ public class PolymarketOrderBook {
             if (isBuy) {
                 if (bestUpAskTick <= MAX_TICK) {
                     int maxTick = Math.min(MAX_TICK, limitTick);
-                    for (int t = bestUpAskTick; t <= maxTick; t++) {
-                        double available = upAsks[t] - upAsksConsumed[t];
-                        if (available <= EPS) {
-                            continue;
-                        }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * (t * TICK_INV);
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            upAsksConsumed[t] += take;
-                            int compTick = MAX_TICK - t;
-                            if (downBids[compTick] > 0.0) {
-                                downBidsConsumed[compTick] = Math.min(downBids[compTick], downBidsConsumed[compTick] + take);
+                    if (bestUpAskTick <= maxTick) {
+                        int w = bestUpAskTick >>> 6;
+                        int maxW = maxTick >>> 6;
+                        long bits = upAskMask[w] & (-1L << (bestUpAskTick & 63));
+                        outer:
+                        while (true) {
+                            while (bits != 0L) {
+                                int bit = Long.numberOfTrailingZeros(bits);
+                                int t = (w << 6) + bit;
+                                if (t > maxTick) {
+                                    break outer;
+                                }
+                                bits &= (bits - 1L);
+                                double available = upAsks[t] - upAsksConsumed[t];
+                                if (available <= EPS) {
+                                    continue;
+                                }
+                                double take = Math.min(remainingShares, available);
+                                cost += take * (t * TICK_INV);
+                                executedShares += take;
+                                remainingShares -= take;
+                                if (consumeLiquidity) {
+                                    upAsksConsumed[t] += take;
+                                    upAskConsumedMask[w] |= (1L << bit);
+                                    int compTick = MAX_TICK - t;
+                                    if (downBids[compTick] > 0.0) {
+                                        downBidsConsumed[compTick] = Math.min(downBids[compTick], downBidsConsumed[compTick] + take);
+                                        downBidConsumedMask[compTick >>> 6] |= (1L << (compTick & 63));
+                                    }
+                                }
+                                if (remainingShares <= EPS) {
+                                    break outer;
+                                }
                             }
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
+                            if (++w > maxW) {
+                                break;
+                            }
+                            bits = upAskMask[w];
                         }
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestUpAsk();
                         advanceBestDownBid();
+                        invalidateQuoteCache();
                     }
                 }
             } else {
                 if (bestUpBidTick >= 0) {
                     int minTick = Math.max(0, limitTick);
-                    for (int t = bestUpBidTick; t >= minTick; t--) {
-                        double available = upBids[t] - upBidsConsumed[t];
-                        if (available <= EPS) {
-                            continue;
-                        }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * (t * TICK_INV);
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            upBidsConsumed[t] += take;
-                            int compTick = MAX_TICK - t;
-                            if (downAsks[compTick] > 0.0) {
-                                downAsksConsumed[compTick] = Math.min(downAsks[compTick], downAsksConsumed[compTick] + take);
+                    if (bestUpBidTick >= minTick) {
+                        int w = bestUpBidTick >>> 6;
+                        int minW = minTick >>> 6;
+                        long bits = upBidMask[w] & (-1L >>> (63 - (bestUpBidTick & 63)));
+                        outer:
+                        while (true) {
+                            while (bits != 0L) {
+                                int bit = 63 - Long.numberOfLeadingZeros(bits);
+                                int t = (w << 6) + bit;
+                                if (t < minTick) {
+                                    break outer;
+                                }
+                                bits &= ~(1L << bit);
+                                double available = upBids[t] - upBidsConsumed[t];
+                                if (available <= EPS) {
+                                    continue;
+                                }
+                                double take = Math.min(remainingShares, available);
+                                cost += take * (t * TICK_INV);
+                                executedShares += take;
+                                remainingShares -= take;
+                                if (consumeLiquidity) {
+                                    upBidsConsumed[t] += take;
+                                    upBidConsumedMask[w] |= (1L << bit);
+                                    int compTick = MAX_TICK - t;
+                                    if (downAsks[compTick] > 0.0) {
+                                        downAsksConsumed[compTick] = Math.min(downAsks[compTick], downAsksConsumed[compTick] + take);
+                                        downAskConsumedMask[compTick >>> 6] |= (1L << (compTick & 63));
+                                    }
+                                }
+                                if (remainingShares <= EPS) {
+                                    break outer;
+                                }
                             }
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
+                            if (--w < minW) {
+                                break;
+                            }
+                            bits = upBidMask[w];
                         }
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestUpBid();
                         advanceBestDownAsk();
+                        invalidateQuoteCache();
                     }
                 }
             }
@@ -480,105 +580,175 @@ public class PolymarketOrderBook {
             if (isBuy) {
                 if (bestDownAskTick <= MAX_TICK) {
                     int maxTick = Math.min(MAX_TICK, limitTick);
-                    for (int t = bestDownAskTick; t <= maxTick; t++) {
-                        double available = downAsks[t] - downAsksConsumed[t];
-                        if (available <= EPS) {
-                            continue;
-                        }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * (t * TICK_INV);
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            downAsksConsumed[t] += take;
-                            int compTick = MAX_TICK - t;
-                            if (upBids[compTick] > 0.0) {
-                                upBidsConsumed[compTick] = Math.min(upBids[compTick], upBidsConsumed[compTick] + take);
+                    if (bestDownAskTick <= maxTick) {
+                        int w = bestDownAskTick >>> 6;
+                        int maxW = maxTick >>> 6;
+                        long bits = downAskMask[w] & (-1L << (bestDownAskTick & 63));
+                        outer:
+                        while (true) {
+                            while (bits != 0L) {
+                                int bit = Long.numberOfTrailingZeros(bits);
+                                int t = (w << 6) + bit;
+                                if (t > maxTick) {
+                                    break outer;
+                                }
+                                bits &= (bits - 1L);
+                                double available = downAsks[t] - downAsksConsumed[t];
+                                if (available <= EPS) {
+                                    continue;
+                                }
+                                double take = Math.min(remainingShares, available);
+                                cost += take * (t * TICK_INV);
+                                executedShares += take;
+                                remainingShares -= take;
+                                if (consumeLiquidity) {
+                                    downAsksConsumed[t] += take;
+                                    downAskConsumedMask[w] |= (1L << bit);
+                                    int compTick = MAX_TICK - t;
+                                    if (upBids[compTick] > 0.0) {
+                                        upBidsConsumed[compTick] = Math.min(upBids[compTick], upBidsConsumed[compTick] + take);
+                                        upBidConsumedMask[compTick >>> 6] |= (1L << (compTick & 63));
+                                    }
+                                }
+                                if (remainingShares <= EPS) {
+                                    break outer;
+                                }
                             }
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
+                            if (++w > maxW) {
+                                break;
+                            }
+                            bits = downAskMask[w];
                         }
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestDownAsk();
                         advanceBestUpBid();
+                        invalidateQuoteCache();
                     }
                 } else if (bestUpBidTick >= 0) {
-                    for (int t = bestUpBidTick; t >= 0; t--) {
-                        double available = upBids[t] - upBidsConsumed[t];
-                        if (available <= EPS) {
-                            continue;
+                    int w = bestUpBidTick >>> 6;
+                    long bits = upBidMask[w] & (-1L >>> (63 - (bestUpBidTick & 63)));
+                    outer:
+                    while (true) {
+                        while (bits != 0L) {
+                            int bit = 63 - Long.numberOfLeadingZeros(bits);
+                            int t = (w << 6) + bit;
+                            bits &= ~(1L << bit);
+                            double available = upBids[t] - upBidsConsumed[t];
+                            if (available <= EPS) {
+                                continue;
+                            }
+                            double downPrice = Math.max(0.001, (MAX_TICK - t) * TICK_INV);
+                            if (downPrice > limitPrice + EPS) {
+                                break outer;
+                            }
+                            double take = Math.min(remainingShares, available);
+                            cost += take * downPrice;
+                            executedShares += take;
+                            remainingShares -= take;
+                            if (consumeLiquidity) {
+                                upBidsConsumed[t] += take;
+                                upBidConsumedMask[w] |= (1L << bit);
+                            }
+                            if (remainingShares <= EPS) {
+                                break outer;
+                            }
                         }
-                        double downPrice = Math.max(0.001, (MAX_TICK - t) * TICK_INV);
-                        if (downPrice > limitPrice + EPS) {
+                        if (--w < 0) {
                             break;
                         }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * downPrice;
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            upBidsConsumed[t] += take;
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
-                        }
+                        bits = upBidMask[w];
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestUpBid();
+                        invalidateQuoteCache();
                     }
                 }
             } else {
                 if (bestDownBidTick >= 0) {
                     int minTick = Math.max(0, limitTick);
-                    for (int t = bestDownBidTick; t >= minTick; t--) {
-                        double available = downBids[t] - downBidsConsumed[t];
-                        if (available <= EPS) {
-                            continue;
-                        }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * (t * TICK_INV);
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            downBidsConsumed[t] += take;
-                            int compTick = MAX_TICK - t;
-                            if (upAsks[compTick] > 0.0) {
-                                upAsksConsumed[compTick] = Math.min(upAsks[compTick], upAsksConsumed[compTick] + take);
+                    if (bestDownBidTick >= minTick) {
+                        int w = bestDownBidTick >>> 6;
+                        int minW = minTick >>> 6;
+                        long bits = downBidMask[w] & (-1L >>> (63 - (bestDownBidTick & 63)));
+                        outer:
+                        while (true) {
+                            while (bits != 0L) {
+                                int bit = 63 - Long.numberOfLeadingZeros(bits);
+                                int t = (w << 6) + bit;
+                                if (t < minTick) {
+                                    break outer;
+                                }
+                                bits &= ~(1L << bit);
+                                double available = downBids[t] - downBidsConsumed[t];
+                                if (available <= EPS) {
+                                    continue;
+                                }
+                                double take = Math.min(remainingShares, available);
+                                cost += take * (t * TICK_INV);
+                                executedShares += take;
+                                remainingShares -= take;
+                                if (consumeLiquidity) {
+                                    downBidsConsumed[t] += take;
+                                    downBidConsumedMask[w] |= (1L << bit);
+                                    int compTick = MAX_TICK - t;
+                                    if (upAsks[compTick] > 0.0) {
+                                        upAsksConsumed[compTick] = Math.min(upAsks[compTick], upAsksConsumed[compTick] + take);
+                                        upAskConsumedMask[compTick >>> 6] |= (1L << (compTick & 63));
+                                    }
+                                }
+                                if (remainingShares <= EPS) {
+                                    break outer;
+                                }
                             }
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
+                            if (--w < minW) {
+                                break;
+                            }
+                            bits = downBidMask[w];
                         }
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestDownBid();
                         advanceBestUpAsk();
+                        invalidateQuoteCache();
                     }
                 } else if (bestUpAskTick <= MAX_TICK) {
-                    for (int t = bestUpAskTick; t <= MAX_TICK; t++) {
-                        double available = upAsks[t] - upAsksConsumed[t];
-                        if (available <= EPS) {
-                            continue;
+                    int w = bestUpAskTick >>> 6;
+                    long bits = upAskMask[w] & (-1L << (bestUpAskTick & 63));
+                    outer:
+                    while (true) {
+                        while (bits != 0L) {
+                            int bit = Long.numberOfTrailingZeros(bits);
+                            int t = (w << 6) + bit;
+                            bits &= (bits - 1L);
+                            double available = upAsks[t] - upAsksConsumed[t];
+                            if (available <= EPS) {
+                                continue;
+                            }
+                            double downPrice = Math.max(0.001, (MAX_TICK - t) * TICK_INV);
+                            if (downPrice + EPS < limitPrice) {
+                                break outer;
+                            }
+                            double take = Math.min(remainingShares, available);
+                            cost += take * downPrice;
+                            executedShares += take;
+                            remainingShares -= take;
+                            if (consumeLiquidity) {
+                                upAsksConsumed[t] += take;
+                                upAskConsumedMask[w] |= (1L << bit);
+                            }
+                            if (remainingShares <= EPS) {
+                                break outer;
+                            }
                         }
-                        double downPrice = Math.max(0.001, (MAX_TICK - t) * TICK_INV);
-                        if (downPrice + EPS < limitPrice) {
+                        if (++w >= MASK_WORDS) {
                             break;
                         }
-                        double take = Math.min(remainingShares, available);
-                        cost += take * downPrice;
-                        executedShares += take;
-                        remainingShares -= take;
-                        if (consumeLiquidity) {
-                            upAsksConsumed[t] += take;
-                        }
-                        if (remainingShares <= EPS) {
-                            break;
-                        }
+                        bits = upAskMask[w];
                     }
-                    if (consumeLiquidity) {
+                    if (consumeLiquidity && executedShares > 0.0) {
                         advanceBestUpAsk();
+                        invalidateQuoteCache();
                     }
                 }
             }
@@ -590,119 +760,332 @@ public class PolymarketOrderBook {
         return new FillResult(avgPrice, executedShares, fee);
     }
 
-    private void clearUpBook(boolean resetConsumed) {
-        Arrays.fill(upBids, 0.0);
-        Arrays.fill(upAsks, 0.0);
-        if (resetConsumed) {
-            Arrays.fill(upBidsConsumed, 0.0);
-            Arrays.fill(upAsksConsumed, 0.0);
+    private void refreshUpAskQuoteCache() {
+        if (bestUpAskTick > MAX_TICK) {
+            cachedDepth1cUp = 0.0;
+            cachedFillUpAvgPrice = 0.0;
+            upAskWatchMaxTick = MAX_TICK;
+            upAskCacheDirty = false;
+            return;
         }
-        bestUpBidTick = -1;
-        bestUpAskTick = MAX_TICK + 1;
+
+        int depthLimitTick = Math.min(MAX_TICK, bestUpAskTick + ONE_CENT_TICKS);
+        double depthSum = 0.0;
+        double remainingShares = QUOTE_SLIPPAGE_SHARES;
+        double cost = 0.0;
+        double executedShares = 0.0;
+        int fillEndTick = bestUpAskTick;
+
+        int w = bestUpAskTick >>> 6;
+        long bits = upAskMask[w] & (-1L << (bestUpAskTick & 63));
+        outer:
+        while (true) {
+            while (bits != 0L) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                int t = (w << 6) + bit;
+                if (t > depthLimitTick && remainingShares <= EPS) {
+                    break outer;
+                }
+                bits &= (bits - 1L);
+                double eff = upAsks[t] - upAsksConsumed[t];
+                if (eff <= EPS) {
+                    continue;
+                }
+                if (t <= depthLimitTick) {
+                    depthSum += eff;
+                }
+                if (remainingShares > EPS) {
+                    double take = Math.min(remainingShares, eff);
+                    cost += take * (t * TICK_INV);
+                    executedShares += take;
+                    remainingShares -= take;
+                    fillEndTick = t;
+                }
+            }
+            if ((w << 6) + 63 >= depthLimitTick && remainingShares <= EPS) {
+                break;
+            }
+            if (++w >= MASK_WORDS) {
+                break;
+            }
+            bits = upAskMask[w];
+        }
+
+        cachedDepth1cUp = depthSum;
+        cachedFillUpAvgPrice = executedShares > 0.0 ? (cost / executedShares) : 0.0;
+        upAskWatchMaxTick = remainingShares <= EPS
+                ? Math.max(depthLimitTick, fillEndTick)
+                : MAX_TICK;
+        upAskCacheDirty = false;
     }
 
-    private void clearDownBook(boolean resetConsumed) {
-        Arrays.fill(downBids, 0.0);
-        Arrays.fill(downAsks, 0.0);
-        if (resetConsumed) {
-            Arrays.fill(downBidsConsumed, 0.0);
-            Arrays.fill(downAsksConsumed, 0.0);
+    private void refreshDownQuoteCache() {
+        if (bestDownAskTick <= MAX_TICK) {
+            downUsesUpBidsComplement = false;
+            int depthLimitTick = Math.min(MAX_TICK, bestDownAskTick + ONE_CENT_TICKS);
+            double depthSum = 0.0;
+            double remainingShares = QUOTE_SLIPPAGE_SHARES;
+            double cost = 0.0;
+            double executedShares = 0.0;
+            int fillEndTick = bestDownAskTick;
+
+            int w = bestDownAskTick >>> 6;
+            long bits = downAskMask[w] & (-1L << (bestDownAskTick & 63));
+            outer:
+            while (true) {
+                while (bits != 0L) {
+                    int bit = Long.numberOfTrailingZeros(bits);
+                    int t = (w << 6) + bit;
+                    if (t > depthLimitTick && remainingShares <= EPS) {
+                        break outer;
+                    }
+                    bits &= (bits - 1L);
+                    double eff = downAsks[t] - downAsksConsumed[t];
+                    if (eff <= EPS) {
+                        continue;
+                    }
+                    if (t <= depthLimitTick) {
+                        depthSum += eff;
+                    }
+                    if (remainingShares > EPS) {
+                        double take = Math.min(remainingShares, eff);
+                        cost += take * (t * TICK_INV);
+                        executedShares += take;
+                        remainingShares -= take;
+                        fillEndTick = t;
+                    }
+                }
+                if ((w << 6) + 63 >= depthLimitTick && remainingShares <= EPS) {
+                    break;
+                }
+                if (++w >= MASK_WORDS) {
+                    break;
+                }
+                bits = downAskMask[w];
+            }
+
+            cachedDepth1cDown = depthSum;
+            cachedFillDownAvgPrice = executedShares > 0.0 ? (cost / executedShares) : 0.0;
+            downAskWatchMaxTick = remainingShares <= EPS
+                    ? Math.max(depthLimitTick, fillEndTick)
+                    : MAX_TICK;
+            downCacheDirty = false;
+            return;
         }
-        bestDownBidTick = -1;
-        bestDownAskTick = MAX_TICK + 1;
+
+        downUsesUpBidsComplement = true;
+        downAskWatchMaxTick = MAX_TICK;
+        if (bestUpBidTick < 0) {
+            cachedDepth1cDown = 0.0;
+            cachedFillDownAvgPrice = 0.0;
+            upBidWatchMinTick = 0;
+            downCacheDirty = false;
+            return;
+        }
+
+        int depthFloorTick = Math.max(0, bestUpBidTick - ONE_CENT_TICKS);
+        double depthSum = 0.0;
+        double remainingShares = QUOTE_SLIPPAGE_SHARES;
+        double cost = 0.0;
+        double executedShares = 0.0;
+        int fillFloorTick = bestUpBidTick;
+
+        int w = bestUpBidTick >>> 6;
+        long bits = upBidMask[w] & (-1L >>> (63 - (bestUpBidTick & 63)));
+        outer:
+        while (true) {
+            while (bits != 0L) {
+                int bit = 63 - Long.numberOfLeadingZeros(bits);
+                int t = (w << 6) + bit;
+                if (t < depthFloorTick && remainingShares <= EPS) {
+                    break outer;
+                }
+                bits &= ~(1L << bit);
+                double eff = upBids[t] - upBidsConsumed[t];
+                if (eff <= EPS) {
+                    continue;
+                }
+                if (t >= depthFloorTick) {
+                    depthSum += eff;
+                }
+                if (remainingShares > EPS) {
+                    double downPrice = Math.max(0.001, (MAX_TICK - t) * TICK_INV);
+                    double take = Math.min(remainingShares, eff);
+                    cost += take * downPrice;
+                    executedShares += take;
+                    remainingShares -= take;
+                    fillFloorTick = t;
+                }
+            }
+            if ((w << 6) <= depthFloorTick && remainingShares <= EPS) {
+                break;
+            }
+            if (--w < 0) {
+                break;
+            }
+            bits = upBidMask[w];
+        }
+
+        cachedDepth1cDown = depthSum;
+        cachedFillDownAvgPrice = executedShares > 0.0 ? (cost / executedShares) : 0.0;
+        upBidWatchMinTick = remainingShares <= EPS
+                ? Math.min(depthFloorTick, fillFloorTick)
+                : 0;
+        downCacheDirty = false;
     }
 
-    private void reconcileBookAfterSnapshot(boolean isUp) {
+    private void invalidateQuoteCache() {
+        upAskCacheDirty = true;
+        downCacheDirty = true;
+    }
+
+    private void clearSideInternal(boolean isUp, boolean resetConsumed) {
         if (isUp) {
+            clearMaskedArray(upBids, upBidMask);
+            clearMaskedArray(upAsks, upAskMask);
+            if (resetConsumed) {
+                clearMaskedArray(upBidsConsumed, upBidConsumedMask);
+                clearMaskedArray(upAsksConsumed, upAskConsumedMask);
+            }
             bestUpBidTick = -1;
             bestUpAskTick = MAX_TICK + 1;
-            for (int t = 0; t <= MAX_TICK; t++) {
-                double rawBid = upBids[t];
-                if (rawBid <= 0.0) {
-                    upBidsConsumed[t] = 0.0;
-                } else {
-                    if (rawBid < upBidsConsumed[t]) {
-                        upBidsConsumed[t] = rawBid;
-                    }
-                    if (rawBid - upBidsConsumed[t] > EPS) {
-                        bestUpBidTick = t;
-                    }
-                }
-
-                double rawAsk = upAsks[t];
-                if (rawAsk <= 0.0) {
-                    upAsksConsumed[t] = 0.0;
-                } else {
-                    if (rawAsk < upAsksConsumed[t]) {
-                        upAsksConsumed[t] = rawAsk;
-                    }
-                    if (bestUpAskTick > MAX_TICK && (rawAsk - upAsksConsumed[t]) > EPS) {
-                        bestUpAskTick = t;
-                    }
-                }
-            }
         } else {
+            clearMaskedArray(downBids, downBidMask);
+            clearMaskedArray(downAsks, downAskMask);
+            if (resetConsumed) {
+                clearMaskedArray(downBidsConsumed, downBidConsumedMask);
+                clearMaskedArray(downAsksConsumed, downAskConsumedMask);
+            }
             bestDownBidTick = -1;
             bestDownAskTick = MAX_TICK + 1;
-            for (int t = 0; t <= MAX_TICK; t++) {
-                double rawBid = downBids[t];
-                if (rawBid <= 0.0) {
-                    downBidsConsumed[t] = 0.0;
-                } else {
-                    if (rawBid < downBidsConsumed[t]) {
-                        downBidsConsumed[t] = rawBid;
-                    }
-                    if (rawBid - downBidsConsumed[t] > EPS) {
-                        bestDownBidTick = t;
-                    }
-                }
+        }
+    }
 
-                double rawAsk = downAsks[t];
-                if (rawAsk <= 0.0) {
-                    downAsksConsumed[t] = 0.0;
-                } else {
-                    if (rawAsk < downAsksConsumed[t]) {
-                        downAsksConsumed[t] = rawAsk;
+    private static void clearMaskedArray(double[] values, long[] mask) {
+        for (int w = 0; w < MASK_WORDS; w++) {
+            long bits = mask[w];
+            if (bits != 0L) {
+                int base = w << 6;
+                while (bits != 0L) {
+                    int bit = Long.numberOfTrailingZeros(bits);
+                    values[base + bit] = 0.0;
+                    bits &= (bits - 1L);
+                }
+                mask[w] = 0L;
+            }
+        }
+    }
+
+    private static void reconcileConsumed(double[] raw, double[] consumed, long[] consumedMask) {
+        for (int w = 0; w < MASK_WORDS; w++) {
+            long cBits = consumedMask[w];
+            if (cBits != 0L) {
+                int base = w << 6;
+                while (cBits != 0L) {
+                    int bit = Long.numberOfTrailingZeros(cBits);
+                    int t = base + bit;
+                    double r = raw[t];
+                    if (r <= 0.0) {
+                        consumed[t] = 0.0;
+                        consumedMask[w] &= ~(1L << bit);
+                    } else if (r < consumed[t]) {
+                        consumed[t] = r;
                     }
-                    if (bestDownAskTick > MAX_TICK && (rawAsk - downAsksConsumed[t]) > EPS) {
-                        bestDownAskTick = t;
-                    }
+                    cBits &= (cBits - 1L);
                 }
             }
+        }
+    }
+
+    private static int findNextBidFrom(int startTick, double[] bids, long[] bidMask, double[] consumed) {
+        if (startTick < 0) {
+            return -1;
+        }
+        int start = Math.min(MAX_TICK, startTick);
+        int w = start >>> 6;
+        int maxBit = start & 63;
+        long bits = bidMask[w] & (-1L >>> (63 - maxBit));
+        while (true) {
+            while (bits != 0L) {
+                int bit = 63 - Long.numberOfLeadingZeros(bits);
+                int t = (w << 6) + bit;
+                if (bids[t] - consumed[t] > EPS) {
+                    return t;
+                }
+                bits &= ~(1L << bit);
+            }
+            if (--w < 0) {
+                return -1;
+            }
+            bits = bidMask[w];
+        }
+    }
+
+    private static int findNextAskFrom(int startTick, double[] asks, long[] askMask, double[] consumed) {
+        if (startTick > MAX_TICK) {
+            return MAX_TICK + 1;
+        }
+        int start = Math.max(0, startTick);
+        int w = start >>> 6;
+        int minBit = start & 63;
+        long bits = askMask[w] & (-1L << minBit);
+        while (true) {
+            while (bits != 0L) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                int t = (w << 6) + bit;
+                if (asks[t] - consumed[t] > EPS) {
+                    return t;
+                }
+                bits &= (bits - 1L);
+            }
+            if (++w >= MASK_WORDS) {
+                return MAX_TICK + 1;
+            }
+            bits = askMask[w];
         }
     }
 
     private void advanceBestUpBid() {
-        while (bestUpBidTick >= 0 && (upBids[bestUpBidTick] - upBidsConsumed[bestUpBidTick]) <= EPS) {
-            bestUpBidTick--;
-        }
+        bestUpBidTick = findNextBidFrom(bestUpBidTick, upBids, upBidMask, upBidsConsumed);
     }
 
     private void advanceBestUpAsk() {
-        while (bestUpAskTick <= MAX_TICK && (upAsks[bestUpAskTick] - upAsksConsumed[bestUpAskTick]) <= EPS) {
-            bestUpAskTick++;
-        }
+        bestUpAskTick = findNextAskFrom(bestUpAskTick, upAsks, upAskMask, upAsksConsumed);
     }
 
     private void advanceBestDownBid() {
-        while (bestDownBidTick >= 0 && (downBids[bestDownBidTick] - downBidsConsumed[bestDownBidTick]) <= EPS) {
-            bestDownBidTick--;
-        }
+        bestDownBidTick = findNextBidFrom(bestDownBidTick, downBids, downBidMask, downBidsConsumed);
     }
 
     private void advanceBestDownAsk() {
-        while (bestDownAskTick <= MAX_TICK && (downAsks[bestDownAskTick] - downAsksConsumed[bestDownAskTick]) <= EPS) {
-            bestDownAskTick++;
-        }
+        bestDownAskTick = findNextAskFrom(bestDownAskTick, downAsks, downAskMask, downAsksConsumed);
     }
 
-    private void setBidLevel(double[] bids, double[] consumed, int tick, double size, boolean isUp) {
+    private void setBidLevel(
+            double[] bids,
+            long[] bidMask,
+            double[] consumed,
+            long[] consumedMask,
+            int tick,
+            double size,
+            boolean isUp) {
+
+        int w = tick >>> 6;
+        long bitMask = 1L << (tick & 63);
         bids[tick] = size;
         if (size <= 0.0) {
-            consumed[tick] = 0.0;
-        } else if (size < consumed[tick]) {
-            consumed[tick] = size;
+            bidMask[w] &= ~bitMask;
+            if (consumed[tick] != 0.0) {
+                consumed[tick] = 0.0;
+                consumedMask[w] &= ~bitMask;
+            }
+        } else {
+            bidMask[w] |= bitMask;
+            if (size < consumed[tick]) {
+                consumed[tick] = size;
+            }
         }
+
         double effective = size - consumed[tick];
         if (isUp) {
             if (effective > EPS) {
@@ -723,13 +1106,31 @@ public class PolymarketOrderBook {
         }
     }
 
-    private void setAskLevel(double[] asks, double[] consumed, int tick, double size, boolean isUp) {
+    private void setAskLevel(
+            double[] asks,
+            long[] askMask,
+            double[] consumed,
+            long[] consumedMask,
+            int tick,
+            double size,
+            boolean isUp) {
+
+        int w = tick >>> 6;
+        long bitMask = 1L << (tick & 63);
         asks[tick] = size;
         if (size <= 0.0) {
-            consumed[tick] = 0.0;
-        } else if (size < consumed[tick]) {
-            consumed[tick] = size;
+            askMask[w] &= ~bitMask;
+            if (consumed[tick] != 0.0) {
+                consumed[tick] = 0.0;
+                consumedMask[w] &= ~bitMask;
+            }
+        } else {
+            askMask[w] |= bitMask;
+            if (size < consumed[tick]) {
+                consumed[tick] = size;
+            }
         }
+
         double effective = size - consumed[tick];
         if (isUp) {
             if (effective > EPS) {
@@ -758,390 +1159,6 @@ public class PolymarketOrderBook {
             return MAX_TICK;
         }
         return (int) Math.round(price * TICK_SCALE);
-    }
-
-    private void applyClobSnapshotArray(String payload, long receiptTimestampMs) {
-        if (payload == null || payload.length() <= 2) {
-            return;
-        }
-        int len = payload.length();
-        int i = 0;
-        while (i < len) {
-            int objStart = payload.indexOf('{', i);
-            if (objStart < 0) {
-                break;
-            }
-            int objEnd = findMatchingBrace(payload, objStart, len);
-            if (objEnd < 0) {
-                break;
-            }
-            applyBookObject(payload, objStart, objEnd + 1, receiptTimestampMs);
-            i = objEnd + 1;
-        }
-    }
-
-    private void applyBookObject(String payload, int objStart, int objEnd, long receiptTimestampMs) {
-        long serverTs = extractServerTimestampMs(payload, objStart, objEnd);
-        updateObservedLatency(receiptTimestampMs, serverTs);
-
-        boolean isUp = extractAndCheckIsUpAsset(payload, objStart, objEnd);
-        if (isUp) {
-            clearUpBook(false);
-        } else {
-            clearDownBook(false);
-        }
-
-        int bidsKey = indexOfRange(payload, "\"bids\"", objStart, objEnd);
-        if (bidsKey >= 0) {
-            int arrStart = indexOfCharRange(payload, '[', bidsKey + 6, objEnd);
-            if (arrStart >= 0) {
-                int arrEnd = findMatchingBracket(payload, arrStart, objEnd);
-                if (arrEnd > arrStart) {
-                    parseBookLevelsSlice(payload, arrStart, arrEnd + 1, isUp, true);
-                }
-            }
-        }
-
-        int asksKey = indexOfRange(payload, "\"asks\"", objStart, objEnd);
-        if (asksKey >= 0) {
-            int arrStart = indexOfCharRange(payload, '[', asksKey + 6, objEnd);
-            if (arrStart >= 0) {
-                int arrEnd = findMatchingBracket(payload, arrStart, objEnd);
-                if (arrEnd > arrStart) {
-                    parseBookLevelsSlice(payload, arrStart, arrEnd + 1, isUp, false);
-                }
-            }
-        }
-
-        reconcileBookAfterSnapshot(isUp);
-    }
-
-    private void applyPriceChangePayload(String payload, long receiptTimestampMs) {
-        if (payload == null || payload.isEmpty()) {
-            return;
-        }
-        int len = payload.length();
-        long serverTs = extractServerTimestampMs(payload, 0, len);
-        updateObservedLatency(receiptTimestampMs, serverTs);
-
-        int pcKey = payload.indexOf("\"price_changes\"");
-        if (pcKey < 0) {
-            return;
-        }
-        int arrStart = payload.indexOf('[', pcKey + 15);
-        if (arrStart < 0) {
-            return;
-        }
-        int arrEnd = findMatchingBracket(payload, arrStart, len);
-        if (arrEnd < 0) {
-            return;
-        }
-
-        int i = arrStart + 1;
-        while (i < arrEnd) {
-            int itemStart = indexOfCharRange(payload, '{', i, arrEnd);
-            if (itemStart < 0) {
-                break;
-            }
-            int itemEnd = findMatchingBrace(payload, itemStart, arrEnd);
-            if (itemEnd < 0) {
-                break;
-            }
-
-            boolean isUp = extractAndCheckIsUpAsset(payload, itemStart, itemEnd + 1);
-            boolean isBuy = extractIsBuySide(payload, itemStart, itemEnd + 1);
-            double price = extractFieldDouble(payload, "\"price\"", itemStart, itemEnd + 1);
-            double size = extractFieldDouble(payload, "\"size\"", itemStart, itemEnd + 1);
-
-            if (!Double.isNaN(price) && !Double.isNaN(size)) {
-                applyDeltaForToken(isUp, isBuy, price, size, receiptTimestampMs);
-            }
-
-            i = itemEnd + 1;
-        }
-    }
-
-    private void parseBookLevelsSlice(String json, int start, int end, boolean isUp, boolean isBids) {
-        int openBracket = indexOfCharRange(json, '[', start, end);
-        int closeBracket = openBracket >= 0 ? findMatchingBracket(json, openBracket, end) : -1;
-        if (openBracket < 0 || closeBracket < 0) {
-            Log.errorf("Invalid JSON array slice while parsing order book %s levels", isBids ? "bids" : "asks");
-            return;
-        }
-        int i = openBracket + 1;
-        while (i < closeBracket) {
-            int itemStart = indexOfCharRange(json, '{', i, closeBracket);
-            if (itemStart < 0) {
-                break;
-            }
-            int itemEnd = indexOfCharRange(json, '}', itemStart + 1, closeBracket);
-            if (itemEnd < 0) {
-                Log.errorf("Malformed JSON object in order book %s levels", isBids ? "bids" : "asks");
-                break;
-            }
-
-            double price = extractFieldDouble(json, "\"price\"", itemStart, itemEnd + 1);
-            double size = extractFieldDouble(json, "\"size\"", itemStart, itemEnd + 1);
-            if (!Double.isNaN(price) && size > 0.0) {
-                int tick = priceToTick(price);
-                if (tick >= 0 && tick <= MAX_TICK) {
-                    if (isUp) {
-                        if (isBids) {
-                            upBids[tick] = size;
-                        } else {
-                            upAsks[tick] = size;
-                        }
-                    } else {
-                        if (isBids) {
-                            downBids[tick] = size;
-                        } else {
-                            downAsks[tick] = size;
-                        }
-                    }
-                }
-            }
-            i = itemEnd + 1;
-        }
-    }
-
-    private boolean extractAndCheckIsUpAsset(String s, int start, int end) {
-        int keyIdx = indexOfRange(s, "\"asset_id\"", start, end);
-        if (keyIdx < 0) {
-            return true;
-        }
-        int colonIdx = indexOfCharRange(s, ':', keyIdx + 10, end);
-        if (colonIdx < 0) {
-            return true;
-        }
-        int q1 = indexOfCharRange(s, '"', colonIdx + 1, end);
-        if (q1 < 0) {
-            return true;
-        }
-        int q2 = indexOfCharRange(s, '"', q1 + 1, end);
-        if (q2 < 0) {
-            return true;
-        }
-        int valLen = q2 - (q1 + 1);
-        if (upTokenId != null && valLen == upTokenId.length() && s.regionMatches(q1 + 1, upTokenId, 0, valLen)) {
-            return true;
-        }
-        if (downTokenId != null && valLen == downTokenId.length() && s.regionMatches(q1 + 1, downTokenId, 0, valLen)) {
-            return false;
-        }
-        return indexOfIgnoreCaseRange(s, "down", q1 + 1, q2) < 0;
-    }
-
-    private static boolean extractIsBuySide(String s, int start, int end) {
-        int keyIdx = indexOfRange(s, "\"side\"", start, end);
-        if (keyIdx < 0) {
-            return true;
-        }
-        int colonIdx = indexOfCharRange(s, ':', keyIdx + 6, end);
-        if (colonIdx < 0) {
-            return true;
-        }
-        int q1 = indexOfCharRange(s, '"', colonIdx + 1, end);
-        if (q1 < 0 || q1 + 1 >= end) {
-            return true;
-        }
-        char c = s.charAt(q1 + 1);
-        return c == 'B' || c == 'b';
-    }
-
-    private static double extractFieldDouble(String s, String fieldKey, int start, int end) {
-        int keyIdx = indexOfRange(s, fieldKey, start, end);
-        if (keyIdx < 0) {
-            return Double.NaN;
-        }
-        int colonIdx = indexOfCharRange(s, ':', keyIdx + fieldKey.length(), end);
-        if (colonIdx < 0) {
-            return Double.NaN;
-        }
-        int valStart = colonIdx + 1;
-        while (valStart < end) {
-            char c = s.charAt(valStart);
-            if (c == ' ' || c == '\t' || c == '"') {
-                valStart++;
-            } else {
-                break;
-            }
-        }
-        int valEnd = valStart;
-        while (valEnd < end) {
-            char c = s.charAt(valEnd);
-            if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
-                valEnd++;
-            } else {
-                break;
-            }
-        }
-        return parseFastDouble(s, valStart, valEnd);
-    }
-
-    private static long extractServerTimestampMs(String s, int start, int end) {
-        if (s == null || start >= end) {
-            return 0L;
-        }
-        int keyIdx = indexOfRange(s, "\"timestamp\"", start, end);
-        if (keyIdx < 0) {
-            return 0L;
-        }
-        int colonIdx = indexOfCharRange(s, ':', keyIdx + 11, end);
-        if (colonIdx < 0) {
-            return 0L;
-        }
-        int valStart = colonIdx + 1;
-        while (valStart < end) {
-            char c = s.charAt(valStart);
-            if (c == ' ' || c == '\t' || c == '"') {
-                valStart++;
-            } else {
-                break;
-            }
-        }
-        int valEnd = valStart;
-        while (valEnd < end) {
-            char c = s.charAt(valEnd);
-            if (c >= '0' && c <= '9') {
-                valEnd++;
-            } else {
-                break;
-            }
-        }
-        return parseFastLong(s, valStart, valEnd);
-    }
-
-    /**
-     * Parses a decimal number directly from a character slice without allocating substrings.
-     *
-     * @param s source string
-     * @param start inclusive start index
-     * @param end exclusive end index
-     * @return parsed double value, or {@link Double#NaN} if empty
-     */
-    public static double parseFastDouble(String s, int start, int end) {
-        if (s == null || start >= end) {
-            return Double.NaN;
-        }
-        boolean negative = false;
-        int i = start;
-        char c0 = s.charAt(i);
-        if (c0 == '-') {
-            negative = true;
-            i++;
-        } else if (c0 == '+') {
-            i++;
-        }
-        if (i >= end) {
-            return Double.NaN;
-        }
-        long intPart = 0L;
-        long fracPart = 0L;
-        long fracDiv = 1L;
-        boolean inFrac = false;
-        for (; i < end; i++) {
-            char c = s.charAt(i);
-            if (c >= '0' && c <= '9') {
-                int digit = c - '0';
-                if (!inFrac) {
-                    intPart = intPart * 10L + digit;
-                } else if (fracDiv < 1_000_000_000_000L) {
-                    fracPart = fracPart * 10L + digit;
-                    fracDiv *= 10L;
-                }
-            } else if (c == '.') {
-                inFrac = true;
-            } else if (c == 'e' || c == 'E') {
-                return Double.parseDouble(s.substring(start, end));
-            }
-        }
-        double result = (double) intPart + ((double) fracPart / (double) fracDiv);
-        return negative ? -result : result;
-    }
-
-    /**
-     * Parses an unsigned integer directly from a character slice without allocating substrings.
-     *
-     * @param s source string
-     * @param start inclusive start index
-     * @param end exclusive end index
-     * @return parsed long value
-     */
-    public static long parseFastLong(String s, int start, int end) {
-        if (s == null || start >= end) {
-            return 0L;
-        }
-        long val = 0L;
-        for (int i = start; i < end; i++) {
-            char c = s.charAt(i);
-            if (c >= '0' && c <= '9') {
-                val = val * 10L + (c - '0');
-            }
-        }
-        return val;
-    }
-
-    private static int findMatchingBrace(String s, int openIdx, int limit) {
-        int depth = 0;
-        boolean inQuotes = false;
-        for (int i = openIdx; i < limit; i++) {
-            char c = s.charAt(i);
-            if (c == '"' && (i == openIdx || s.charAt(i - 1) != '\\')) {
-                inQuotes = !inQuotes;
-            } else if (!inQuotes) {
-                if (c == '{') {
-                    depth++;
-                } else if (c == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        return i;
-                    }
-                }
-            }
-        }
-        return -1;
-    }
-
-    private static int findMatchingBracket(String s, int openIdx, int limit) {
-        int depth = 0;
-        boolean inQuotes = false;
-        for (int i = openIdx; i < limit; i++) {
-            char c = s.charAt(i);
-            if (c == '"' && (i == openIdx || s.charAt(i - 1) != '\\')) {
-                inQuotes = !inQuotes;
-            } else if (!inQuotes) {
-                if (c == '[') {
-                    depth++;
-                } else if (c == ']') {
-                    depth--;
-                    if (depth == 0) {
-                        return i;
-                    }
-                }
-            }
-        }
-        return -1;
-    }
-
-    private static int indexOfRange(String s, String target, int start, int end) {
-        int idx = s.indexOf(target, start);
-        return (idx >= 0 && idx + target.length() <= end) ? idx : -1;
-    }
-
-    private static int indexOfCharRange(String s, char ch, int start, int end) {
-        int idx = s.indexOf(ch, start);
-        return (idx >= 0 && idx < end) ? idx : -1;
-    }
-
-    private static int indexOfIgnoreCaseRange(String s, String lowerTarget, int start, int end) {
-        int tLen = lowerTarget.length();
-        int max = end - tLen;
-        for (int i = start; i <= max; i++) {
-            if (s.regionMatches(true, i, lowerTarget, 0, tLen)) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     /**
