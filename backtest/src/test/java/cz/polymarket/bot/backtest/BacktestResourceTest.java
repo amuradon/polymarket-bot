@@ -1,5 +1,6 @@
 package cz.polymarket.bot.backtest;
 
+import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -11,9 +12,9 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -123,15 +124,13 @@ class BacktestResourceTest {
 
         Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
         if (!Files.exists(pmFile) || !Files.exists(twapFile)) {
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:");
+            try (Connection conn = datasetService.getDuckDbSessionManager().openSession();
                  Statement stmt = conn.createStatement()) {
-                String normPm = pmFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (tStart * 1000L - 2000L) + "::UBIGINT, 'market_lifecycle'::VARCHAR, 'market_discovered'::VARCHAR, '0x1'::VARCHAR, NULL::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                        "'{\"clobTokenIds\":\"[\\\"101\\\", \\\"102\\\"]\"}'::JSON), " +
-                        "(" + (tStart * 1000L + 1000L) + "::UBIGINT, 'clob_ws'::VARCHAR, 'book'::VARCHAR, '0x1'::VARCHAR, '101'::VARCHAR, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, " +
-                        "'{\"asset_id\":\"101\",\"timestamp\":\"" + (tStart * 1000L + 990L) + "\",\"bids\":[{\"price\":\"0.49\",\"size\":\"300.0\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"300.0\"}]}'::JSON)" +
-                        ") AS t(ts, msg_type, event_type, market, asset_id, price, size, side, payload)) TO '" + normPm + "' (FORMAT PARQUET)");
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile, List.of(
+                        ClobRow.discovered(tStart * 1000L - 2000L, "101", "102"),
+                        ClobRow.bookLevel(tStart * 1000L + 1000L, tStart * 1000L + 990L, 8, true, true, 4900, 300.0),
+                        ClobRow.bookLevel(tStart * 1000L + 1000L, tStart * 1000L + 990L, 8, true, false, 5100, 300.0)
+                ));
 
                 String normTwap = twapFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +

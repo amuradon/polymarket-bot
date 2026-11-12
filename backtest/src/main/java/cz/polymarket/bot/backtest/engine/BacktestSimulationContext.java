@@ -20,9 +20,9 @@ import java.util.Map;
  */
 public class BacktestSimulationContext implements StrategyContext, ExecutionRouter {
 
-    private final HourlyPriceCache priceCache = new HourlyPriceCache(3600L);
     private final SimulatedMatchingEngine matchingEngine;
     private final DynamicIndicatorEngine indicatorEngine;
+    private HourlyPriceCache priceCache;
 
     private long currentTimestampMs;
     private double lastReferencePrice;
@@ -77,10 +77,13 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     }
 
     /**
-     * Returns the shared rolling price cache.
+     * Returns the shared rolling price cache, lazily initialized on first access.
      */
     @Override
     public HourlyPriceCache getPriceCache() {
+        if (priceCache == null) {
+            priceCache = new HourlyPriceCache(3600L);
+        }
         return priceCache;
     }
 
@@ -161,7 +164,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     public double getEstimatedModelProbUp(CollectorMarketMetadata metadata) {
         double openRef = (metadata != null && !Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0)
                 ? metadata.twapOpen()
-                : (indicatorEngine != null ? indicatorEngine.getTwapOpenPrice() : 0.0);
+                : 0.0;
         double spotPrice = (indicatorEngine != null && indicatorEngine.getCurrentSpotPrice() > 0.0)
                 ? indicatorEngine.getCurrentSpotPrice()
                 : (lastReferencePrice > 0.0 ? lastReferencePrice : openRef);

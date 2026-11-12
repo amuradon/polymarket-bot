@@ -45,6 +45,22 @@ public interface TradingStrategy {
     }
 
     /**
+     * Declares the duration in milliseconds before candle expiration ({@code tEndMs}) during which
+     * this strategy requires Polymarket CLOB order book quotes ({@link #onOrderBookQuote(OrderBookQuote)}).
+     * <p>
+     * Returns {@link Long#MAX_VALUE} by default so full-candle strategies receive CLOB quotes across
+     * the entire market interval. Final-window strategies may return a bounded duration (while still
+     * receiving {@code polymarket/price_crypto} and {@code polymarket/price_crypto_twap_60s} from
+     * the very start of the market interval) so the backtesting engine can prune early CLOB row groups
+     * after seeding from the latest full {@code book} snapshot.
+     *
+     * @return required CLOB lookback window before {@code tEndMs} in milliseconds
+     */
+    default long getRequiredClobLookbackMs() {
+        return Long.MAX_VALUE;
+    }
+
+    /**
      * Resets the internal state of the strategy for a new run or test.
      */
     default void reset() {}

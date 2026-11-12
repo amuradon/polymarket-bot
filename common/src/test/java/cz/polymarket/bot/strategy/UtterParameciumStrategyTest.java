@@ -512,4 +512,21 @@ class UtterParameciumStrategyTest {
         strategy.onPolymarketCryptoPrice(tau19Ms, "btcusd", "chainlink", 90_080.00, tau19Ms);
         assertThat(submittedOrders).hasSize(1);
     }
+
+    @Test
+    @DisplayName("Should declare bounded CLOB lookback window while default TradingStrategy requests full candle")
+    void shouldDeclareBoundedClobLookbackWindowWhileDefaultStrategyRequestsFullCandle() {
+        TradingStrategy defaultStrategy = new TradingStrategy() {
+            @Override
+            public void init(StrategyContext context) {
+            }
+
+            @Override
+            public void onExecutionReport(ExecutionReport report) {
+            }
+        };
+
+        assertThat(defaultStrategy.getRequiredClobLookbackMs()).isEqualTo(Long.MAX_VALUE);
+        assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(76_000L);
+    }
 }

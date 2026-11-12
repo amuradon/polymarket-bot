@@ -2,8 +2,6 @@ package cz.polymarket.bot.backtest.service;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
-import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
-import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -33,7 +31,9 @@ import java.util.stream.Stream;
  * in {@code D:\Crypto\data\Polymarket\collector}.
  * <p>
  * Mirrors the exact subdirectory hierarchy produced by the {@code data} collector module and
- * {@code scripts/convert-to-parquet.ps1}.
+ * {@code scripts/convert-to-parquet.ps1}, reading the typed 10-column CLOB Parquet metadata header
+ * ({@code event_code = 0}) and evaluating binary market resolution strictly via opening and closing
+ * 60-second Chainlink TWAP prices ({@code twapClose >= twapOpen}).
  */
 @ApplicationScoped
 public class CollectorParquetDatasetService {
@@ -42,30 +42,39 @@ public class CollectorParquetDatasetService {
     private static final long MAX_TWAP_SAMPLE_DRIFT_MS = 10_000L;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE.withZone(ZoneOffset.UTC);
 
-    static {
-        try {
-            Class.forName("org.duckdb.DuckDBDriver");
-        } catch (ClassNotFoundException e) {
-            Log.fatal("Fatal error: DuckDB JDBC driver not found on classpath; backtesting engine cannot run", e);
-        }
-    }
-
     private final Path collectorRootDir;
+    private final DuckDbSessionManager duckDbSessionManager;
 
     /**
-     * Constructs the dataset service with the configured collector root directory.
+     * Constructs the dataset service with the configured collector root directory and shared DuckDB session manager.
      *
      * @param collectorDir root path of converted collector Parquet files
+     * @param duckDbSessionManager shared DuckDB session manager
      */
     @Inject
     public CollectorParquetDatasetService(
             @ConfigProperty(name = "polymarket.backtest.collector-dir", defaultValue = "D:/Crypto/data/Polymarket/collector")
-            String collectorDir) {
+            String collectorDir,
+            DuckDbSessionManager duckDbSessionManager) {
         if (collectorDir == null || collectorDir.isBlank()) {
             Log.error("Invalid configuration in CollectorParquetDatasetService: collectorDir cannot be null or blank");
             throw new IllegalArgumentException("collectorDir cannot be null or blank");
         }
+        if (duckDbSessionManager == null) {
+            Log.error("Invalid configuration in CollectorParquetDatasetService: duckDbSessionManager cannot be null");
+            throw new IllegalArgumentException("duckDbSessionManager cannot be null");
+        }
         this.collectorRootDir = Path.of(collectorDir);
+        this.duckDbSessionManager = duckDbSessionManager;
+    }
+
+    /**
+     * Returns the shared DuckDB session manager used for reading Parquet archives.
+     *
+     * @return shared {@link DuckDbSessionManager}
+     */
+    public DuckDbSessionManager getDuckDbSessionManager() {
+        return duckDbSessionManager;
     }
 
     /**
@@ -323,10 +332,11 @@ public class CollectorParquetDatasetService {
     /**
      * Lazily loads and validates the metadata for a single discovered market when the market is processed.
      * <p>
-     * Extracts {@code twapOpen} and {@code twapClose} from the pre-loaded daily stream events and queries
-     * the market Parquet file via DuckDB for {@code market_discovered} ({@code clobTokenIds}) and
-     * {@code market_resolved} ({@code outcomePrices}). If any required data is missing or unreadable,
-     * logs a warning and returns {@link Optional#empty()} so the market file is skipped.
+     * Extracts {@code twapOpen} and {@code twapClose} from the pre-loaded daily 60s TWAP stream events,
+     * queries the typed CLOB Parquet header row ({@code event_code = 0}) via DuckDB for {@code up_token_id}
+     * and {@code down_token_id}, and evaluates market resolution strictly as {@code twapClose >= twapOpen ? UP : DOWN}.
+     * If {@code twapOpen}, {@code twapClose}, or the token IDs are missing, logs a warning and returns
+     * {@link Optional#empty()}.
      *
      * @param discoveredMarket initial market descriptor returned by {@link #discoverMarkets}
      * @param sharedDailyEvents pre-loaded sorted daily stream events for the market's UTC day
@@ -355,32 +365,28 @@ public class CollectorParquetDatasetService {
 
         double twapOpen = findNearestTwap60sPrice(sharedDailyEvents, tStart * 1000L);
         if (Double.isNaN(twapOpen) || twapOpen <= 0.0) {
-            Log.warnf("Skipping market at %d (%s): target price is missing from PolyBolt 60s TWAP stream for %s",
+            Log.warnf("Skipping market at %d (%s): opening 60s TWAP target price is missing for %s",
                     tStart, datetimeUtc, parquetFile);
             return Optional.empty();
         }
 
         double twapClose = findNearestTwap60sPrice(sharedDailyEvents, tEnd * 1000L);
+        if (Double.isNaN(twapClose) || twapClose <= 0.0) {
+            Log.warnf("Skipping market at %d (%s): closing 60s TWAP settlement price is missing for %s",
+                    tStart, datetimeUtc, parquetFile);
+            return Optional.empty();
+        }
 
         ParsedMarketHeader header = readMarketHeader(parquetFile);
         if (header == null
                 || header.upTokenId() == null || header.upTokenId().isBlank()
                 || header.downTokenId() == null || header.downTokenId().isBlank()) {
-            Log.warnf("Skipping market at %d (%s): missing CLOB token IDs (market_discovered) in %s",
+            Log.warnf("Skipping market at %d (%s): missing CLOB token IDs (event_code=0) in %s",
                     tStart, datetimeUtc, parquetFile);
             return Optional.empty();
         }
 
-        TradeDirection outcome;
-        if (header.resolvedOutcome() != null) {
-            outcome = header.resolvedOutcome();
-        } else if (!Double.isNaN(twapClose) && twapClose > 0.0) {
-            outcome = (twapClose >= twapOpen) ? TradeDirection.UP : TradeDirection.DOWN;
-        } else {
-            Log.warnf("Skipping market at %d (%s): market resolution and closing 60s TWAP price are both missing for %s",
-                    tStart, datetimeUtc, parquetFile);
-            return Optional.empty();
-        }
+        TradeDirection outcome = (twapClose >= twapOpen) ? TradeDirection.UP : TradeDirection.DOWN;
 
         return Optional.of(new CollectorMarketMetadata(
                 tStart,
@@ -396,43 +402,24 @@ public class CollectorParquetDatasetService {
         ));
     }
 
-    private record ParsedMarketHeader(String upTokenId, String downTokenId, TradeDirection resolvedOutcome) {}
+    private record ParsedMarketHeader(String upTokenId, String downTokenId) {}
 
     private ParsedMarketHeader readMarketHeader(Path parquetFile) {
-        String upToken = null;
-        String downToken = null;
-        TradeDirection resolvedOutcome = null;
+        String normPath = parquetFile.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
+        String sql = "SELECT up_token_id, down_token_id FROM read_parquet('" + normPath + "') WHERE event_code = 0 LIMIT 1";
 
-        String normPath = parquetFile.toAbsolutePath().toString().replace('\\', '/');
-        String sql = "SELECT event_type, CAST(payload AS VARCHAR) FROM read_parquet('" + normPath + "') " +
-                "WHERE msg_type IN ('market_discovered', 'market_resolved', 'market_lifecycle') " +
-                "AND event_type IN ('market_discovered', 'market_resolved')";
-
-        try (Connection conn = ChronologicalEventStreamer.openStreamingConnection();
+        try (Connection conn = duckDbSessionManager.openSession();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                String eventType = rs.getString(1);
-                String payload = rs.getString(2);
-                if (payload == null) {
-                    continue;
-                }
-                if ("market_discovered".equals(eventType)) {
-                    String[] tokens = extractClobTokenIds(payload);
-                    if (tokens != null) {
-                        upToken = tokens[0];
-                        downToken = tokens[1];
-                    }
-                } else if ("market_resolved".equals(eventType)) {
-                    resolvedOutcome = extractResolvedOutcome(payload);
-                }
+            if (rs.next()) {
+                return new ParsedMarketHeader(rs.getString(1), rs.getString(2));
             }
         } catch (SQLException e) {
-            Log.warnf("Could not read metadata rows from %s: %s", parquetFile, e.getMessage());
+            Log.warnf("Could not read metadata row from %s: %s", parquetFile, e.getMessage());
             return null;
         }
 
-        return new ParsedMarketHeader(upToken, downToken, resolvedOutcome);
+        return null;
     }
 
     private static double findNearestTwap60sPrice(BacktestEvent[] sharedDailyEvents, long targetTsMs) {
@@ -500,88 +487,5 @@ public class CollectorParquetDatasetService {
             }
         }
         return result;
-    }
-
-    static String[] extractClobTokenIds(String payload) {
-        int keyIdx = payload.indexOf("\"clobTokenIds\"");
-        if (keyIdx < 0) {
-            return null;
-        }
-        int bracketStart = payload.indexOf('[', keyIdx + 14);
-        if (bracketStart < 0) {
-            return null;
-        }
-        int bracketEnd = payload.indexOf(']', bracketStart + 1);
-        if (bracketEnd < 0) {
-            return null;
-        }
-
-        List<String> ids = extractQuotedStrings(payload, bracketStart + 1, bracketEnd);
-        if (ids.size() >= 2) {
-            return new String[]{ids.get(0), ids.get(1)};
-        }
-        return null;
-    }
-
-    static TradeDirection extractResolvedOutcome(String payload) {
-        int keyIdx = payload.indexOf("\"outcomePrices\"");
-        if (keyIdx < 0) {
-            return null;
-        }
-        int bracketStart = payload.indexOf('[', keyIdx + 15);
-        if (bracketStart < 0) {
-            return null;
-        }
-        int bracketEnd = payload.indexOf(']', bracketStart + 1);
-        if (bracketEnd < 0) {
-            return null;
-        }
-        List<String> prices = extractQuotedStrings(payload, bracketStart + 1, bracketEnd);
-        if (prices.size() >= 2) {
-            double p0 = PolymarketOrderBook.parseFastDouble(prices.get(0), 0, prices.get(0).length());
-            double p1 = PolymarketOrderBook.parseFastDouble(prices.get(1), 0, prices.get(1).length());
-            if (!Double.isNaN(p0) && !Double.isNaN(p1)) {
-                return p0 >= p1 ? TradeDirection.UP : TradeDirection.DOWN;
-            }
-        }
-        return null;
-    }
-
-    private static List<String> extractQuotedStrings(String s, int start, int end) {
-        List<String> list = new ArrayList<>(2);
-        int i = start;
-        while (i < end) {
-            int q1 = s.indexOf('"', i);
-            if (q1 < 0 || q1 >= end) {
-                break;
-            }
-            while (q1 > start && s.charAt(q1 - 1) == '\\') {
-                // Skip escaped quote token if outer string is JSON-encoded string
-                break;
-            }
-            int q2 = q1 + 1;
-            while (q2 < end) {
-                char c = s.charAt(q2);
-                if (c == '"') {
-                    break;
-                }
-                if (c == '\\' && q2 + 1 < end && s.charAt(q2 + 1) == '"') {
-                    break;
-                }
-                q2++;
-            }
-            if (q2 >= end) {
-                break;
-            }
-            String token = s.substring(q1 + 1, q2).replace("\\", "").trim();
-            if (!token.isEmpty() && !token.equals(",")) {
-                list.add(token);
-            }
-            i = q2 + 1;
-            if (i < end && s.charAt(i) == '"') {
-                i++;
-            }
-        }
-        return list;
     }
 }

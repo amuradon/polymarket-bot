@@ -220,6 +220,11 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     @Override
+    public long getRequiredClobLookbackMs() {
+        return config.maxTauMs() + PRE_ACTIVATION_BALANCE_SYNC_LEAD_MS + 5_000L;
+    }
+
+    @Override
     public Timeframe getTimeframe() {
         return Timeframe.FIFTEEN_MINUTES;
     }
