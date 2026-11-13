@@ -53,18 +53,18 @@ public class UtterParameciumStrategyConfig {
      * Constructs the strategy configuration with injected MicroProfile properties.
      *
      * @param minTauMs minimum remaining time to candle expiry in milliseconds (default {@code 5000} = 5s)
-     * @param maxTauMs maximum remaining time to candle expiry in milliseconds, strictly {@code < 65000} (default {@code 60000} = 60s)
-     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 350} = 0.35s)
+     * @param maxTauMs maximum remaining time to candle expiry in milliseconds, strictly {@code < 65000} (default {@code 64000} = 64s)
+     * @param cooldownMs minimum interval between consecutive batch signals in milliseconds (default {@code 300} = 0.30s)
      * @param minEntryPriceMc minimum acceptable best-ask price in millicents (default {@code 380} = $0.38)
-     * @param maxEntryPriceMc maximum acceptable best-ask price in millicents (default {@code 840} = $0.84)
+     * @param maxEntryPriceMc maximum acceptable best-ask price in millicents for locked-in late entries (default {@code 920} = $0.92; unlocked entries cap at {@code 840})
      * @param maxSpreadMc maximum allowed BBO spread in millicents (default {@code 80} = $0.08)
      * @param minModelProbMc minimum model probability for entries in millicents (default {@code 650} = 65.0%)
-     * @param maxModelProbMc fat-tail ceiling on model probability in millicents (default {@code 975} = 97.5%)
+     * @param maxModelProbMc fat-tail ceiling on model probability in millicents (default {@code 985} = 98.5%)
      * @param minEdgeMc minimum net price edge after taker fee in millicents (default {@code 25} = $0.025)
      * @param maxSlippageMc maximum allowed limit price slippage above best ask in millicents (default {@code 50} = $0.05)
      * @param minOrderShares minimum order size in integer shares (default {@code 5})
-     * @param maxOrderShares maximum single-order size in integer shares (default {@code 30})
-     * @param edgeScalingFactor scaling factor mapping net edge to additional shares (default {@code 65})
+     * @param maxOrderShares base maximum single-order size in integer shares (default {@code 45})
+     * @param edgeScalingFactor scaling factor mapping net edge to additional shares (default {@code 90})
      * @param maxInventorySharesPerSide base maximum cumulative shares per direction in one 15m market (default {@code 600})
      * @param earlyInventoryCapBps fraction of {@code maxInventorySharesPerSide} allowed at {@code tau >= 60s} in bps (default {@code 5000} = 50%)
      * @param fullInventoryTauMs remaining time in milliseconds at or below which 100% of time-staged inventory is unlocked (default {@code 36000} = 36s)
@@ -86,18 +86,18 @@ public class UtterParameciumStrategyConfig {
     @Inject
     public UtterParameciumStrategyConfig(
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-tau-ms", defaultValue = "5000") long minTauMs,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-tau-ms", defaultValue = "60000") long maxTauMs,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "350") long cooldownMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-tau-ms", defaultValue = "64000") long maxTauMs,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.cooldown-ms", defaultValue = "300") long cooldownMs,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-entry-price-mc", defaultValue = "380") int minEntryPriceMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-entry-price-mc", defaultValue = "840") int maxEntryPriceMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-entry-price-mc", defaultValue = "920") int maxEntryPriceMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-spread-mc", defaultValue = "80") int maxSpreadMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-model-prob-mc", defaultValue = "650") int minModelProbMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-model-prob-mc", defaultValue = "975") int maxModelProbMc,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-model-prob-mc", defaultValue = "985") int maxModelProbMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-edge-mc", defaultValue = "25") int minEdgeMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-slippage-mc", defaultValue = "50") int maxSlippageMc,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-order-shares", defaultValue = "5") int minOrderShares,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-order-shares", defaultValue = "30") int maxOrderShares,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.edge-scaling-factor", defaultValue = "65") int edgeScalingFactor,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-order-shares", defaultValue = "45") int maxOrderShares,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.edge-scaling-factor", defaultValue = "90") int edgeScalingFactor,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-inventory-shares-per-side", defaultValue = "600") int maxInventorySharesPerSide,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.early-inventory-cap-bps", defaultValue = "5000") int earlyInventoryCapBps,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.full-inventory-tau-ms", defaultValue = "36000") long fullInventoryTauMs,
@@ -189,26 +189,27 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Creates a default configuration instance calibrated with Iteration 3 wave-volatility, smooth Z-curve,
-     * anti-stagnation conviction sizing, and tightened supplementary spot reversal guard parameters.
+     * Creates a default configuration instance calibrated with Iteration 4 pre-window activation ({@code 64s}),
+     * two-tier locked-in ceiling ({@code 840 / 920 mc}), bidirectional {@code onCalculatedSpotTwap} breakout
+     * confirmation, recalibrated Z-curve, and dynamic conviction batch/inventory sizing.
      *
      * @return default strategy configuration
      */
     public static UtterParameciumStrategyConfig defaultModelV1() {
         return new UtterParameciumStrategyConfig(
                 5_000L,
-                60_000L,
-                350L,
+                64_000L,
+                300L,
                 380,
-                840,
+                920,
                 80,
                 650,
-                975,
+                985,
                 25,
                 50,
                 5,
-                30,
-                65,
+                45,
+                90,
                 600,
                 5_000,
                 36_000L,
@@ -237,14 +238,14 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum remaining time to candle expiry in milliseconds (default 60,000 ms).
+     * Maximum remaining time to candle expiry in milliseconds (default 64,000 ms).
      */
     public long maxTauMs() {
         return maxTauMs;
     }
 
     /**
-     * Minimum interval between consecutive signals in milliseconds (default 350 ms).
+     * Minimum interval between consecutive signals in milliseconds (default 300 ms).
      */
     public long cooldownMs() {
         return cooldownMs;
@@ -258,7 +259,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum acceptable ask price in millicents (default 840 mc = $0.84).
+     * Maximum acceptable ask price in millicents for locked-in late entries (default 920 mc = $0.92).
      */
     public int maxEntryPriceMc() {
         return maxEntryPriceMc;
@@ -279,7 +280,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum fat-tail model probability cap in millicents (default 975 mc = 97.5%).
+     * Maximum fat-tail model probability cap in millicents (default 985 mc = 98.5%).
      */
     public int maxModelProbMc() {
         return maxModelProbMc;
@@ -307,14 +308,14 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Maximum single-order size in integer shares (default 30).
+     * Base maximum single-order size in integer shares (default 45).
      */
     public int maxOrderShares() {
         return maxOrderShares;
     }
 
     /**
-     * Edge scaling coefficient for order sizing (default 65).
+     * Edge scaling coefficient for order sizing (default 90).
      */
     public int edgeScalingFactor() {
         return edgeScalingFactor;
