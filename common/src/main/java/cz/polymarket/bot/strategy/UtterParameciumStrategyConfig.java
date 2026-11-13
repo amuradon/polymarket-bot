@@ -71,9 +71,9 @@ public class UtterParameciumStrategyConfig {
      * @param allowDirectionFlip whether opposite-side entries are permitted after opening a position in the market (default {@code false})
      * @param adverseDrift10sBlockCents 10-second adverse Chainlink spot drift in USD cents blocking pre-lock-in entries (default {@code 950} = $9.50)
      * @param adverseAskDrop8sBlockMc 8-second sustained CLOB BBO drop in millicents blocking pre-lock-in entries (default {@code 100} = $0.10)
-     * @param calcLeadWeightBps conservative haircut weight applied to adverse basis-aligned multi-exchange spot divergence beyond noise deadband in bps (default {@code 6000} = 60%)
-     * @param calcAdverseLeadBlockCents adverse basis-aligned multi-exchange spot lead in USD cents blocking non-locked-in entries (default {@code 850} = $8.50)
-     * @param calcAdverseDrift4sBlockCents 4-second adverse multi-exchange spot drift in USD cents blocking non-locked-in entries (default {@code 1250} = $12.50)
+     * @param calcLeadWeightBps conservative haircut weight applied to adverse basis-aligned multi-exchange spot divergence beyond noise deadband in bps (default {@code 7000} = 70%)
+     * @param calcAdverseLeadBlockCents adverse basis-aligned multi-exchange spot lead in USD cents blocking non-locked-in entries (default {@code 650} = $6.50)
+     * @param calcAdverseDrift4sBlockCents 4-second adverse multi-exchange spot drift in USD cents blocking non-locked-in entries (default {@code 950} = $9.50)
      * @param defaultSigma1sCents fallback 1-second BTC volatility in USD cents during warm-up (default {@code 160} = $1.60)
      * @param minSigma1sCents lower clamp for 1-second BTC volatility in USD cents (default {@code 105} = $1.05)
      * @param maxSigma1sCents upper clamp for 1-second BTC volatility in USD cents (default {@code 3500} = $35.00)
@@ -104,9 +104,9 @@ public class UtterParameciumStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.allow-direction-flip", defaultValue = "false") boolean allowDirectionFlip,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.adverse-drift-10s-block-cents", defaultValue = "950") long adverseDrift10sBlockCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.adverse-ask-drop-8s-block-mc", defaultValue = "100") int adverseAskDrop8sBlockMc,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-lead-weight-bps", defaultValue = "6000") int calcLeadWeightBps,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-adverse-lead-block-cents", defaultValue = "850") long calcAdverseLeadBlockCents,
-            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-adverse-drift-4s-block-cents", defaultValue = "1250") long calcAdverseDrift4sBlockCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-lead-weight-bps", defaultValue = "7000") int calcLeadWeightBps,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-adverse-lead-block-cents", defaultValue = "650") long calcAdverseLeadBlockCents,
+            @ConfigProperty(name = "polymarket.strategy.utter-paramecium.calc-adverse-drift-4s-block-cents", defaultValue = "950") long calcAdverseDrift4sBlockCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.default-sigma-1s-cents", defaultValue = "160") long defaultSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.min-sigma-1s-cents", defaultValue = "105") long minSigma1sCents,
             @ConfigProperty(name = "polymarket.strategy.utter-paramecium.max-sigma-1s-cents", defaultValue = "3500") long maxSigma1sCents,
@@ -189,8 +189,8 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Creates a default configuration instance calibrated with Iteration 2 loss-mitigation and
-     * conviction-scaled position sizing parameters.
+     * Creates a default configuration instance calibrated with Iteration 3 wave-volatility, smooth Z-curve,
+     * anti-stagnation conviction sizing, and tightened supplementary spot reversal guard parameters.
      *
      * @return default strategy configuration
      */
@@ -215,9 +215,9 @@ public class UtterParameciumStrategyConfig {
                 false,
                 950L,
                 100,
-                6_000,
-                850L,
-                1_250L,
+                7_000,
+                650L,
+                950L,
                 160L,
                 105L,
                 3_500L,
@@ -363,21 +363,21 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Conservative haircut weight applied to adverse basis-aligned {@code onCalculatedSpotTwap} divergence beyond noise deadband in bps (default 6,000 = 60%).
+     * Conservative haircut weight applied to adverse basis-aligned {@code onCalculatedSpotTwap} divergence beyond noise deadband in bps (default 7,000 = 70%).
      */
     public int calcLeadWeightBps() {
         return calcLeadWeightBps;
     }
 
     /**
-     * Adverse basis-aligned {@code onCalculatedSpotTwap} divergence in USD cents blocking entries while {@code tau > 25s} (default 850 = $8.50).
+     * Adverse basis-aligned {@code onCalculatedSpotTwap} divergence in USD cents blocking non-locked-in entries (default 650 = $6.50).
      */
     public long calcAdverseLeadBlockCents() {
         return calcAdverseLeadBlockCents;
     }
 
     /**
-     * Adverse 4-second {@code onCalculatedSpotTwap} drift in USD cents blocking entries while {@code tau > 25s} (default 1,250 = $12.50).
+     * Adverse 4-second {@code onCalculatedSpotTwap} drift in USD cents blocking non-locked-in entries (default 950 = $9.50).
      */
     public long calcAdverseDrift4sBlockCents() {
         return calcAdverseDrift4sBlockCents;
