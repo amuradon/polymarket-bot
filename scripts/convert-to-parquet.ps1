@@ -50,18 +50,9 @@
 .PARAMETER RowGroupSize
     Maximum number of rows per Parquet row group. Defaults to 50000 (100000 for Polymarket CLOB markets, capped at 25000 for heavy depth diff streams).
 
-.PARAMETER MigrateLegacyParquet
-    In-place atomic migration mode for existing legacy Polymarket CLOB Parquet files (*-updown-*.parquet)
-    that still contain the raw JSON 'payload' column after their original .jsonl.zst archives were deleted.
-    Already-migrated typed CLOB Parquet files (containing 'event_code') are automatically skipped.
-
 .EXAMPLE
     .\scripts\convert-to-parquet.ps1
     Converts all .jsonl.zst files in D:\Crypto\data\Polymarket\collector to .parquet and deletes originals.
-
-.EXAMPLE
-    .\scripts\convert-to-parquet.ps1 -MigrateLegacyParquet -Stream btc-updown-15m
-    Atomically migrates existing legacy CLOB .parquet files in-place to the compact 10-column typed schema.
 
 .EXAMPLE
     .\scripts\convert-to-parquet.ps1 -DryRun
@@ -120,18 +111,11 @@ param(
     [int]$RowGroupSize = 50000,
 
     [Parameter()]
-    [switch]$MigrateLegacyParquet,
-
-    [Parameter()]
     [string]$TempDir
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
-if ($MigrateLegacyParquet -and (-not $PSBoundParameters.ContainsKey('Filter'))) {
-    $Filter = "*-updown-*.parquet"
-}
 
 # Verify DuckDB CLI is available
 $duckdbCmd = Get-Command $DuckDbPath -ErrorAction SilentlyContinue
@@ -486,17 +470,6 @@ ORDER BY ts ASC, twap_timestamp ASC
 "@
             return Get-TypedClobSelectQuery -RawSourceSql $rawSource
         }
-        "polymarket-clob-legacy-parquet" {
-            $rawSource = @"
-    SELECT
-        row_number() OVER () AS frame_id,
-        ts,
-        COALESCE(event_type, msg_type) AS event_type,
-        CAST(payload AS JSON) AS payload
-    FROM read_parquet('$InputPathEscaped')
-"@
-            return Get-TypedClobSelectQuery -RawSourceSql $rawSource
-        }
         default {
             return @"
 SELECT 
@@ -525,8 +498,6 @@ Write-Host " Threads          : $Threads" -ForegroundColor White
 Write-Host " Row Group Size   : $RowGroupSize" -ForegroundColor White
 if ($DryRun) {
     Write-Host " Mode             : DRY-RUN (No files will be converted or deleted)" -ForegroundColor Yellow
-} elseif ($MigrateLegacyParquet) {
-    Write-Host " Mode             : MIGRATE LEGACY CLOB PARQUET IN-PLACE (Atomic)" -ForegroundColor Cyan
 } elseif ($KeepOriginal) {
     Write-Host " Mode             : CONVERT AND KEEP ORIGINALS" -ForegroundColor Cyan
 } else {
@@ -539,12 +510,6 @@ Write-Host "[1/3] Scanning for matching archives in $resolvedTargetDir..." -Fore
 $allFiles = Get-ChildItem -Path $resolvedTargetDir -Recurse -File -Filter $Filter
 
 $files = $allFiles
-if ($MigrateLegacyParquet) {
-    $files = $files | Where-Object {
-        (-not $_.Name.EndsWith(".tmp.parquet", [System.StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $_.Name.EndsWith(".legacy.parquet", [System.StringComparison]::OrdinalIgnoreCase))
-    }
-}
 if ($Date) {
     $files = $files | Where-Object { $_.Name -like "*$Date*" -or $_.FullName -like "*$Date*" }
 }
@@ -596,62 +561,35 @@ try {
         $sizeMb = [math]::Round($file.Length / 1MB, 2)
         $inputEscaped = $srcPath.Replace('\', '/')
 
-        if ($MigrateLegacyParquet) {
-            $destPath = $srcPath
-            $streamType = "polymarket-clob-legacy-parquet"
+        # Determine destination .parquet filename
+        if ($srcPath.EndsWith(".jsonl.zst", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $destPath = $srcPath.Substring(0, $srcPath.Length - 10) + ".parquet"
+        } elseif ($srcPath.EndsWith(".jsonl", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $destPath = $srcPath.Substring(0, $srcPath.Length - 6) + ".parquet"
+        } elseif ($srcPath.EndsWith(".zst", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $destPath = $srcPath.Substring(0, $srcPath.Length - 4) + ".parquet"
+        } else {
+            $destPath = $srcPath + ".parquet"
+        }
 
-            $hasPayloadRaw = (& $DuckDbPath -csv -noheader -no-stdin -c "SELECT count(*) FROM parquet_schema('$inputEscaped') WHERE name = 'payload';" 2>&1 | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0) {
-                $errMsg = "Failed to inspect Parquet schema for '$relPath': $hasPayloadRaw"
-                Write-Host "  [$index/$fileCount] [FAILED] $errMsg" -ForegroundColor Red
-                $errors.Add($errMsg)
-                $failedCount++
-                continue
-            }
-            if ($hasPayloadRaw -eq "0") {
-                Write-Host "  [$index/$fileCount] [SKIP] $relPath (Already migrated to typed CLOB schema: $sizeMb MB)" -ForegroundColor DarkGray
+        # Check if target .parquet already exists
+        if ((Test-Path -LiteralPath $destPath) -and (-not $Force)) {
+            $existingItem = Get-Item -LiteralPath $destPath
+            if ($existingItem.Length -gt 0) {
+                Write-Host "  [$index/$fileCount] [SKIP] $relPath (Parquet already exists: $([math]::Round($existingItem.Length / 1MB, 2)) MB)" -ForegroundColor DarkGray
                 $skippedCount++
                 continue
             }
-
-            if ($DryRun) {
-                Write-Host "  [$index/$fileCount] [DRY-RUN] Would migrate legacy CLOB Parquet $relPath ($sizeMb MB) -> typed 10-column schema" -ForegroundColor Yellow
-                $successCount++
-                continue
-            }
-
-            Write-Host "  [$index/$fileCount] Migrating legacy CLOB Parquet $relPath ($sizeMb MB)..." -NoNewline
-        } else {
-            # Determine destination .parquet filename
-            if ($srcPath.EndsWith(".jsonl.zst", [System.StringComparison]::OrdinalIgnoreCase)) {
-                $destPath = $srcPath.Substring(0, $srcPath.Length - 10) + ".parquet"
-            } elseif ($srcPath.EndsWith(".jsonl", [System.StringComparison]::OrdinalIgnoreCase)) {
-                $destPath = $srcPath.Substring(0, $srcPath.Length - 6) + ".parquet"
-            } elseif ($srcPath.EndsWith(".zst", [System.StringComparison]::OrdinalIgnoreCase)) {
-                $destPath = $srcPath.Substring(0, $srcPath.Length - 4) + ".parquet"
-            } else {
-                $destPath = $srcPath + ".parquet"
-            }
-
-            # Check if target .parquet already exists
-            if ((Test-Path -LiteralPath $destPath) -and (-not $Force)) {
-                $existingItem = Get-Item -LiteralPath $destPath
-                if ($existingItem.Length -gt 0) {
-                    Write-Host "  [$index/$fileCount] [SKIP] $relPath (Parquet already exists: $([math]::Round($existingItem.Length / 1MB, 2)) MB)" -ForegroundColor DarkGray
-                    $skippedCount++
-                    continue
-                }
-            }
-
-            $streamType = Get-StreamType -FilePath $srcPath
-            if ($DryRun) {
-                Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $([System.IO.Path]::GetFileName($destPath))" -ForegroundColor Yellow
-                $successCount++
-                continue
-            }
-
-            Write-Host "  [$index/$fileCount] Converting [$streamType] $relPath ($sizeMb MB)..." -NoNewline
         }
+
+        $streamType = Get-StreamType -FilePath $srcPath
+        if ($DryRun) {
+            Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $([System.IO.Path]::GetFileName($destPath))" -ForegroundColor Yellow
+            $successCount++
+            continue
+        }
+
+        Write-Host "  [$index/$fileCount] Converting [$streamType] $relPath ($sizeMb MB)..." -NoNewline
 
         $tempParquetPath = "$destPath.tmp.parquet"
         if (Test-Path -LiteralPath $tempParquetPath) {
@@ -666,7 +604,7 @@ try {
             if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
                 $effectiveThreads = [Math]::Min($Threads, 2)
                 $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
-            } elseif (($streamType -in "polymarket-clob-market", "polymarket-clob-legacy-parquet") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+            } elseif (($streamType -eq "polymarket-clob-market") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
                 $effectiveRowGroupSize = 100000
             }
 
@@ -709,11 +647,6 @@ $selectQuery
                 throw "Parquet integrity verification failed: $verifyOutput"
             }
 
-            if ($MigrateLegacyParquet -and $KeepOriginal) {
-                $legacyBackupPath = $srcPath.Substring(0, $srcPath.Length - 8) + ".legacy.parquet"
-                Copy-Item -LiteralPath $srcPath -Destination $legacyBackupPath -Force
-            }
-
             # Atomically move temp Parquet to final destination
             Move-Item -LiteralPath $tempParquetPath -Destination $destPath -Force
 
@@ -721,13 +654,7 @@ $selectQuery
             $finalMb = [math]::Round($finalItem.Length / 1MB, 2)
             $totalParquetBytes += $finalItem.Length
 
-            if ($MigrateLegacyParquet) {
-                if ($KeepOriginal) {
-                    Write-Host " OK ($finalMb MB, legacy backup kept)" -ForegroundColor Green
-                } else {
-                    Write-Host " OK ($finalMb MB, replaced in-place)" -ForegroundColor Green
-                }
-            } elseif (-not $KeepOriginal) {
+            if (-not $KeepOriginal) {
                 # Conversion succeeded and verified; safely remove source .zst file unless KeepOriginal is requested
                 Remove-Item -LiteralPath $srcPath -Force
                 if (Test-Path -LiteralPath $srcPath) {

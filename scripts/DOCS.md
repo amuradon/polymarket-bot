@@ -41,7 +41,7 @@ Stahuje denní Zstandard (`.jsonl.zst`) archivy z EC2 instance na lokální disk
 
 Konvertuje `.jsonl.zst` archivy do typovaných Apache Parquet (`.parquet`) souborů pomocí DuckDB, řadí záznamy podle `ts ASC` a po ověření smaže původní archivy.
 
-Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupcové primitivní schéma** (`ts`, `server_ts`, `frame_id`, `event_code`, `is_up`, `is_bid`, `tick`, `size`, `up_token_id`, `down_token_id`) seřazené podle `ts ASC, frame_id ASC` (`ROW_GROUP_SIZE = 100000`) bez surového JSON sloupce `payload` a bez událostí `market_lifecycle` / `market_resolved`. Přepínač `-MigrateLegacyParquet` (`--migrate-legacy-parquet`) umožňuje bezpečnou idempotentní atomickou migraci dříve zkonvertovaných legacy `.parquet` souborů přímo na místě.
+Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupcové primitivní schéma** (`ts`, `server_ts`, `frame_id`, `event_code`, `is_up`, `is_bid`, `tick`, `size`, `up_token_id`, `down_token_id`) seřazené podle `ts ASC, frame_id ASC` (`ROW_GROUP_SIZE = 100000`) bez surového JSON sloupce `payload` a bez událostí `market_lifecycle` / `market_resolved`.
 
 ### Linux (Bash)
 ```bash
@@ -56,9 +56,6 @@ Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupc
 
 # Filtrování podle typu streamu
 ./scripts/convert-to-parquet.sh -s aggTrades
-
-# Atomická in-place migrace legacy CLOB Parquet souborů na nové 10sloupcové typované schéma
-./scripts/convert-to-parquet.sh -t /data/polymarket/collector --migrate-legacy-parquet -s btc-updown-15m
 ```
 
 ### Windows (PowerShell)
@@ -71,9 +68,6 @@ Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupc
 
 # Filtrování podle data se zachováním originálů
 .\scripts\convert-to-parquet.ps1 -Date 2026-10-30 -KeepOriginal
-
-# Atomická in-place migrace legacy CLOB Parquet souborů na nové 10sloupcové typované schéma
-.\scripts\convert-to-parquet.ps1 -TargetDir D:\Crypto\data\Polymarket\collector -MigrateLegacyParquet -Stream btc-updown-15m
 ```
 
 ---
