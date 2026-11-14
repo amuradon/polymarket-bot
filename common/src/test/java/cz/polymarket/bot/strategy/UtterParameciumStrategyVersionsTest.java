@@ -14,9 +14,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Unit tests verifying historical Phase 1 snapshots ({@link UtterParameciumStrategyV0},
- * {@link UtterParameciumStrategyV1}, {@link UtterParameciumStrategyV2}, and
- * {@link UtterParameciumStrategyV3}) using deterministic synthetic fixtures.
+ * Unit tests verifying historical snapshots ({@link UtterParameciumStrategyV0},
+ * {@link UtterParameciumStrategyV1}, {@link UtterParameciumStrategyV2},
+ * {@link UtterParameciumStrategyV3}, and {@link UtterParameciumStrategyV4}) using deterministic synthetic fixtures.
  */
 class UtterParameciumStrategyVersionsTest {
 
@@ -26,22 +26,25 @@ class UtterParameciumStrategyVersionsTest {
     private static final long CANDLE_END_MS = CANDLE_END_SEC * 1_000L;
 
     @Test
-    @DisplayName("Should expose isolated default configs, names, timeframes, and independent instances across V0..V3")
+    @DisplayName("Should expose isolated default configs, names, timeframes, and independent instances across V0..V4")
     void shouldExposeIsolatedDefaultConfigsAndMetadata() {
         UtterParameciumStrategyV0 v0 = new UtterParameciumStrategyV0(UtterParameciumStrategyV0.Config.defaultConfig());
         UtterParameciumStrategyV1 v1 = new UtterParameciumStrategyV1(UtterParameciumStrategyV1.Config.defaultConfig());
         UtterParameciumStrategyV2 v2 = new UtterParameciumStrategyV2(UtterParameciumStrategyV2.Config.defaultConfig());
         UtterParameciumStrategyV3 v3 = new UtterParameciumStrategyV3(UtterParameciumStrategyV3.Config.defaultConfig());
+        UtterParameciumStrategyV4 v4 = new UtterParameciumStrategyV4(UtterParameciumStrategyV4.Config.defaultConfig());
 
         assertThat(v0.getName()).isEqualTo("UtterParameciumStrategyV0");
         assertThat(v1.getName()).isEqualTo("UtterParameciumStrategyV1");
         assertThat(v2.getName()).isEqualTo("UtterParameciumStrategyV2");
         assertThat(v3.getName()).isEqualTo("UtterParameciumStrategyV3");
+        assertThat(v4.getName()).isEqualTo("UtterParameciumStrategyV4");
 
         assertThat(v0.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
         assertThat(v1.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
         assertThat(v2.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
         assertThat(v3.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
+        assertThat(v4.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
 
         assertThat(v0.getConfig().maxTauMs()).isEqualTo(61_000L);
         assertThat(v0.getConfig().cooldownMs()).isEqualTo(250L);
@@ -77,10 +80,19 @@ class UtterParameciumStrategyVersionsTest {
         assertThat(v3.getConfig().calcAdverseDrift4sBlockCents()).isEqualTo(950L);
         assertThat(v3.getRequiredClobLookbackMs()).isEqualTo(77_000L);
 
+        assertThat(v4.getConfig().maxTauMs()).isEqualTo(64_000L);
+        assertThat(v4.getConfig().cooldownMs()).isEqualTo(300L);
+        assertThat(v4.getConfig().maxEntryPriceMc()).isEqualTo(920);
+        assertThat(v4.getConfig().maxModelProbMc()).isEqualTo(985);
+        assertThat(v4.getConfig().maxOrderShares()).isEqualTo(45);
+        assertThat(v4.getConfig().edgeScalingFactor()).isEqualTo(90);
+        assertThat(v4.getRequiredClobLookbackMs()).isEqualTo(81_000L);
+
         assertThat(v0.createInstance()).isNotSameAs(v0).isInstanceOf(UtterParameciumStrategyV0.class);
         assertThat(v1.createInstance()).isNotSameAs(v1).isInstanceOf(UtterParameciumStrategyV1.class);
         assertThat(v2.createInstance()).isNotSameAs(v2).isInstanceOf(UtterParameciumStrategyV2.class);
         assertThat(v3.createInstance()).isNotSameAs(v3).isInstanceOf(UtterParameciumStrategyV3.class);
+        assertThat(v4.createInstance()).isNotSameAs(v4).isInstanceOf(UtterParameciumStrategyV4.class);
     }
 
     @Test
@@ -91,13 +103,15 @@ class UtterParameciumStrategyVersionsTest {
         UtterParameciumStrategyV1 v1 = new UtterParameciumStrategyV1(UtterParameciumStrategyV1.Config.defaultConfig());
         UtterParameciumStrategyV2 v2 = new UtterParameciumStrategyV2(UtterParameciumStrategyV2.Config.defaultConfig());
         UtterParameciumStrategyV3 v3 = new UtterParameciumStrategyV3(UtterParameciumStrategyV3.Config.defaultConfig());
+        UtterParameciumStrategyV4 v4 = new UtterParameciumStrategyV4(UtterParameciumStrategyV4.Config.defaultConfig());
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(
                 main.getName(), main,
                 v0.getName(), v0,
                 v1.getName(), v1,
                 v2.getName(), v2,
-                v3.getName(), v3
+                v3.getName(), v3,
+                v4.getName(), v4
         ));
 
         assertThat(registry.getStrategy("UtterParameciumStrategy")).isSameAs(main);
@@ -107,16 +121,18 @@ class UtterParameciumStrategyVersionsTest {
         assertThat(registry.getStrategy("UtterParameciumStrategyV1")).isSameAs(v1);
         assertThat(registry.getStrategy("UtterParameciumStrategyV2")).isSameAs(v2);
         assertThat(registry.getStrategy("UtterParameciumStrategyV3")).isSameAs(v3);
+        assertThat(registry.getStrategy("UtterParameciumStrategyV4")).isSameAs(v4);
     }
 
     @Test
-    @DisplayName("Should emit BUY BTC-UP across all four versions on a clean synthetic settlement cushion")
+    @DisplayName("Should emit BUY BTC-UP across all five historical versions on a clean synthetic settlement cushion")
     void shouldEmitSignalsAcrossAllVersionsOnCleanSyntheticSetup() {
         List<TradingStrategy> versions = List.of(
                 new UtterParameciumStrategyV0(UtterParameciumStrategyV0.Config.defaultConfig()),
                 new UtterParameciumStrategyV1(UtterParameciumStrategyV1.Config.defaultConfig()),
                 new UtterParameciumStrategyV2(UtterParameciumStrategyV2.Config.defaultConfig()),
-                new UtterParameciumStrategyV3(UtterParameciumStrategyV3.Config.defaultConfig())
+                new UtterParameciumStrategyV3(UtterParameciumStrategyV3.Config.defaultConfig()),
+                new UtterParameciumStrategyV4(UtterParameciumStrategyV4.Config.defaultConfig())
         );
 
         for (TradingStrategy strategy : versions) {
