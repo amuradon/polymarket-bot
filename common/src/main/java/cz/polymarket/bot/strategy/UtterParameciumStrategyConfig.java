@@ -189,7 +189,7 @@ public class UtterParameciumStrategyConfig {
     }
 
     /**
-     * Creates a default configuration instance calibrated with Iteration 4 pre-window activation ({@code 64s}),
+     * Creates a default configuration instance calibrated with pre-window activation ({@code 64s}),
      * two-tier locked-in ceiling ({@code 840 / 920 mc}), bidirectional {@code onCalculatedSpotTwap} breakout
      * confirmation, recalibrated Z-curve, and dynamic conviction batch/inventory sizing.
      *

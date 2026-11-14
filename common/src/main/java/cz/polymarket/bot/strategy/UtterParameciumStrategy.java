@@ -24,7 +24,7 @@ import java.util.Set;
  *   <li>Explicit target price ({@code targetPriceCents}) locked from PolyBolt 60s TWAP at candle start.</li>
  *   <li>Exact millisecond step-weighted TWAP integral over the locked portion of the 60s settlement window,
  *       with guarded pre-window activation ({@code 60s < tau <= 64s}) and mathematically locked-in late
- *       entries ({@code tau <= 28s}) up to {@code $0.92} (while keeping {@code $0.84} ceiling when unlocked).</li>
+ *       entries ({@code tau <= 30s}) up to {@code $0.92} (while keeping {@code $0.84} ceiling when unlocked).</li>
  *   <li>Oracle-timestamped multi-horizon robust MAD BTC volatility estimator ({@code 1s} burst MAD,
  *       {@code 1s} short MAD, {@code 5s} intra-candle regime MAD, and intra-candle {@code 14m} Parkinson
  *       wave-range floor) immune to arrival jitter, quiet-lull underestimation, and wave dispersion.</li>
@@ -32,8 +32,10 @@ import java.util.Set;
  *       vetoes/haircuts adverse reversals and conservatively boosts confirmed Chainlink breakouts without
  *       ever fabricating direction against Chainlink.</li>
  *   <li>Recalibrated continuous minimum Z-score curve across {@code $0.67..$0.92}, multi-exchange-confirmed
- *       deep-cushion pullback exemption, dynamic conviction/lock-in batch and inventory sizing, persistent
- *       locked-debt and intra-settlement-window whipsaw guards, and cushion-decay stop-add protection.</li>
+ *       deep-cushion pullback exemption and {@code $0.80..$0.84} pre-lock-in unlock ({@code 38s < tau <= 46s}),
+ *       smooth opening-window inventory ramp ({@code 57s..60s}) with contrarian CLOB ask protection,
+ *       moderate-wave calm-tail Parkinson damping, persistent locked-debt and intra-settlement-window whipsaw
+ *       guards, and cushion-decay / bid-drawdown stop-add protection.</li>
  * </ul>
  * <p>
  * All hot-path calculations use deterministic integer/fixed-point arithmetic ({@code long} USD cents
@@ -84,6 +86,14 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private static final long PRE_WINDOW_MIN_DIST_CENTS = 650L;
     private static final long PRE_WINDOW_MIN_Z_CENTI = 110L;
     private static final int PRE_WINDOW_MAX_INVENTORY_SHARES = 60;
+    private static final long EARLY_OPENING_GUARD_TAU_MS = 52_000L;
+    private static final int EARLY_OPENING_MAX_CONTRARIAN_ASK_MC = 500;
+    private static final int EARLY_CONTRARIAN_MAX_BID_DROP_MC = 30;
+    private static final long CALM_TAIL_CONTRARIAN_MIN_Z_CENTI = 50L;
+    private static final long OPENING_WINDOW_RAMP_END_TAU_MS = 57_000L;
+    private static final int OPENING_WINDOW_BASE_SHARES = 180;
+    private static final int OPENING_RAMP_MIN_ASK_MC = 620;
+    private static final long OPENING_RAMP_EXEMPT_Z_CENTI = 110L;
     private static final int NON_LOCKED_MAX_ENTRY_PRICE_MC = 840;
     private static final int LOCKED_MID_HIGH_ASK_CEILING_MC = 880;
     private static final long CRASH_IMMUNE_LOCKIN_MAX_TAU_MS = 25_000L;
@@ -98,6 +108,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private static final long LOCKED_HIGH_PRICE_MAX_ADVERSE_CALC_CENTS = 800L;
     private static final int HIGH_PRICE_ASK_THRESHOLD_MC = 800;
     private static final long HIGH_PRICE_MAX_TAU_MS = 38_000L;
+    private static final long EARLY_HIGH_PRICE_MAX_TAU_MS = 46_000L;
+    private static final long EARLY_HIGH_PRICE_MIN_DIST_CENTS = 1_150L;
+    private static final long EARLY_HIGH_PRICE_MIN_Z_CENTI = 225L;
 
     // Supplementary onCalculatedSpotTwap basis, noise deadband, favorable breakout & freshness constants
     private static final long CALC_SPOT_RETENTION_MS = 15_000L;
@@ -141,7 +154,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
     private static final long PRE_LOCKIN_CONVICTION_FULL_Z_CENTI = 85L;
     private static final long PRE_LOCKIN_MIN_CONVICTION_BPS = 4_000L;
     private static final long LOCKED_DEBT_EARLY_CUTOFF_TAU_MS = 30_000L;
+    private static final long LOCKED_DEBT_MID_CUTOFF_TAU_MS = 35_000L;
     private static final long LOCKED_DEBT_EARLY_DEFICIT_CENTS = 350L;
+    private static final long LOCKED_DEBT_MID_MIN_PROJ_CENTS = 1_200L;
     private static final long LOCKED_DEBT_LATE_MIN_PROJ_CENTS = 1_000L;
     private static final long WHIPSAW_OPPOSITE_EXCURSION_CENTS = 500L;
     private static final long WHIPSAW_RECOVERY_MIN_PROJ_CENTS = 650L;
@@ -811,11 +826,19 @@ public class UtterParameciumStrategy implements TradingStrategy {
      * @param askMc candidate ask price in millicents
      * @param zSideCenti candidate-side Z-score in centi-sigma
      * @param edgeMc net price edge after taker fee in millicents
-     * @param trulyLockedIn whether the 60s TWAP integral is mathematically locked in ({@code tau <= 28s})
+     * @param trulyLockedIn whether the 60s TWAP integral is mathematically locked in ({@code tau <= 30s})
      * @return dynamic maximum cumulative shares allowed for the active side
      */
     int computeDynamicMaxInventory(long tauMs, int askMc, long zSideCenti, int edgeMc, boolean trulyLockedIn) {
-        int timeStagedCap = computeTimeStagedMaxInventory(tauMs);
+        int baseStagedCap = computeTimeStagedMaxInventory(tauMs);
+        if (tauMs <= TWAP_WINDOW_MS
+                && tauMs > OPENING_WINDOW_RAMP_END_TAU_MS
+                && askMc >= OPENING_RAMP_MIN_ASK_MC
+                && zSideCenti < OPENING_RAMP_EXEMPT_Z_CENTI) {
+            baseStagedCap = OPENING_WINDOW_BASE_SHARES
+                    + (int) (((long) Math.max(0, baseStagedCap - OPENING_WINDOW_BASE_SHARES)
+                            * (TWAP_WINDOW_MS - tauMs)) / (TWAP_WINDOW_MS - OPENING_WINDOW_RAMP_END_TAU_MS));
+        }
         long riskTierBps;
         if (askMc <= CORE_CHEAP_ASK_CEILING_MC) {
             if (tauMs <= BONUS_CONVICTION_MAX_TAU_MS
@@ -868,7 +891,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         }
 
         long combinedBps = (riskTierBps * convictionBps) / 10_000L;
-        int dynamicCap = (int) (((long) timeStagedCap * combinedBps) / 10_000L);
+        int dynamicCap = (int) (((long) baseStagedCap * combinedBps) / 10_000L);
         if (tauMs > TWAP_WINDOW_MS) {
             dynamicCap = Math.min(dynamicCap, PRE_WINDOW_MAX_INVENTORY_SHARES);
         }
@@ -1231,8 +1254,15 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     private static boolean isBlockedByLockedDebt(long tauMs, long lockedDistSideCents, long distProjCents) {
-        if (tauMs > LOCKED_DEBT_EARLY_CUTOFF_TAU_MS) {
+        if (tauMs > LOCKED_DEBT_MID_CUTOFF_TAU_MS) {
             return lockedDistSideCents <= -LOCKED_DEBT_EARLY_DEFICIT_CENTS;
+        }
+        if (tauMs > LOCKED_DEBT_EARLY_CUTOFF_TAU_MS) {
+            if (lockedDistSideCents <= -LOCKED_DEBT_EARLY_DEFICIT_CENTS) {
+                long requiredMidProjCents = Math.max(LOCKED_DEBT_MID_MIN_PROJ_CENTS, -lockedDistSideCents * 3L);
+                return distProjCents < requiredMidProjCents;
+            }
+            return false;
         }
         if (lockedDistSideCents < 0L) {
             long requiredProjCents = Math.max(LOCKED_DEBT_LATE_MIN_PROJ_CENTS, -lockedDistSideCents * 2L);
@@ -1303,8 +1333,20 @@ public class UtterParameciumStrategy implements TradingStrategy {
                     || adverseCalcLeadCents > CALC_NOISE_DEADBAND_CENTS) {
                 return Integer.MIN_VALUE;
             }
+        } else if (tauMs > EARLY_OPENING_GUARD_TAU_MS && askMc <= EARLY_OPENING_MAX_CONTRARIAN_ASK_MC) {
+            boolean surgingCalcBreakout = hasFreshCalcSpot
+                    && adverseCalcLeadCents == 0L
+                    && adverseCalcDrift4sCents <= -CALC_FAVORABLE_DRIFT_4S_MIN_CENTS
+                    && (maxRecentAskMc <= askMc || (maxRecentAskMc - askMc) < config.adverseAskDrop8sBlockMc());
+            boolean firmBookBreakout = (maxRecentBidMc <= 0 || (maxRecentBidMc - currentBidMc) < EARLY_CONTRARIAN_MAX_BID_DROP_MC)
+                    && (!hasFreshCalcSpot
+                        || (adverseCalcLeadCents <= CALC_NOISE_DEADBAND_CENTS
+                            && adverseCalcDrift4sCents <= CALC_NOISE_DEADBAND_CENTS));
+            if (!surgingCalcBreakout && !firmBookBreakout) {
+                return Integer.MIN_VALUE;
+            }
         }
-        if (!trulyLockedIn && askMc >= HIGH_PRICE_ASK_THRESHOLD_MC && tauMs > HIGH_PRICE_MAX_TAU_MS) {
+        if (!trulyLockedIn && askMc >= HIGH_PRICE_ASK_THRESHOLD_MC && tauMs > EARLY_HIGH_PRICE_MAX_TAU_MS) {
             return Integer.MIN_VALUE;
         }
 
@@ -1313,9 +1355,25 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return Integer.MIN_VALUE;
         }
         long zSideCenti = (100L * effectiveDistCents) / sigmaRemCents;
+        if (spotVolatilityBuffer.lastCalmTailDamped
+                && askMc <= EARLY_OPENING_MAX_CONTRARIAN_ASK_MC
+                && zSideCenti < CALM_TAIL_CONTRARIAN_MIN_Z_CENTI) {
+            return Integer.MIN_VALUE;
+        }
         if (tauMs > TWAP_WINDOW_MS
                 && (effectiveDistCents < PRE_WINDOW_MIN_DIST_CENTS || zSideCenti < PRE_WINDOW_MIN_Z_CENTI)) {
             return Integer.MIN_VALUE;
+        }
+        if (!trulyLockedIn && askMc >= HIGH_PRICE_ASK_THRESHOLD_MC && tauMs > HIGH_PRICE_MAX_TAU_MS) {
+            if (!hasFreshCalcSpot
+                    || adverseCalcLeadCents > CALC_NOISE_DEADBAND_CENTS
+                    || adverseCalcDrift4sCents > 0L
+                    || adverseDrift5sCents > 0L
+                    || lockedDistSideCents < 0L
+                    || effectiveDistCents < EARLY_HIGH_PRICE_MIN_DIST_CENTS
+                    || zSideCenti < EARLY_HIGH_PRICE_MIN_Z_CENTI) {
+                return Integer.MIN_VALUE;
+            }
         }
 
         if (!crashImmuneLockedIn) {
@@ -1328,7 +1386,8 @@ public class UtterParameciumStrategy implements TradingStrategy {
                 return Integer.MIN_VALUE;
             }
             long maxAdverseDriftCents = Math.max(adverseDrift5sCents, adverseDrift10sCents);
-            boolean confirmedDeepPullback = askMc <= MID_ASK_CEILING_MC
+            boolean confirmedDeepPullback = (askMc <= MID_ASK_CEILING_MC
+                        || (askMc <= NON_LOCKED_MAX_ENTRY_PRICE_MC && adverseDrift5sCents <= 0L))
                     && lockedDistSideCents >= 0L
                     && hasFreshCalcSpot
                     && adverseCalcLeadCents <= CALC_NOISE_DEADBAND_CENTS
@@ -1715,6 +1774,9 @@ public class UtterParameciumStrategy implements TradingStrategy {
         private static final long MAX_DIFF_CLAMP_CENTS = 500_000L;
         private static final long MIN_PARKINSON_SPAN_MS = 180_000L;
         private static final long MIN_WAVE_PARKINSON_SIGMA_CENTS = 220L;
+        private static final long EXTREME_WAVE_PARKINSON_SIGMA_CENTS = 340L;
+        private static final long CALM_TAIL_MAX_MAD_1S_CENTS = 112L;
+        private static final long CALM_TAIL_MAX_REGIME_RATIO_PCT = 65L;
         private static final double PARKINSON_RANGE_DENOM_COEFF = 1.595769;
 
         private final long[] burst1sNormDiffs = new long[BURST_CAPACITY];
@@ -1740,6 +1802,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         private long preWindowEndMs = 0L;
         private long preWindowHighCents = 0L;
         private long preWindowLowCents = 0L;
+        private boolean lastCalmTailDamped = false;
 
         void clear() {
             burstHead = 0;
@@ -1763,6 +1826,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
             preWindowEndMs = 0L;
             preWindowHighCents = 0L;
             preWindowLowCents = 0L;
+            lastCalmTailDamped = false;
         }
 
         void onTick(long obsMs, long priceCents, boolean inPreSettlementCandle) {
@@ -1841,6 +1905,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         }
 
         long sigma1sCents(UtterParameciumStrategyConfig cfg) {
+            lastCalmTailDamped = false;
             boolean hasParkinsonRange = preWindowHighCents > preWindowLowCents
                     && (preWindowEndMs - preWindowStartMs) >= MIN_PARKINSON_SPAN_MS;
             if (short1sLen < 5 && regime5sLen < 6 && !hasParkinsonRange) {
@@ -1850,13 +1915,15 @@ public class UtterParameciumStrategy implements TradingStrategy {
                     ? (runningShort1sSum * 1_253L) / (short1sLen * 1_000L)
                     : cfg.defaultSigma1sCents();
             long rawSigma = mad1s;
+            long madRegime5s = 0L;
             if (regime5sLen >= 6) {
-                long madRegime5s = (runningRegime5sSum * 1_253L) / (regime5sLen * 1_000L);
+                madRegime5s = (runningRegime5sSum * 1_253L) / (regime5sLen * 1_000L);
                 long blendedRegime = (mad1s * 35L + madRegime5s * 65L) / 100L;
                 rawSigma = Math.max(rawSigma, blendedRegime);
             }
+            long madBurst = 0L;
             if (burstLen >= 5) {
-                long madBurst = (runningBurstSum * 1_253L) / (burstLen * 1_000L);
+                madBurst = (runningBurstSum * 1_253L) / (burstLen * 1_000L);
                 long blendedBurst = (mad1s + madBurst) / 2L;
                 rawSigma = Math.max(rawSigma, blendedBurst);
             }
@@ -1865,7 +1932,14 @@ public class UtterParameciumStrategy implements TradingStrategy {
                 double spanSec = (preWindowEndMs - preWindowStartMs) / 1_000.0;
                 long parkinsonSigma1s = Math.round(rangeCents / (PARKINSON_RANGE_DENOM_COEFF * Math.sqrt(spanSec)));
                 if (parkinsonSigma1s >= MIN_WAVE_PARKINSON_SIGMA_CENTS) {
-                    long blendedRangeSigma = (mad1s * 55L + parkinsonSigma1s * 45L) / 100L;
+                    boolean calmTailModerateWave = parkinsonSigma1s < EXTREME_WAVE_PARKINSON_SIGMA_CENTS
+                            && mad1s <= CALM_TAIL_MAX_MAD_1S_CENTS
+                            && (burstLen < 5 || madBurst <= CALM_TAIL_MAX_MAD_1S_CENTS)
+                            && Math.max(mad1s, madRegime5s) * 100L < parkinsonSigma1s * CALM_TAIL_MAX_REGIME_RATIO_PCT;
+                    lastCalmTailDamped = calmTailModerateWave;
+                    long blendedRangeSigma = calmTailModerateWave
+                            ? (mad1s * 65L + parkinsonSigma1s * 35L) / 100L
+                            : (mad1s * 55L + parkinsonSigma1s * 45L) / 100L;
                     rawSigma = Math.max(rawSigma, blendedRangeSigma);
                 }
             }

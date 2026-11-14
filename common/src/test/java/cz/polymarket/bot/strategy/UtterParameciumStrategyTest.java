@@ -845,19 +845,19 @@ class UtterParameciumStrategyTest {
                 resumed.clientOrderId(), "ex-resumed", "FILLED", resumed.price(), resumed.size(), tau25Ms + 10L, "Filled"
         ));
 
-        // Even inside tau <= 20s (when not truly locked in), bid drawdown >= 100 mc ($0.66 -> $0.56) after >= 90 shares MUST block averaging down!
+        // Even inside tau <= 20s (outside the 8s quote window and not truly locked in), bid drawdown >= 100 mc ($0.66 -> $0.56) after >= 90 shares MUST block averaging down!
         strategy.reset();
         submittedOrders.clear();
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
-        long tau22Ms = CANDLE_END_MS - 22_000L;
-        strategy.onPolymarketCryptoPrice(tau22Ms, "btcusd", "chainlink", 90_010.00, tau22Ms);
+        long tau26Ms = CANDLE_END_MS - 26_000L;
+        strategy.onPolymarketCryptoPrice(tau26Ms, "btcusd", "chainlink", 90_010.00, tau26Ms);
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.68, 0.66, 0.34, 0.32, 500.0, 500.0, 0.68, 0.34, tau22Ms
+                0.68, 0.66, 0.34, 0.32, 500.0, 500.0, 0.68, 0.34, tau26Ms
         ));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand lateFirst = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
-                lateFirst.clientOrderId(), "ex-late1", "FILLED", lateFirst.price(), BigDecimal.valueOf(90), tau22Ms + 10L, "Filled"
+                lateFirst.clientOrderId(), "ex-late1", "FILLED", lateFirst.price(), BigDecimal.valueOf(90), tau26Ms + 10L, "Filled"
         ));
 
         // At tau = 16s, CLOB bid drops by 100 mc ($0.66 -> $0.56) while spot stays +$9.00: anti-martingale stop-add blocks!
@@ -1332,5 +1332,135 @@ class UtterParameciumStrategyTest {
         ));
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().size().intValue()).isEqualTo(25);
+    }
+
+    @Test
+    @DisplayName("Should ramp moderate-z opening-window inventory across 60s->57s and block softening contrarian <= $0.50 CLOB asks unless calcSpot surges")
+    void shouldRampOpeningWindowInventoryAndGuardEarlyContrarianAsks() {
+        // 1. Moderate-z (< 1.10) mid-priced (>= $0.62) opening entries ramp smoothly from 180 sh at tau = 60s to 337 sh at tau = 57s,
+        // while high-conviction (z >= 1.10) entries keep full time-staged capacity!
+        assertThat(strategy.computeDynamicMaxInventory(60_000L, 620, 95L, 90, false)).isEqualTo(180);
+        assertThat(strategy.computeDynamicMaxInventory(58_500L, 620, 95L, 90, false)).isEqualTo(249);
+        assertThat(strategy.computeDynamicMaxInventory(57_000L, 620, 95L, 90, false)).isEqualTo(337);
+        assertThat(strategy.computeDynamicMaxInventory(58_500L, 620, 120L, 90, false)).isEqualTo(318);
+
+        // 2. Softening contrarian CLOB trap in opening seconds (tau = 58s > 52s):
+        // CLOB UP bid drops from $0.49 to $0.45 (>= 30 mc drop) at contrarian ask = $0.48 (< $0.50) without calcSpot surge -> BLOCKED!
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        long warmStartMs = CANDLE_END_MS - 70_000L;
+        for (int s = 0; s < 5; s++) {
+            long ts = warmStartMs + (s * 1_000L);
+            strategy.onCalculatedSpotTwap(ts, "btcusd", 90_000.00, 90_000.00);
+            strategy.onPolymarketCryptoPrice(ts + 50L, "btcusd", "chainlink", 90_000.00, ts);
+        }
+        long tau59p2Ms = CANDLE_END_MS - 59_200L;
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.51, 0.49, 0.51, 0.49, 500.0, 500.0, 0.51, 0.51, tau59p2Ms
+        ));
+        long tau58Ms = CANDLE_END_MS - 58_000L;
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.48, 0.45, 0.55, 0.52, 500.0, 500.0, 0.48, 0.55, tau58Ms - 20L
+        ));
+        strategy.onCalculatedSpotTwap(tau58Ms - 4_000L, "btcusd", 90_008.00, 90_002.00);
+        strategy.onCalculatedSpotTwap(tau58Ms - 50L, "btcusd", 90_010.00, 90_003.00);
+        strategy.onPolymarketCryptoPrice(tau58Ms, "btcusd", "chainlink", 90_010.00, tau58Ms);
+        assertThat(submittedOrders).isEmpty();
+
+        // 3. Monotonically 4s later at tau = 54s (> 52s), multi-exchange calcSpot surges +$6.00 over 4s ($90,010 -> $90,016 >= +$4.50)
+        // with zero adverse lead: cheap $0.48 ask is unlocked!
+        long tau54Ms = CANDLE_END_MS - 54_000L;
+        strategy.onCalculatedSpotTwap(tau54Ms - 50L, "btcusd", 90_016.00, 90_008.00);
+        strategy.onPolymarketCryptoPrice(tau54Ms, "btcusd", "chainlink", 90_012.00, tau54Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.48, 0.45, 0.55, 0.52, 500.0, 500.0, 0.48, 0.55, tau54Ms
+        ));
+        assertThat(submittedOrders).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("Should conditionally unlock $0.80-$0.84 at 38s < tau <= 46s on multi-exchange-confirmed >= $11.50 / 2.25-sigma cushions and decisive 30s-35s breakouts")
+    void shouldUnlockConfirmedEarlyHighPriceQuotesAndMidWindowDecisiveBreakouts() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        long warmStartMs = CANDLE_END_MS - 68_000L;
+        for (int s = 0; s <= 20; s++) {
+            long ts = warmStartMs + (s * 1_000L);
+            strategy.onCalculatedSpotTwap(ts, "btcusd", 90_018.00, 90_018.00);
+            strategy.onPolymarketCryptoPrice(ts + 50L, "btcusd", "chainlink", 90_018.00, ts);
+        }
+
+        // 1. Above 46s (tau = 47.5s), ask = $0.81 MUST remain blocked even with +$18.00 cushion and fresh calcSpot
+        long tau47p5Ms = CANDLE_END_MS - 47_500L;
+        strategy.onCalculatedSpotTwap(tau47p5Ms - 50L, "btcusd", 90_018.00, 90_018.00);
+        strategy.onPolymarketCryptoPrice(tau47p5Ms, "btcusd", "chainlink", 90_018.00, tau47p5Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.81, 0.79, 0.21, 0.19, 500.0, 500.0, 0.81, 0.21, tau47p5Ms
+        ));
+        assertThat(submittedOrders).isEmpty();
+
+        // 2. Inside 38s < tau <= 46s (tau = 44s), +$18.00 cushion (>= $14.00, z > 3.5 >= 2.35) with fresh non-drifting calcSpot unlocks $0.81 capped at 25 shares!
+        long tau44Ms = CANDLE_END_MS - 44_000L;
+        strategy.onCalculatedSpotTwap(tau44Ms - 50L, "btcusd", 90_018.00, 90_018.00);
+        strategy.onPolymarketCryptoPrice(tau44Ms, "btcusd", "chainlink", 90_018.00, tau44Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.81, 0.79, 0.21, 0.19, 500.0, 500.0, 0.81, 0.21, tau44Ms
+        ));
+        assertThat(submittedOrders).hasSize(1);
+        assertThat(submittedOrders.getFirst().size().intValue()).isLessThanOrEqualTo(25);
+
+        // 3. Mid-window decisive breakout (30s < tau <= 35s): -$4.00 locked debt over 60s..34s is overcome when spot surges to +$32.00 (projTwap = +$15.80 >= max($12, 3*$4))
+        strategy.reset();
+        submittedOrders.clear();
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+        long wStart = CANDLE_END_MS - 60_000L;
+        for (int s = 0; s <= 26; s++) {
+            long ts = wStart + (s * 1_000L);
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_996.00, ts);
+        }
+        long tau33Ms = CANDLE_END_MS - 33_000L;
+        strategy.onPolymarketCryptoPrice(tau33Ms, "btcusd", "chainlink", 90_032.00, tau33Ms);
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.56, 0.54, 0.46, 0.44, 500.0, 500.0, 0.56, 0.46, tau33Ms
+        ));
+        assertThat(submittedOrders).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("Should damp stale 14m Parkinson range floor on moderate early-candle waves once short/5s volatility has calmed")
+    void shouldDampModerateParkinsonFloorWhenCandleTailHasCalmed() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        // Moderate $144.00 wave in first 2.5 minutes (parkinsonSigma1s = 311c < 340c extreme threshold),
+        // followed by >11 minutes of calm $0.80/s micro-steps (mad1s = 100c, mad5s < 30c):
+        for (int s = 0; s <= 760; s += 5) {
+            long ts = CANDLE_START_MS + (s * 1_000L);
+            double wavePrice;
+            if (s <= 72) {
+                wavePrice = 90_000.00 + (s * 2.00);
+            } else if (s <= 145) {
+                wavePrice = 90_144.00 - ((s - 72) * 1.97);
+            } else {
+                wavePrice = 90_000.00;
+            }
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", wavePrice, ts);
+        }
+        for (int s = 761; s <= 840; s++) {
+            long ts = CANDLE_START_MS + (s * 1_000L);
+            double calmPrice = (s % 2 == 0) ? 90_000.80 : 90_000.00;
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", calmPrice, ts);
+        }
+
+        // Steady +$5.50 trend over 60s..44s at ask = $0.72 (requiredMinZCenti = 100):
+        // Undamped 55/45 Parkinson gives sigma1s = 194c -> sigmaRem(44s) = 579c -> z = 94 (< 100, blocked);
+        // Calm-tail 65/35 blend gives sigma1s = 173c -> sigmaRem(44s) = 516c -> z = 106 (>= 100, accepted)!
+        long wStart = CANDLE_END_MS - 60_000L;
+        for (int s = 1; s <= 16; s++) {
+            long ts = wStart + (s * 1_000L);
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 90_005.50, ts);
+        }
+        long tau44Ms = CANDLE_END_MS - 44_000L;
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.72, 0.70, 0.30, 0.28, 500.0, 500.0, 0.72, 0.30, tau44Ms
+        ));
+        assertThat(submittedOrders).hasSize(1);
     }
 }
