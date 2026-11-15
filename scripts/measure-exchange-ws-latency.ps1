@@ -160,13 +160,8 @@ Write-Host "      Chrony RMS Offset  : $rmsOffset" -ForegroundColor Green
 
 # Step 2: Ensure remote benchmark virtual environment exists on EC2
 Write-Host "[2/3] Preparing remote benchmarking environment on EC2..." -ForegroundColor Cyan
-$setupRemoteCmd = @'
-if [ ! -d "$HOME/.ws_bench_env" ]; then
-    python3 -m venv "$HOME/.ws_bench_env" >/dev/null 2>&1
-    "$HOME/.ws_bench_env/bin/pip" install websockets >/dev/null 2>&1
-fi
-'@
-$setupOutput = & ssh $Ec2Host $setupRemoteCmd 2>&1
+$setupRemoteCmd = 'if [ ! -x ~/.ws_bench_env/bin/python ]; then python3 -m venv ~/.ws_bench_env 2>&1; fi && if ! ~/.ws_bench_env/bin/pip show websockets >/dev/null 2>&1; then ~/.ws_bench_env/bin/pip install -q --disable-pip-version-check websockets 2>&1; fi'
+$setupOutput = & ssh $Ec2Host $setupRemoteCmd
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to initialize remote Python environment on EC2: $setupOutput"
 }
@@ -413,7 +408,7 @@ try {
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $benchOutput = & ssh $Ec2Host "~/.ws_bench_env/bin/python $remoteScriptPath" 2>&1
+    $benchOutput = & ssh $Ec2Host "~/.ws_bench_env/bin/python $remoteScriptPath 2>&1"
     $sw.Stop()
 
     if ($LASTEXITCODE -ne 0) {

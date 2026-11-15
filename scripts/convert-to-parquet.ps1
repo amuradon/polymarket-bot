@@ -48,7 +48,7 @@
     Number of worker threads. Defaults to min(ProcessorCount, 4). Automatically capped to 2 for heavy depth diff streams.
 
 .PARAMETER RowGroupSize
-    Maximum number of rows per Parquet row group. Defaults to 50000 (capped at 25000 for heavy depth diff streams).
+    Maximum number of rows per Parquet row group. Defaults to 50000 (100000 for Polymarket CLOB markets, capped at 25000 for heavy depth diff streams).
 
 .EXAMPLE
     .\scripts\convert-to-parquet.ps1
@@ -157,10 +157,134 @@ function Get-StreamType {
     if ($normalized -like "*price_crypto*") {
         return "polymarket-price-crypto"
     }
-    if ($normalized -like "*btc-updown*") {
+    if ($normalized -like "*-updown-*") {
         return "polymarket-clob-market"
     }
     return "generic"
+}
+
+function Get-TypedClobSelectQuery {
+    param([string]$RawSourceSql)
+    return @"
+WITH raw_numbered AS (
+$RawSourceSql
+),
+tokens AS (
+    SELECT
+        CAST(payload->>'clobTokenIds' AS JSON)->>0 AS up_tok,
+        CAST(payload->>'clobTokenIds' AS JSON)->>1 AS down_tok
+    FROM raw_numbered
+    WHERE event_type = 'market_discovered'
+      AND payload->>'clobTokenIds' IS NOT NULL
+    LIMIT 1
+),
+discovered_rows AS (
+    SELECT
+        r.ts,
+        0::UBIGINT AS server_ts,
+        0::UINTEGER AS frame_id,
+        0::UTINYINT AS event_code,
+        NULL::BOOLEAN AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        NULL::DOUBLE AS size,
+        t.up_tok AS up_token_id,
+        t.down_tok AS down_token_id
+    FROM (SELECT MIN(ts) AS ts FROM raw_numbered WHERE event_type = 'market_discovered') r
+    CROSS JOIN tokens t
+    WHERE r.ts IS NOT NULL
+),
+book_objects AS (
+    SELECT r.ts, r.frame_id, 0 AS sub_idx, r.payload AS obj
+    FROM raw_numbered r
+    WHERE r.event_type = 'book'
+    UNION ALL
+    SELECT r.ts, r.frame_id, u.ord::INTEGER AS sub_idx, u.obj
+    FROM raw_numbered r, UNNEST(CAST(r.payload AS JSON[])) WITH ORDINALITY AS u(obj, ord)
+    WHERE r.event_type = 'clob' AND json_type(r.payload) = 'ARRAY' AND json_array_length(r.payload) > 0
+),
+book_rows AS (
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        true AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(lvl->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(lvl->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t, UNNEST(CAST(b.obj->'bids' AS JSON[])) AS l(lvl)
+    WHERE TRY_CAST(lvl->>'size' AS DOUBLE) > 0.0
+    UNION ALL
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        false AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(lvl->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(lvl->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t, UNNEST(CAST(b.obj->'asks' AS JSON[])) AS l(lvl)
+    WHERE TRY_CAST(lvl->>'size' AS DOUBLE) > 0.0
+    UNION ALL
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t
+    WHERE COALESCE(json_array_length(b.obj->'bids'), 0) = 0
+      AND COALESCE(json_array_length(b.obj->'asks'), 0) = 0
+),
+price_change_rows AS (
+    SELECT
+        r.ts,
+        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (r.frame_id * 4)::UINTEGER AS frame_id,
+        2::UTINYINT AS event_code,
+        (pc->>'asset_id' = t.up_tok) AS is_up,
+        (pc->>'side' IN ('BUY', 'buy')) AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(pc->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(pc->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM raw_numbered r CROSS JOIN tokens t, UNNEST(CAST(r.payload->'price_changes' AS JSON[])) AS p(pc)
+    WHERE r.event_type = 'price_change'
+),
+trade_rows AS (
+    SELECT
+        r.ts,
+        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (r.frame_id * 4)::UINTEGER AS frame_id,
+        3::UTINYINT AS event_code,
+        NULL::BOOLEAN AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        NULL::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM raw_numbered r
+    WHERE r.event_type = 'last_trade_price'
+)
+SELECT * FROM (
+    SELECT * FROM discovered_rows
+    UNION ALL SELECT * FROM book_rows
+    UNION ALL SELECT * FROM price_change_rows
+    UNION ALL SELECT * FROM trade_rows
+)
+ORDER BY ts ASC, frame_id ASC
+"@
 }
 
 function Get-ConvertQuery {
@@ -336,20 +460,15 @@ ORDER BY ts ASC, twap_timestamp ASC
 "@
         }
         "polymarket-clob-market" {
-            return @"
-SELECT 
-    ts,
-    type AS msg_type,
-    COALESCE(payload->>'event_type', type) AS event_type,
-    COALESCE(payload->>'market', payload->>'conditionId') AS market,
-    payload->>'asset_id' AS asset_id,
-    CAST(payload->>'price' AS DOUBLE) AS price,
-    CAST(payload->>'size' AS DOUBLE) AS size,
-    payload->>'side' AS side,
-    payload
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'type': 'VARCHAR', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
+            $rawSource = @"
+    SELECT
+        row_number() OVER () AS frame_id,
+        ts,
+        COALESCE(payload->>'event_type', type) AS event_type,
+        payload
+    FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'type': 'VARCHAR', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 "@
+            return Get-TypedClobSelectQuery -RawSourceSql $rawSource
         }
         default {
             return @"
@@ -440,10 +559,13 @@ try {
         $srcPath = $file.FullName
         $relPath = $srcPath.Substring($resolvedTargetDir.Length).TrimStart('\', '/')
         $sizeMb = [math]::Round($file.Length / 1MB, 2)
+        $inputEscaped = $srcPath.Replace('\', '/')
 
         # Determine destination .parquet filename
         if ($srcPath.EndsWith(".jsonl.zst", [System.StringComparison]::OrdinalIgnoreCase)) {
             $destPath = $srcPath.Substring(0, $srcPath.Length - 10) + ".parquet"
+        } elseif ($srcPath.EndsWith(".jsonl", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $destPath = $srcPath.Substring(0, $srcPath.Length - 6) + ".parquet"
         } elseif ($srcPath.EndsWith(".zst", [System.StringComparison]::OrdinalIgnoreCase)) {
             $destPath = $srcPath.Substring(0, $srcPath.Length - 4) + ".parquet"
         } else {
@@ -460,14 +582,13 @@ try {
             }
         }
 
+        $streamType = Get-StreamType -FilePath $srcPath
         if ($DryRun) {
-            $streamType = Get-StreamType -FilePath $srcPath
             Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $([System.IO.Path]::GetFileName($destPath))" -ForegroundColor Yellow
             $successCount++
             continue
         }
 
-        $streamType = Get-StreamType -FilePath $srcPath
         Write-Host "  [$index/$fileCount] Converting [$streamType] $relPath ($sizeMb MB)..." -NoNewline
 
         $tempParquetPath = "$destPath.tmp.parquet"
@@ -476,7 +597,6 @@ try {
         }
 
         try {
-            $inputEscaped = $srcPath.Replace('\', '/')
             $tempDestEscaped = $tempParquetPath.Replace('\', '/')
 
             $effectiveThreads = $Threads
@@ -484,6 +604,8 @@ try {
             if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
                 $effectiveThreads = [Math]::Min($Threads, 2)
                 $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
+            } elseif (($streamType -eq "polymarket-clob-market") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+                $effectiveRowGroupSize = 100000
             }
 
             $selectQuery = Get-ConvertQuery -StreamType $streamType -InputPathEscaped $inputEscaped
@@ -519,7 +641,7 @@ $selectQuery
             }
 
             # Verify readability and row count with DuckDB
-            $verifyOutput = & $DuckDbPath -no-stdin -c "SELECT count(*) FROM read_parquet('$tempDestEscaped');" 2>&1
+            $verifyOutput = (& $DuckDbPath -csv -noheader -no-stdin -c "SELECT count(*) FROM read_parquet('$tempDestEscaped');" 2>&1 | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) {
                 Remove-Item -LiteralPath $tempParquetPath -Force -ErrorAction SilentlyContinue
                 throw "Parquet integrity verification failed: $verifyOutput"
@@ -532,8 +654,8 @@ $selectQuery
             $finalMb = [math]::Round($finalItem.Length / 1MB, 2)
             $totalParquetBytes += $finalItem.Length
 
-            # Conversion succeeded and verified; safely remove source .zst file unless KeepOriginal is requested
             if (-not $KeepOriginal) {
+                # Conversion succeeded and verified; safely remove source .zst file unless KeepOriginal is requested
                 Remove-Item -LiteralPath $srcPath -Force
                 if (Test-Path -LiteralPath $srcPath) {
                     throw "Failed to delete original archive '$srcPath' after Parquet conversion."

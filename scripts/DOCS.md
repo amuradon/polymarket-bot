@@ -41,6 +41,8 @@ Stahuje denní Zstandard (`.jsonl.zst`) archivy z EC2 instance na lokální disk
 
 Konvertuje `.jsonl.zst` archivy do typovaných Apache Parquet (`.parquet`) souborů pomocí DuckDB, řadí záznamy podle `ts ASC` a po ověření smaže původní archivy.
 
+Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupcové primitivní schéma** (`ts`, `server_ts`, `frame_id`, `event_code`, `is_up`, `is_bid`, `tick`, `size`, `up_token_id`, `down_token_id`) seřazené podle `ts ASC, frame_id ASC` (`ROW_GROUP_SIZE = 100000`) bez surového JSON sloupce `payload` a bez událostí `market_lifecycle` / `market_resolved`.
+
 ### Linux (Bash)
 ```bash
 # Konverze všech archivů v cílovém adresáři

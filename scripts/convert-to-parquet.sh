@@ -181,11 +181,135 @@ get_stream_type() {
         echo "polymarket-price-twap"
     elif [[ "$path_lower" =~ price_crypto ]]; then
         echo "polymarket-price-crypto"
-    elif [[ "$path_lower" =~ btc-updown ]]; then
+    elif [[ "$path_lower" =~ -updown- ]]; then
         echo "polymarket-clob-market"
     else
         echo "generic"
     fi
+}
+
+get_typed_clob_select_query() {
+    local raw_source_sql="$1"
+    cat <<EOF
+WITH raw_numbered AS (
+$raw_source_sql
+),
+tokens AS (
+    SELECT
+        CAST(payload->>'clobTokenIds' AS JSON)->>0 AS up_tok,
+        CAST(payload->>'clobTokenIds' AS JSON)->>1 AS down_tok
+    FROM raw_numbered
+    WHERE event_type = 'market_discovered'
+      AND payload->>'clobTokenIds' IS NOT NULL
+    LIMIT 1
+),
+discovered_rows AS (
+    SELECT
+        r.ts,
+        0::UBIGINT AS server_ts,
+        0::UINTEGER AS frame_id,
+        0::UTINYINT AS event_code,
+        NULL::BOOLEAN AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        NULL::DOUBLE AS size,
+        t.up_tok AS up_token_id,
+        t.down_tok AS down_token_id
+    FROM (SELECT MIN(ts) AS ts FROM raw_numbered WHERE event_type = 'market_discovered') r
+    CROSS JOIN tokens t
+    WHERE r.ts IS NOT NULL
+),
+book_objects AS (
+    SELECT r.ts, r.frame_id, 0 AS sub_idx, r.payload AS obj
+    FROM raw_numbered r
+    WHERE r.event_type = 'book'
+    UNION ALL
+    SELECT r.ts, r.frame_id, u.ord::INTEGER AS sub_idx, u.obj
+    FROM raw_numbered r, UNNEST(CAST(r.payload AS JSON[])) WITH ORDINALITY AS u(obj, ord)
+    WHERE r.event_type = 'clob' AND json_type(r.payload) = 'ARRAY' AND json_array_length(r.payload) > 0
+),
+book_rows AS (
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        true AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(lvl->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(lvl->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t, UNNEST(CAST(b.obj->'bids' AS JSON[])) AS l(lvl)
+    WHERE TRY_CAST(lvl->>'size' AS DOUBLE) > 0.0
+    UNION ALL
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        false AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(lvl->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(lvl->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t, UNNEST(CAST(b.obj->'asks' AS JSON[])) AS l(lvl)
+    WHERE TRY_CAST(lvl->>'size' AS DOUBLE) > 0.0
+    UNION ALL
+    SELECT
+        b.ts,
+        COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        1::UTINYINT AS event_code,
+        (b.obj->>'asset_id' = t.up_tok) AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM book_objects b CROSS JOIN tokens t
+    WHERE COALESCE(json_array_length(b.obj->'bids'), 0) = 0
+      AND COALESCE(json_array_length(b.obj->'asks'), 0) = 0
+),
+price_change_rows AS (
+    SELECT
+        r.ts,
+        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (r.frame_id * 4)::UINTEGER AS frame_id,
+        2::UTINYINT AS event_code,
+        (pc->>'asset_id' = t.up_tok) AS is_up,
+        (pc->>'side' IN ('BUY', 'buy')) AS is_bid,
+        CAST(LEAST(10000, GREATEST(0, ROUND(CAST(pc->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        CAST(pc->>'size' AS DOUBLE) AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM raw_numbered r CROSS JOIN tokens t, UNNEST(CAST(r.payload->'price_changes' AS JSON[])) AS p(pc)
+    WHERE r.event_type = 'price_change'
+),
+trade_rows AS (
+    SELECT
+        r.ts,
+        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (r.frame_id * 4)::UINTEGER AS frame_id,
+        3::UTINYINT AS event_code,
+        NULL::BOOLEAN AS is_up,
+        NULL::BOOLEAN AS is_bid,
+        NULL::USMALLINT AS tick,
+        NULL::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM raw_numbered r
+    WHERE r.event_type = 'last_trade_price'
+)
+SELECT * FROM (
+    SELECT * FROM discovered_rows
+    UNION ALL SELECT * FROM book_rows
+    UNION ALL SELECT * FROM price_change_rows
+    UNION ALL SELECT * FROM trade_rows
+)
+ORDER BY ts ASC, frame_id ASC
+EOF
 }
 
 get_convert_query() {
@@ -359,20 +483,17 @@ ORDER BY ts ASC, twap_timestamp ASC
 EOF
             ;;
         "polymarket-clob-market")
-            cat <<EOF
-SELECT 
-    ts,
-    type AS msg_type,
-    COALESCE(payload->>'event_type', type) AS event_type,
-    COALESCE(payload->>'market', payload->>'conditionId') AS market,
-    payload->>'asset_id' AS asset_id,
-    CAST(payload->>'price' AS DOUBLE) AS price,
-    CAST(payload->>'size' AS DOUBLE) AS size,
-    payload->>'side' AS side,
-    payload
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'type': 'VARCHAR', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
+            local raw_src
+            raw_src=$(cat <<EOF
+    SELECT
+        row_number() OVER () AS frame_id,
+        ts,
+        COALESCE(payload->>'event_type', type) AS event_type,
+        payload
+    FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'type': 'VARCHAR', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 EOF
+)
+            get_typed_clob_select_query "$raw_src"
             ;;
         *)
             cat <<EOF
@@ -481,6 +602,8 @@ while IFS=$'\t' read -r src_path src_size; do
     # Determine destination .parquet filename
     if [[ "$src_path" == *.jsonl.zst ]]; then
         dest_path="${src_path%.jsonl.zst}.parquet"
+    elif [[ "$src_path" == *.jsonl ]]; then
+        dest_path="${src_path%.jsonl}.parquet"
     elif [[ "$src_path" == *.zst ]]; then
         dest_path="${src_path%.zst}.parquet"
     else
@@ -521,6 +644,8 @@ while IFS=$'\t' read -r src_path src_size; do
             effective_threads=2
         fi
         effective_row_group_size=25000
+    elif [ "$stream_type" = "polymarket-clob-market" ]; then
+        effective_row_group_size=100000
     fi
 
     cat << EOF > "$TEMP_SQL_FILE"

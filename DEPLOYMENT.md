@@ -272,7 +272,7 @@ Executes Maven release in `infra/telegram_alert`, packages the Java 25 shaded ja
 ---
 
 ### Step 4.3: Deploy Alert Lambda Function Stack (`infra/telegram-alert-lambda.yaml`)
-Provisions `AWS::Lambda::Function` referencing the pushed ECR image, authorizes CloudWatch Logs invocation, and attaches `AWS::Logs::SubscriptionFilter` to both the **Live Trading** and **Data Collector** Log Groups for pattern `?WARN ?warn ?ERROR ?error ?FATAL ?fatal ?Exception ?Error`.
+Provisions `AWS::Lambda::Function` referencing the pushed ECR image, authorizes CloudWatch Logs invocation, and attaches `AWS::Logs::SubscriptionFilter` to both the **Live Trading** and **Data Collector** Log Groups for pattern `?ERROR ?error ?FATAL ?fatal ?Exception ?Error`.
 
 #### Windows 11 (PowerShell):
 ```powershell
@@ -377,7 +377,7 @@ aws logs tail "/polymarket-bot/polymarket-bot-live-base/live-trading" --region e
 # Data Collector logs:
 aws logs tail "/polymarket-bot/polymarket-bot-data-base/data-collector" --region eu-west-1 --follow
 ```
-Any `WARN`, `ERROR`, `FATAL`, or exception log entry in either log group will automatically trigger the Telegram Alert Lambda and deliver a formatted notification to your configured Telegram chat.
+Any `ERROR`, `FATAL`, or exception log entry in either log group will automatically trigger the Telegram Alert Lambda and deliver a formatted notification to your configured Telegram chat (note: `WARN` events are excluded from the subscription filter).
 
 ### 6.3 Downloading & Cleaning Up Recorded `.jsonl.zst` Market Streams
 To download rotated `.jsonl.zst` market stream files from `/mnt/ebs/polymarket-data/collector` on the Data Collector EC2 instance to local disk:

@@ -42,8 +42,12 @@ public class DynamicIndicatorEngine {
     private final List<MarketCandle> candleHistory = new ArrayList<>();
     private final double[] currentValues = new double[INDICATOR_COUNT];
 
+    // Precomputed historical 24h VWAP & standard deviation for O(1) Z-score updates on every spot trade
+    private boolean hasHistoricalVwap = false;
+    private double cachedHistoricalVwap = 0.0;
+    private double cachedHistoricalStdDev = 1.0;
+
     // Active candle intra-candle state
-    private double twapOpenPrice = 0.0;
     private double rollingTwapSum = 0.0;
     private long rollingTwapCount = 0L;
 
@@ -99,63 +103,62 @@ public class DynamicIndicatorEngine {
      */
     public void reset() {
         candleHistory.clear();
+        hasHistoricalVwap = false;
+        cachedHistoricalVwap = 0.0;
+        cachedHistoricalStdDev = 1.0;
         Arrays.fill(currentValues, Double.NaN);
-        resetActiveCandle(0.0);
+        resetActiveCandle();
     }
 
     /**
-     * Replaces the historical completed candle list (used when initializing isolated parallel market workers).
+     * Replaces the historical completed candle list (used when initializing isolated parallel market workers)
+     * and precomputes the rolling historical VWAP and standard deviation once per candle.
      *
      * @param priorCandles chronological list of completed candles preceding the active market
      */
     public void setCandleHistory(List<MarketCandle> priorCandles) {
         candleHistory.clear();
         if (priorCandles != null && !priorCandles.isEmpty()) {
-            candleHistory.addAll(priorCandles);
+            int size = priorCandles.size();
+            int from = Math.max(0, size - VwapCalculator.MAX_WINDOW_CANDLES);
+            candleHistory.addAll(priorCandles.subList(from, size));
         }
         if (hasAnyIndicators) {
+            refreshHistoricalVwapCache();
             recalculateAll();
         }
     }
 
     /**
-     * Resets intra-candle rolling accumulators for a new active candle interval without any initial price.
+     * Resets intra-candle rolling accumulators for a new active candle interval.
      */
     public void resetActiveCandle() {
-        resetActiveCandle(0.0);
-    }
-
-    /**
-     * Resets intra-candle rolling accumulators for a new active candle interval.
-     *
-     * @param openPrice candle opening spot price (or {@code 0.0} / {@link Double#NaN} if not yet known)
-     */
-    public void resetActiveCandle(double openPrice) {
-        double cleanOpen = (!Double.isNaN(openPrice) && openPrice > 0.0) ? openPrice : 0.0;
-        this.twapOpenPrice = cleanOpen;
-        this.rollingTwapSum = cleanOpen > 0.0 ? cleanOpen : 0.0;
-        this.rollingTwapCount = cleanOpen > 0.0 ? 1L : 0L;
+        this.rollingTwapSum = 0.0;
+        this.rollingTwapCount = 0L;
         this.rollingVwapUsd = 0.0;
         this.rollingVwapBtc = 0.0;
         this.intraCandleCvdBtc = 0.0;
+        this.currentSpotPrice = 0.0;
+        this.currentFuturesPrice = 0.0;
 
-        this.sOpen = cleanOpen;
-        this.sHigh = cleanOpen;
-        this.sLow = cleanOpen;
-        this.sClose = cleanOpen;
+        this.sOpen = 0.0;
+        this.sHigh = 0.0;
+        this.sLow = 0.0;
+        this.sClose = 0.0;
         this.spotVolBtc = 0.0;
         this.spotVolUsd = 0.0;
         this.spotDeltaBtc = 0.0;
 
-        this.fOpen = cleanOpen;
-        this.fHigh = cleanOpen;
-        this.fLow = cleanOpen;
-        this.fClose = cleanOpen;
+        this.fOpen = 0.0;
+        this.fHigh = 0.0;
+        this.fLow = 0.0;
+        this.fClose = 0.0;
         this.futVolBtc = 0.0;
         this.futVolUsd = 0.0;
         this.futDeltaBtc = 0.0;
 
         if (hasAnyIndicators) {
+            Arrays.fill(currentValues, Double.NaN);
             recalculateAll();
         }
     }
@@ -168,7 +171,11 @@ public class DynamicIndicatorEngine {
     public void onMarketCandleCompleted(MarketCandle candle) {
         if (candle != null) {
             candleHistory.add(candle);
+            if (candleHistory.size() > VwapCalculator.MAX_WINDOW_CANDLES) {
+                candleHistory.removeFirst();
+            }
             if (hasAnyIndicators) {
+                refreshHistoricalVwapCache();
                 recalculateAll();
             }
         }
@@ -204,7 +211,8 @@ public class DynamicIndicatorEngine {
     }
 
     /**
-     * Updates rolling price, TWAP, VWAP, CVD, and Basis indicators upon receiving a spot exchange trade.
+     * Updates rolling price, TWAP, VWAP, VWAP Z-score, CVD, and Basis indicators in {@code O(1)}
+     * upon receiving a spot exchange trade.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price spot execution price
@@ -248,8 +256,9 @@ public class DynamicIndicatorEngine {
         }
 
         if (needVwapZScore) {
-            VwapCalculator.VwapResult res = vwapCalculator.calculate(candleHistory, price);
-            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = res.zScore();
+            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = hasHistoricalVwap
+                    ? (price - cachedHistoricalVwap) / cachedHistoricalStdDev
+                    : 0.0;
         }
 
         if (needCvd) {
@@ -316,6 +325,26 @@ public class DynamicIndicatorEngine {
         }
     }
 
+    private void refreshHistoricalVwapCache() {
+        if (!needVwapZScore || candleHistory.isEmpty()) {
+            hasHistoricalVwap = false;
+            cachedHistoricalVwap = 0.0;
+            cachedHistoricalStdDev = 1.0;
+            return;
+        }
+        VwapCalculator.VwapResult r0 = vwapCalculator.calculate(candleHistory, 0.0);
+        VwapCalculator.VwapResult r1 = vwapCalculator.calculate(candleHistory, 1.0);
+        if (r0.vwap() == r1.vwap()) {
+            hasHistoricalVwap = true;
+            cachedHistoricalVwap = r0.vwap();
+            cachedHistoricalStdDev = r0.stdDev();
+        } else {
+            hasHistoricalVwap = false;
+            cachedHistoricalVwap = 0.0;
+            cachedHistoricalStdDev = 1.0;
+        }
+    }
+
     private void recalculateAll() {
         if (needVol4h) {
             double vol4h = volCalculator.calculate4hRealizedVolatility(candleHistory);
@@ -323,9 +352,9 @@ public class DynamicIndicatorEngine {
         }
 
         if (needVwapZScore) {
-            double spot = currentSpotPrice > 0.0 ? currentSpotPrice : twapOpenPrice;
-            VwapCalculator.VwapResult res = vwapCalculator.calculate(candleHistory, spot);
-            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = res.zScore();
+            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = (hasHistoricalVwap && currentSpotPrice > 0.0)
+                    ? (currentSpotPrice - cachedHistoricalVwap) / cachedHistoricalStdDev
+                    : 0.0;
         }
 
         if (needTwap && rollingTwapCount > 0) {
@@ -375,14 +404,5 @@ public class DynamicIndicatorEngine {
      */
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
-    }
-
-    /**
-     * Returns the opening reference price of the active candle.
-     *
-     * @return open reference price
-     */
-    public double getTwapOpenPrice() {
-        return twapOpenPrice;
     }
 }

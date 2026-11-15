@@ -684,8 +684,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--latency-ms",
         type=int,
-        default=15,
-        help="Simulated one-way latency in ms added to trade_timestamp for ts (default: 15).",
+        default=50,
+        help="Simulated one-way latency in ms added to trade_timestamp for ts (default: 50).",
     )
     return parser.parse_args(args)
 

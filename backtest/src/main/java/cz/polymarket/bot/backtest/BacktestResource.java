@@ -16,6 +16,7 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.media.Content;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
@@ -26,9 +27,9 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponses;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * REST controller exposing endpoints for backtest engine status checks and asynchronous simulation job execution.
@@ -39,15 +40,25 @@ public class BacktestResource {
 
     private final BacktestJobManager jobManager;
     private final StrategyRegistry strategyRegistry;
+    private final String defaultStrategy;
+    private final String defaultStartDate;
 
     /**
-     * Constructs a new {@link BacktestResource} with the injected job manager and strategy registry.
+     * Constructs a new {@link BacktestResource} with the injected job manager, strategy registry, and default properties.
      *
      * @param jobManager orchestrator for asynchronous backtesting job execution
      * @param strategyRegistry registry resolving requested trading strategies
+     * @param defaultStrategy default trading strategy name configured in application properties
+     * @param defaultStartDate default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
      */
     @Inject
-    public BacktestResource(BacktestJobManager jobManager, StrategyRegistry strategyRegistry) {
+    public BacktestResource(
+            BacktestJobManager jobManager,
+            StrategyRegistry strategyRegistry,
+            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "UtterParameciumStrategy")
+            String defaultStrategy,
+            @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
+            String defaultStartDate) {
         if (jobManager == null) {
             Log.fatal("Fatal initialization error in BacktestResource: jobManager must not be null");
             throw new NullPointerException("jobManager must not be null");
@@ -58,6 +69,12 @@ public class BacktestResource {
         }
         this.jobManager = jobManager;
         this.strategyRegistry = strategyRegistry;
+        this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
+                ? defaultStrategy.trim()
+                : "UtterParameciumStrategy";
+        this.defaultStartDate = (defaultStartDate != null && !defaultStartDate.isBlank())
+                ? defaultStartDate.trim()
+                : "2026-10-12";
     }
 
     /**
@@ -122,15 +139,12 @@ public class BacktestResource {
                     .build();
         }
 
-        if (request.strategyName() == null || request.strategyName().isBlank()) {
-            Log.error("Cannot start backtest run: strategyName is mandatory");
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "strategyName is mandatory"))
-                    .build();
-        }
+        String resolvedStrategyName = (request.strategyName() != null && !request.strategyName().isBlank())
+                ? request.strategyName().trim()
+                : defaultStrategy;
 
         try {
-            strategyRegistry.getStrategy(request.strategyName());
+            strategyRegistry.getStrategy(resolvedStrategyName);
         } catch (IllegalArgumentException e) {
             Log.errorf("Cannot start backtest run: %s", e.getMessage());
             return Response.status(Response.Status.BAD_REQUEST)
@@ -138,39 +152,39 @@ public class BacktestResource {
                     .build();
         }
 
-        if (request.startDate() != null && !request.startDate().isBlank()) {
-            try {
-                LocalDate.parse(request.startDate());
-            } catch (DateTimeParseException e) {
-                Log.errorf("Cannot start backtest run: invalid startDate format '%s'", request.startDate());
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "Invalid startDate format: " + request.startDate()))
-                        .build();
-            }
+        String resolvedStartDate = (request.startDate() != null && !request.startDate().isBlank())
+                ? request.startDate().trim()
+                : defaultStartDate;
+        String resolvedEndDate = (request.endDate() != null && !request.endDate().isBlank())
+                ? request.endDate().trim()
+                : LocalDate.now(ZoneOffset.UTC).toString();
+
+        LocalDate start;
+        try {
+            start = LocalDate.parse(resolvedStartDate);
+        } catch (DateTimeParseException e) {
+            Log.errorf("Cannot start backtest run: invalid startDate format '%s'", resolvedStartDate);
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Invalid startDate format: " + resolvedStartDate))
+                    .build();
         }
 
-        if (request.endDate() != null && !request.endDate().isBlank()) {
-            try {
-                LocalDate.parse(request.endDate());
-            } catch (DateTimeParseException e) {
-                Log.errorf("Cannot start backtest run: invalid endDate format '%s'", request.endDate());
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "Invalid endDate format: " + request.endDate()))
-                        .build();
-            }
+        LocalDate end;
+        try {
+            end = LocalDate.parse(resolvedEndDate);
+        } catch (DateTimeParseException e) {
+            Log.errorf("Cannot start backtest run: invalid endDate format '%s'", resolvedEndDate);
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Invalid endDate format: " + resolvedEndDate))
+                    .build();
         }
 
-        if (request.startDate() != null && request.endDate() != null
-                && !request.startDate().isBlank() && !request.endDate().isBlank()) {
-            LocalDate start = LocalDate.parse(request.startDate());
-            LocalDate end = LocalDate.parse(request.endDate());
-            if (start.isAfter(end)) {
-                Log.errorf("Cannot start backtest run: startDate %s must not be after endDate %s",
-                        request.startDate(), request.endDate());
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "startDate must not be after endDate"))
-                        .build();
-            }
+        if (start.isAfter(end)) {
+            Log.errorf("Cannot start backtest run: startDate %s must not be after endDate %s",
+                    resolvedStartDate, resolvedEndDate);
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "startDate must not be after endDate"))
+                    .build();
         }
 
         if (request.initialCapital() != null && request.initialCapital() <= 0) {
@@ -189,17 +203,26 @@ public class BacktestResource {
                     .build();
         }
 
-        BacktestJob job = jobManager.submitJob(request);
+        BacktestRunRequest resolvedRequest = new BacktestRunRequest(
+                resolvedStrategyName,
+                request.symbol(),
+                resolvedStartDate,
+                resolvedEndDate,
+                request.initialCapital(),
+                request.outputDirectory(),
+                request.latencyFactor()
+        );
+        BacktestJob job = jobManager.submitJob(resolvedRequest);
         String resolvedSymbol = request.symbol() != null ? request.symbol() : "BTCUSDT";
         if (Log.isInfoEnabled()) {
             Log.infof("Accepted backtest run request: jobId=%s, strategy=%s, symbol=%s",
-                    job.jobId(), request.strategyName(), resolvedSymbol);
+                    job.jobId(), resolvedStrategyName, resolvedSymbol);
         }
 
         BacktestJobSubmitResponse response = new BacktestJobSubmitResponse(
                 job.jobId(),
                 job.status().name(),
-                request.strategyName(),
+                resolvedStrategyName,
                 resolvedSymbol,
                 job.createdAt().toString()
         );

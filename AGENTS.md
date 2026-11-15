@@ -69,3 +69,11 @@ When working with AWS services, infrastructure, or deployment in this repository
 - **Infrastructure as Code**: Prefer AWS CDK or CloudFormation over imperative CLI resource creation.
 - **Secret Safety**: Never expose raw secrets in context; follow the `aws-secrets-manager` resolution guidelines.
 
+---
+
+## 5. User Education Documentation Exclusion (`docs/` — DO NOT LOAD)
+
+- **STRICT PROHIBITION**: Agents **MUST NEVER** read, scan, grep, or load any files inside `./docs/` (`docs/strategy/`, `docs/theory/`) into their context unless the user explicitly asks to edit those specific documentation files.
+- **Purpose**: The `./docs/` directory exists **purely for human/user study and theoretical education** and is not source-of-truth specification for coding or agent workflows.
+
+

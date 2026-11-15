@@ -45,6 +45,22 @@ public interface TradingStrategy {
     }
 
     /**
+     * Declares the duration in milliseconds before candle expiration ({@code tEndMs}) during which
+     * this strategy requires Polymarket CLOB order book quotes ({@link #onOrderBookQuote(OrderBookQuote)}).
+     * <p>
+     * Returns {@link Long#MAX_VALUE} by default so full-candle strategies receive CLOB quotes across
+     * the entire market interval. Final-window strategies may return a bounded duration (while still
+     * receiving {@code polymarket/price_crypto} and {@code polymarket/price_crypto_twap_60s} from
+     * the very start of the market interval) so the backtesting engine can prune early CLOB row groups
+     * after seeding from the latest full {@code book} snapshot.
+     *
+     * @return required CLOB lookback window before {@code tEndMs} in milliseconds
+     */
+    default long getRequiredClobLookbackMs() {
+        return Long.MAX_VALUE;
+    }
+
+    /**
      * Resets the internal state of the strategy for a new run or test.
      */
     default void reset() {}
@@ -118,6 +134,25 @@ public interface TradingStrategy {
             double twapPrice,
             int windowSeconds,
             long twapTimestampMs) {}
+
+    /**
+     * Optional callback triggered when a Chainlink-emulated USD spot price and 60-second rolling TWAP
+     * are calculated for the asset by aggregating Binance Spot ({@code <ASSET>USDT} converted via
+     * Kraken {@code USDT/USD} 5s EMA), Coinbase Spot ({@code <ASSET>USD}), and Kraken Spot
+     * ({@code <ASSET>USD}) trades.
+     * <p>
+     * Delivered automatically to all strategies without requiring explicit stream declaration.
+     *
+     * @param timestampMs local EC2 receipt timestamp in milliseconds UTC
+     * @param symbol lowercase USD asset symbol (e.g. {@code "btcusd"})
+     * @param spotPrice calculated multi-exchange USD spot price
+     * @param twap60sPrice calculated 60-second time-weighted average USD price
+     */
+    default void onCalculatedSpotTwap(
+            long timestampMs,
+            String symbol,
+            double spotPrice,
+            double twap60sPrice) {}
 
     /**
      * Callback triggered upon execution feedback (fills, rejections, cancellations).
