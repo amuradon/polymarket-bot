@@ -18,8 +18,10 @@ import java.util.stream.Stream;
  * Quarkus test resource starting an embedded Vert.x server that mocks all external streams:
  * <ul>
  *   <li>Binance Spot WebSocket ({@code @aggTrade})</li>
- *   <li>Binance Futures WebSockets ({@code @aggTrade}, {@code @depth@100ms}, {@code @depth20@100ms}, {@code @forceOrder})</li>
- *   <li>Polymarket Gamma HTTP API ({@code /gamma/markets?slug=...})</li>
+ *   <li>Binance Futures WebSocket ({@code @aggTrade})</li>
+ *   <li>Kraken Spot v2 WebSocket ({@code /kraken/ws/v2})</li>
+ *   <li>Coinbase Exchange Spot WebSocket ({@code /coinbase/ws})</li>
+ *   <li>Polymarket Gamma HTTP API ({@code /gamma/markets/slug/...})</li>
  *   <li>Polymarket PolyBolt v2 WebSocket ({@code /polybolt/ws}) with mandatory {@code auth} -> {@code authed} -> {@code subscribe} handshake</li>
  *   <li>Polymarket CLOB WebSocket ({@code /clob/ws/market})</li>
  * </ul>
@@ -69,12 +71,6 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     } else if (path.startsWith("/binance/futures/")) {
                         if (path.endsWith("@aggTrade")) {
                             ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600110,\"s\":\"BTCUSDT\",\"a\":2001,\"p\":\"78451.00\",\"q\":\"1.50\",\"m\":true}");
-                        } else if (path.endsWith("@depth@100ms")) {
-                            ws.writeTextMessage("{\"e\":\"depthUpdate\",\"E\":1789041600120,\"s\":\"BTCUSDT\",\"b\":[[\"78450.00\",\"3.0\"]],\"a\":[[\"78451.00\",\"2.0\"]]}");
-                        } else if (path.endsWith("@depth20@100ms")) {
-                            ws.writeTextMessage("{\"e\":\"depthUpdate\",\"E\":1789041600130,\"s\":\"BTCUSDT\",\"b\":[[\"78450.00\",\"3.0\"]],\"a\":[[\"78451.00\",\"2.0\"]]}");
-                        } else if (path.endsWith("@forceOrder")) {
-                            ws.writeTextMessage("{\"e\":\"forceOrder\",\"E\":1789041600140,\"o\":{\"s\":\"BTCUSDT\",\"S\":\"SELL\",\"q\":\"0.10\",\"p\":\"78000.00\"}}");
                         }
                     } else if (path.equals("/polybolt/ws")) {
                         AtomicBoolean authed = new AtomicBoolean(false);
@@ -120,15 +116,6 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                                 ws.writeTextMessage("{\"type\":\"match\",\"trade_id\":8001,\"maker_order_id\":\"m1\",\"taker_order_id\":\"t1\",\"side\":\"buy\",\"size\":\"0.12000000\",\"price\":\"78455.25\",\"product_id\":\"BTC-USD\",\"sequence\":123456,\"time\":\"2026-11-13T00:00:00.090223Z\"}");
                             }
                         });
-                    } else if (path.equals("/deribit/ws/api/v2")) {
-                        ws.textMessageHandler(msg -> {
-                            if (msg.contains("public/auth")) {
-                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"access_token\":\"mock-jwt-token\",\"expires_in\":3600}}");
-                            } else if (msg.contains("public/subscribe") && msg.contains("trades.")) {
-                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[\"trades.BTC-PERPETUAL.raw\"]}");
-                                ws.writeTextMessage("{\"jsonrpc\":\"2.0\",\"method\":\"subscription\",\"params\":{\"channel\":\"trades.BTC-PERPETUAL.raw\",\"data\":[{\"trade_seq\":101,\"price\":78452.0,\"amount\":10.0,\"direction\":\"buy\",\"instrument_name\":\"BTC-PERPETUAL\"}]}}");
-                            }
-                        });
                     }
                 });
 
@@ -142,7 +129,6 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     Map.entry("polymarket.connector.binance.futures-ws-base-url", "ws://localhost:" + port + "/binance/futures"),
                     Map.entry("polymarket.connector.kraken.spot-ws-url", "ws://localhost:" + port + "/kraken/ws/v2"),
                     Map.entry("polymarket.connector.coinbase.spot-ws-url", "ws://localhost:" + port + "/coinbase/ws"),
-                    Map.entry("polymarket.connector.deribit.ws-url", "ws://localhost:" + port + "/deribit/ws/api/v2"),
                     Map.entry("polymarket.connector.gamma.base-url", "http://localhost:" + port + "/gamma"),
                     Map.entry("polymarket.connector.polybolt.ws-url", "ws://localhost:" + port + "/polybolt/ws"),
                     Map.entry("polymarket.connector.clob.ws-url", "ws://localhost:" + port + "/clob/ws/market"),

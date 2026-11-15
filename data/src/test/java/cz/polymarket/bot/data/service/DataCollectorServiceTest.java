@@ -2,14 +2,12 @@ package cz.polymarket.bot.data.service;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
-import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
 import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
-import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
 import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
@@ -42,8 +40,6 @@ class DataCollectorServiceTest {
         DailyKrakenStorageManager krakenStorage = mock(DailyKrakenStorageManager.class);
         CoinbaseStreamConnector coinbaseConnector = mock(CoinbaseStreamConnector.class);
         DailyCoinbaseStorageManager coinbaseStorage = mock(DailyCoinbaseStorageManager.class);
-        DeribitStreamConnector deribitConnector = mock(DeribitStreamConnector.class);
-        DailyDeribitStorageManager deribitStorage = mock(DailyDeribitStorageManager.class);
         DailyPolyBoltStorageManager polyBoltDailyStorage = mock(DailyPolyBoltStorageManager.class);
         PolymarketLifecycleCoordinator polymarketCoordinator = mock(PolymarketLifecycleCoordinator.class);
         PolymarketMarketStorageManager polymarketStorage = mock(PolymarketMarketStorageManager.class);
@@ -53,7 +49,6 @@ class DataCollectorServiceTest {
         when(binanceConnector.getConnectionStates()).thenReturn(Map.of());
         when(krakenConnector.getConnectionStates()).thenReturn(Map.of("ETHUSD", ConnectionState.CONNECTED));
         when(coinbaseConnector.getState()).thenReturn(ConnectionState.CONNECTED);
-        when(deribitConnector.getState()).thenReturn(ConnectionState.CONNECTED);
         when(polyBoltClient.getTwapState()).thenReturn(ConnectionState.CONNECTED);
         when(polyBoltClient.getCryptoPriceState()).thenReturn(ConnectionState.CONNECTED);
         when(clobClient.getConnectionStates()).thenReturn(Map.of());
@@ -66,8 +61,6 @@ class DataCollectorServiceTest {
                 krakenStorage,
                 coinbaseConnector,
                 coinbaseStorage,
-                deribitConnector,
-                deribitStorage,
                 polyBoltDailyStorage,
                 polymarketCoordinator,
                 polymarketStorage,

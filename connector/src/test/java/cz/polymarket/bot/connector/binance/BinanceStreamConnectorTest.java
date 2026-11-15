@@ -23,7 +23,7 @@ import java.util.concurrent.locks.LockSupport;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tests for {@link BinanceStreamType} and {@link BinanceStreamConnector} verifying all 5 Binance streams,
+ * Tests for {@link BinanceStreamType} and {@link BinanceStreamConnector} verifying both Binance aggTrades streams,
  * dedicated native Epoll/BoringSSL transport configuration, dedicated I/O reader thread naming,
  * zero-decode {@code byte[]} frame delivery, external worker batch draining, and disconnect telemetry.
  */
@@ -56,16 +56,10 @@ class BinanceStreamConnectorTest {
                 .isEqualTo("wss://stream.binance.com:9443/ws/btcusdt@aggTrade");
         assertThat(BinanceStreamType.FUTURES_AGG_TRADES.buildWsUrl(spotBase, futuresBase, "BTCUSDT"))
                 .isEqualTo("wss://fstream.binance.com/market/ws/btcusdt@aggTrade");
-        assertThat(BinanceStreamType.FUTURES_DIFF_DEPTH_100MS.buildWsUrl(spotBase, futuresBase, "BTCUSDT"))
-                .isEqualTo("wss://fstream.binance.com/public/ws/btcusdt@depth@100ms");
-        assertThat(BinanceStreamType.FUTURES_PARTIAL_DEPTH_100MS.buildWsUrl(spotBase, futuresBase, "BTCUSDT"))
-                .isEqualTo("wss://fstream.binance.com/public/ws/btcusdt@depth20@100ms");
-        assertThat(BinanceStreamType.FUTURES_FORCE_ORDER.buildWsUrl(spotBase, futuresBase, "BTCUSDT"))
-                .isEqualTo("wss://fstream.binance.com/market/ws/btcusdt@forceOrder");
     }
 
     @Test
-    void shouldConnectAllFiveBinanceStreamsAndDeliverPayloadsWithDedicatedIoThreadAndTelemetry() throws Exception {
+    void shouldConnectAllBinanceStreamsAndDeliverPayloadsWithDedicatedIoThreadAndTelemetry() throws Exception {
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
                     String path = ws.path();
@@ -95,17 +89,11 @@ class BinanceStreamConnectorTest {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
-                    assertThat(receivedByType).hasSize(5);
+                    assertThat(receivedByType).hasSize(2);
                     assertThat(receivedByType.get(BinanceStreamType.SPOT_AGG_TRADES))
                             .contains("/spot/btcusdt@aggTrade");
                     assertThat(receivedByType.get(BinanceStreamType.FUTURES_AGG_TRADES))
                             .contains("/futures/market/ws/btcusdt@aggTrade");
-                    assertThat(receivedByType.get(BinanceStreamType.FUTURES_DIFF_DEPTH_100MS))
-                            .contains("/futures/public/ws/btcusdt@depth@100ms");
-                    assertThat(receivedByType.get(BinanceStreamType.FUTURES_PARTIAL_DEPTH_100MS))
-                            .contains("/futures/public/ws/btcusdt@depth20@100ms");
-                    assertThat(receivedByType.get(BinanceStreamType.FUTURES_FORCE_ORDER))
-                            .contains("/futures/market/ws/btcusdt@forceOrder");
                     assertThat(timestampsByType.values()).allMatch(ts -> ts > 0L);
                     assertThat(connector.isAllConnected()).isTrue();
                     assertThat(connector.getIoReaderThread()).isNotNull();
@@ -115,7 +103,7 @@ class BinanceStreamConnectorTest {
                 });
 
         List<WebSocketStreamTelemetry> telemetries = connector.getStreamTelemetries();
-        assertThat(telemetries).hasSize(5);
+        assertThat(telemetries).hasSize(2);
         assertThat(telemetries).allSatisfy(snap -> {
             assertThat(snap.totalFramesReceived()).isEqualTo(1L);
             assertThat(snap.remoteAddress()).contains(":" + port);
@@ -133,7 +121,7 @@ class BinanceStreamConnectorTest {
                 .webSocketHandler(ws -> {
                     String path = ws.path();
                     ws.writeTextMessage("{\"streamPath\":\"" + path + "\",\"bytesMode\":true}");
-                    if (path.contains("forceOrder")) {
+                    if (path.contains("futures")) {
                         vertx.setTimer(40L, id -> ws.close((short) 1013, "synthetic binance overload"));
                     }
                 });
@@ -186,7 +174,7 @@ class BinanceStreamConnectorTest {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
-                    assertThat(decodedFromBytes).hasSize(5);
+                    assertThat(decodedFromBytes).hasSize(2);
                     assertThat(disconnectEvents).isNotEmpty();
                     assertThat(disconnectEvents.getFirst().lastCloseCode()).isEqualTo(1013);
                 });

@@ -5,7 +5,6 @@ import cz.polymarket.bot.connector.binance.BinanceStreamListener;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
-import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
@@ -15,7 +14,6 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
 import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
-import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
 import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
@@ -36,7 +34,7 @@ import java.util.Map;
 
 /**
  * Main orchestrator service for the Data Collector application.
- * Always starts recording Binance, Kraken, Coinbase, Deribit, and Polymarket WebSocket streams on application startup
+ * Always starts recording Binance, Kraken, Coinbase, and Polymarket WebSocket streams on application startup
  * using zero-decode {@code byte[]} Zstandard writing, schedules periodic Polymarket market discovery/resolution
  * checks and Zstandard frame flushes, and exposes runtime status.
  */
@@ -49,8 +47,6 @@ public class DataCollectorService {
     private final DailyKrakenStorageManager krakenStorage;
     private final CoinbaseStreamConnector coinbaseConnector;
     private final DailyCoinbaseStorageManager coinbaseStorage;
-    private final DeribitStreamConnector deribitConnector;
-    private final DailyDeribitStorageManager deribitStorage;
     private final DailyPolyBoltStorageManager polyBoltDailyStorage;
     private final PolymarketLifecycleCoordinator polymarketCoordinator;
     private final PolymarketMarketStorageManager polymarketStorage;
@@ -63,14 +59,12 @@ public class DataCollectorService {
     /**
      * Constructs the Data Collector orchestrator service.
      *
-     * @param binanceConnector      Binance 5-stream WebSocket connector
+     * @param binanceConnector      Binance Spot & Futures {@code aggTrades} WebSocket connector
      * @param binanceStorage        daily Zstd storage manager for Binance streams
      * @param krakenConnector       Kraken Spot trade WebSocket connector
      * @param krakenStorage         daily Zstd storage manager for Kraken Spot trades
      * @param coinbaseConnector     Coinbase Spot trade WebSocket connector
      * @param coinbaseStorage       daily Zstd storage manager for Coinbase Spot trades
-     * @param deribitConnector      Deribit Futures trade WebSocket connector
-     * @param deribitStorage        daily Zstd storage manager for Deribit Futures trades
      * @param polyBoltDailyStorage  daily Zstd storage manager for PolyBolt {@code price.crypto} stream
      * @param polymarketCoordinator lifecycle coordinator for Polymarket markets
      * @param polymarketStorage     per-market Zstd storage manager for Polymarket
@@ -88,8 +82,6 @@ public class DataCollectorService {
             DailyKrakenStorageManager krakenStorage,
             CoinbaseStreamConnector coinbaseConnector,
             DailyCoinbaseStorageManager coinbaseStorage,
-            DeribitStreamConnector deribitConnector,
-            DailyDeribitStorageManager deribitStorage,
             DailyPolyBoltStorageManager polyBoltDailyStorage,
             PolymarketLifecycleCoordinator polymarketCoordinator,
             PolymarketMarketStorageManager polymarketStorage,
@@ -107,8 +99,6 @@ public class DataCollectorService {
         this.krakenStorage = krakenStorage;
         this.coinbaseConnector = coinbaseConnector;
         this.coinbaseStorage = coinbaseStorage;
-        this.deribitConnector = deribitConnector;
-        this.deribitStorage = deribitStorage;
         this.polyBoltDailyStorage = polyBoltDailyStorage;
         this.polymarketCoordinator = polymarketCoordinator;
         this.polymarketStorage = polymarketStorage;
@@ -120,7 +110,6 @@ public class DataCollectorService {
         this.binanceConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.krakenConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.coinbaseConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
-        this.deribitConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.clobClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
     }
@@ -188,19 +177,6 @@ public class DataCollectorService {
                     coinbaseStorage.recordBytes(normalizedSymbol, rawUtf8Bytes, recvTimestampMs);
                 }
             });
-            deribitConnector.start(symbol, new RawWebSocketListener() {
-                @Override
-                public void onMessage(String rawJson, long recvTs) {
-                    deribitStorage.record(rawJson, recvTs);
-                }
-
-                @Override
-                public void onMessageBytes(TimestampedFrame frame) {
-                    if (frame != null) {
-                        deribitStorage.recordBytes(frame.rawUtf8Bytes(), frame.recvTs());
-                    }
-                }
-            });
             polymarketCoordinator.start(Instant.now().getEpochSecond());
         } catch (Exception e) {
             Log.errorf("Fatal error starting Data Collector: %s. Terminating application.", e.getMessage());
@@ -214,13 +190,11 @@ public class DataCollectorService {
         binanceConnector.stop();
         krakenConnector.stop();
         coinbaseConnector.stop();
-        deribitConnector.stop();
         polymarketCoordinator.stop();
         polyBoltClient.stop();
         binanceStorage.closeAll();
         krakenStorage.closeAll();
         coinbaseStorage.closeAll();
-        deribitStorage.closeAll();
         polyBoltDailyStorage.closeAll();
     }
 
@@ -256,7 +230,6 @@ public class DataCollectorService {
         binanceStorage.flushAll();
         krakenStorage.flushAll();
         coinbaseStorage.flushAll();
-        deribitStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
     }
@@ -283,7 +256,6 @@ public class DataCollectorService {
                 krakenUsdtUsdEnabled,
                 krakenStates,
                 coinbaseConnector.getState().name(),
-                deribitConnector.getState().name(),
                 polyBoltClient.getTwapState().name(),
                 polyBoltClient.getCryptoPriceState().name(),
                 clobStates,
@@ -291,7 +263,6 @@ public class DataCollectorService {
                 binanceStorage.getTotalRecordsWritten(),
                 krakenStorage.getTotalRecordsWritten(),
                 coinbaseStorage.getTotalRecordsWritten(),
-                deribitStorage.getTotalRecordsWritten(),
                 polyBoltDailyStorage.getTotalRecordsWritten(),
                 polymarketStorage.getTotalRecordsWritten()
         );

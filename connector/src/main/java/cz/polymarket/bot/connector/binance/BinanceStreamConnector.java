@@ -23,11 +23,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Manages resilient WebSocket connections for all 5 Binance Spot and USD-M Futures data streams:
- * Spot aggTrades, Futures aggTrades, Futures Diff. Book Depth (100ms),
- * Futures Partial Book Depth (100ms), and Futures Liquidation Orders (forceOrder).
+ * Manages resilient WebSocket connections for the 2 Binance Spot and USD-M Futures {@code aggTrades} data streams:
+ * Spot aggTrades and Futures aggTrades.
  * <p>
- * Isolates all 5 Binance streams onto a dedicated single-thread Netty EventLoop ({@code binance-ws-io-reader})
+ * Isolates both Binance streams onto a dedicated single-thread Netty EventLoop ({@code binance-ws-io-reader})
  * with native Linux Epoll transport, native BoringSSL ({@code netty-tcnative}), and CloudFront DNS round-robin
  * rotation, forwarding raw {@code byte[]} frames without UTF-8 {@link String} allocation overhead.
  */
@@ -35,7 +34,7 @@ import java.util.Map;
 public class BinanceStreamConnector {
 
     /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing all 5 Binance WebSocket streams.
+     * Dedicated thread name for the isolated Netty EventLoop servicing the Binance WebSocket streams.
      */
     public static final String DEDICATED_BINANCE_IO_THREAD_NAME = "binance-ws-io-reader";
 
