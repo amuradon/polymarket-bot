@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -75,6 +76,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<String> lastRemoteAddress = new AtomicReference<>("");
     private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
     private final AtomicBoolean normalCloseTriggered = new AtomicBoolean(false);
+    private final AtomicBoolean terminalCloseCompleted = new AtomicBoolean(false);
 
     private volatile String dedicatedIoThreadName;
     private volatile Thread ioReaderThread;
@@ -84,6 +86,7 @@ public class ReconnectingWebSocketStream {
     private volatile long pingTimerId = -1L;
     private volatile WebSocketDisconnectListener disconnectListener;
     private volatile Consumer<WebSocketStreamTelemetry> normalCloseListener;
+    private volatile BooleanSupplier shouldReconnectSupplier = () -> true;
 
     /**
      * Constructs a managed, auto-reconnecting WebSocket stream with protocol-level ping frames.
@@ -229,14 +232,27 @@ public class ReconnectingWebSocketStream {
 
     /**
      * Registers an optional listener invoked when the remote WebSocket server cleanly terminates
-     * the stream with {@code closeCode == 1000} (Normal Closure). When registered, a {@code 1000} close
-     * drains any remaining queued frames, stops the stream without reconnecting, and does not trigger
-     * the unexpected {@link WebSocketDisconnectListener} or error logs.
+     * the stream with {@code closeCode == 1000} (Normal Closure) or when the stream disconnects
+     * while {@link #setShouldReconnectSupplier(BooleanSupplier)} evaluates to {@code false}.
+     * When triggered, the stream drains any remaining queued frames, stops without reconnecting,
+     * and does not trigger the unexpected {@link WebSocketDisconnectListener} or error logs.
      *
-     * @param normalCloseListener listener receiving the final stream telemetry snapshot upon {@code 1000} closure
+     * @param normalCloseListener listener receiving the final stream telemetry snapshot upon terminal closure
      */
     public void setNormalCloseListener(Consumer<WebSocketStreamTelemetry> normalCloseListener) {
         this.normalCloseListener = normalCloseListener;
+    }
+
+    /**
+     * Registers an optional predicate evaluated upon WebSocket disconnection or reconnect timer expiration
+     * to determine whether the stream should attempt to reconnect. When it returns {@code false} (for example,
+     * after a market's interval has already ended), the stream stops without reconnecting, drains any remaining
+     * frames, and invokes the configured {@link #setNormalCloseListener(Consumer)}.
+     *
+     * @param shouldReconnectSupplier supplier returning {@code true} if reconnection is allowed, or {@code false} to finalize
+     */
+    public void setShouldReconnectSupplier(BooleanSupplier shouldReconnectSupplier) {
+        this.shouldReconnectSupplier = shouldReconnectSupplier != null ? shouldReconnectSupplier : () -> true;
     }
 
     /**
@@ -629,37 +645,38 @@ public class ReconnectingWebSocketStream {
                                 lastCloseReason.set(closeReason);
                             }
                             if (running.get()) {
-                                if (closeCode == 1000 && this.normalCloseListener != null) {
-                                    normalCloseTriggered.set(true);
-                                    running.set(false);
-                                    cancelPingTimer();
-                                    this.currentWebSocket = null;
-                                    state.set(ConnectionState.DISCONNECTED);
-                                    Thread worker = this.drainThread;
-                                    if (worker != null && externalWorkerThread == null) {
-                                        workerParked.set(false);
-                                        LockSupport.unpark(worker);
-                                    } else if (normalCloseTriggered.compareAndSet(true, false)) {
-                                        List<TimestampedFrame> scratch = new ArrayList<>(64);
-                                        while (!inboundQueue.isEmpty()) {
-                                            drainAvailableBatch(scratch);
-                                        }
-                                        notifyNormalCloseListener(buildTelemetrySnapshot(closeCode, closeReason));
-                                        closeHttpClientQuietly();
+                                String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
+                                if (this.normalCloseListener != null && (closeCode == 1000 || !shouldReconnect())) {
+                                    if (closeCode == 1000) {
+                                        Log.infof("[%s] WebSocket connection closed normally with code=1000 (remote=%s, reason=%s, totalFrames=%d); finalizing stream without reconnect",
+                                                streamName, remoteLabel, closeReason, totalFramesReceived.get());
+                                    } else {
+                                        Log.infof("[%s] WebSocket connection closed after market interval end (remote=%s, code=%d, reason=%s, totalFrames=%d); skipping reconnect and finalizing stream",
+                                                streamName, remoteLabel, closeCode, closeReason, totalFramesReceived.get());
                                     }
+                                    triggerTerminalClose(closeCode, closeReason);
                                     return;
                                 }
                                 long nextDelayMs = computeNextReconnectDelayMs(
                                         consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
                                 WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
-                                String remoteLabel = eventSnapshot.remoteAddress().isEmpty() ? "unknown" : eventSnapshot.remoteAddress();
-                                Log.errorf("[%s] WebSocket connection closed unexpectedly (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
-                                        streamName, remoteLabel, closeCode, closeReason,
-                                        eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
-                                        eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
-                                        eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
-                                        eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
-                                        eventSnapshot.reconnectCount(), nextDelayMs);
+                                if (closeCode == 1000) {
+                                    Log.infof("[%s] WebSocket connection closed with code=1000 (remote=%s, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                                            streamName, remoteLabel, closeReason,
+                                            eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
+                                            eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
+                                            eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
+                                            eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
+                                            eventSnapshot.reconnectCount(), nextDelayMs);
+                                } else {
+                                    Log.errorf("[%s] WebSocket connection closed unexpectedly (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                                            streamName, remoteLabel, closeCode, closeReason,
+                                            eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
+                                            eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
+                                            eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
+                                            eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
+                                            eventSnapshot.reconnectCount(), nextDelayMs);
+                                }
                                 if (this.currentWebSocket == ws) {
                                     notifyDisconnectListener(eventSnapshot);
                                 }
@@ -676,6 +693,12 @@ public class ReconnectingWebSocketStream {
                             if (running.get() && this.currentWebSocket == ws) {
                                 int code = lastCloseCode.get() != 0 ? lastCloseCode.get() : -1;
                                 lastCloseCode.compareAndSet(0, -1);
+                                if (this.normalCloseListener != null && !shouldReconnect()) {
+                                    Log.infof("[%s] WebSocket error occurred after market interval end (reason=%s); skipping reconnect and finalizing stream",
+                                            streamName, msg);
+                                    triggerTerminalClose(code, msg);
+                                    return;
+                                }
                                 notifyDisconnectListener(buildTelemetrySnapshot(code, msg));
                             }
                             onConnectionClosed(ws);
@@ -823,6 +846,48 @@ public class ReconnectingWebSocketStream {
         }
     }
 
+    private boolean shouldReconnect() {
+        BooleanSupplier supplier = this.shouldReconnectSupplier;
+        if (supplier == null) {
+            return true;
+        }
+        try {
+            return supplier.getAsBoolean();
+        } catch (Exception e) {
+            Log.warnf("[%s] Exception in shouldReconnectSupplier: %s", streamName, e.getMessage());
+            return true;
+        }
+    }
+
+    private void triggerTerminalClose(int closeCode, String closeReason) {
+        if (!normalCloseTriggered.compareAndSet(false, true)) {
+            return;
+        }
+        running.set(false);
+        cancelPingTimer();
+        this.currentWebSocket = null;
+        state.set(ConnectionState.DISCONNECTED);
+        Thread worker = this.drainThread;
+        if (worker != null && externalWorkerThread == null) {
+            workerParked.set(false);
+            LockSupport.unpark(worker);
+        } else {
+            completeTerminalCloseDrain(closeCode, closeReason);
+        }
+    }
+
+    private void completeTerminalCloseDrain(int closeCode, String closeReason) {
+        if (!terminalCloseCompleted.compareAndSet(false, true)) {
+            return;
+        }
+        List<TimestampedFrame> scratch = new ArrayList<>(64);
+        while (!inboundQueue.isEmpty()) {
+            drainAvailableBatch(scratch);
+        }
+        notifyNormalCloseListener(buildTelemetrySnapshot(closeCode, closeReason));
+        closeHttpClientQuietly();
+    }
+
     private void onConnectionClosed(WebSocket closedWs) {
         if (this.currentWebSocket == closedWs) {
             this.currentWebSocket = null;
@@ -836,12 +901,22 @@ public class ReconnectingWebSocketStream {
             state.set(ConnectionState.DISCONNECTED);
             return;
         }
+        if (this.normalCloseListener != null && !shouldReconnect()) {
+            Log.infof("[%s] Skipping WebSocket reconnect because market interval has ended; finalizing stream", streamName);
+            triggerTerminalClose(lastCloseCode.get(), lastCloseReason.get());
+            return;
+        }
         state.set(ConnectionState.RECONNECTING);
         reconnectCount.incrementAndGet();
         int attempt = consecutiveReconnectAttempts.incrementAndGet();
         long delayMs = computeNextReconnectDelayMs(attempt, reconnectDelayMs);
         vertx.setTimer(delayMs, timerId -> {
             if (running.get()) {
+                if (this.normalCloseListener != null && !shouldReconnect()) {
+                    Log.infof("[%s] Cancelling scheduled WebSocket reconnect because market interval has ended; finalizing stream", streamName);
+                    triggerTerminalClose(lastCloseCode.get(), lastCloseReason.get());
+                    return;
+                }
                 connect();
             }
         });
@@ -866,12 +941,8 @@ public class ReconnectingWebSocketStream {
             }
             workerParked.set(false);
         }
-        if (normalCloseTriggered.compareAndSet(true, false)) {
-            while (!inboundQueue.isEmpty()) {
-                drainAvailableBatch(scratchBatch);
-            }
-            notifyNormalCloseListener(buildTelemetrySnapshot(lastCloseCode.get(), lastCloseReason.get()));
-            closeHttpClientQuietly();
+        if (normalCloseTriggered.get()) {
+            completeTerminalCloseDrain(lastCloseCode.get(), lastCloseReason.get());
         }
     }
 

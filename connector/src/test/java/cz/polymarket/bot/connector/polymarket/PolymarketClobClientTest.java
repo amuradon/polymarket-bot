@@ -151,6 +151,61 @@ class PolymarketClobClientTest {
     }
 
     @Test
+    void shouldNotReconnectAndInvokeCloseListenerWhenDisconnectedAfterMarketIntervalEnd() throws Exception {
+        AtomicInteger connectionCount = new AtomicInteger(0);
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    connectionCount.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        if (msg.contains("token_up_1")) {
+                            ws.writeTextMessage("""
+                                    [{"event_type":"book","asset_id":"token_up_1","bids":[{"price":"0.49","size":"100"}]}]
+                                    """.strip());
+                            ws.close((short) 1001, "going away after market end");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                "ws://localhost:" + port + "/ws/market",
+                60L,
+                5000L
+        );
+
+        List<WebSocketStreamTelemetry> unexpectedDisconnects = new CopyOnWriteArrayList<>();
+        List<WebSocketStreamTelemetry> terminalCloses = new CopyOnWriteArrayList<>();
+        List<String> rawEvents = new CopyOnWriteArrayList<>();
+        client.setDisconnectListener(unexpectedDisconnects::add);
+
+        String slug = "btc-updown-15m-1789041600";
+        client.openMarketStream(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                (rawJson, recvTs) -> rawEvents.add(rawJson),
+                terminalCloses::add,
+                () -> false
+        );
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(terminalCloses).hasSize(1);
+                    assertThat(rawEvents).hasSize(1);
+                    assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+                });
+
+        Thread.sleep(150L);
+        assertThat(connectionCount.get()).isEqualTo(1);
+        assertThat(unexpectedDisconnects).isEmpty();
+        assertThat(terminalCloses.getFirst().lastCloseCode()).isEqualTo(1001);
+        assertThat(terminalCloses.getFirst().lastCloseReason()).isEqualTo("going away after market end");
+
+        client.stopAll();
+    }
+
+    @Test
     void shouldOpenAndCloseAuthenticatedUserStreamDeliveringOrderAndTradeEvents() throws Exception {
         List<String> receivedUserSubMessages = new CopyOnWriteArrayList<>();
 

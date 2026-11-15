@@ -1688,7 +1688,21 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 clobWorkerCpu
         );
         telemetryMonitor.recordDisconnectEvent(event);
-        if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
+        if (event.closeCode() == 1000) {
+            Log.infof("[%s] Recorded WebSocket normal closure (remote=%s, code=%d, reason=%s, peerStream=%s, peerState=%s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d)",
+                    event.streamName(),
+                    remoteLabel,
+                    event.closeCode(),
+                    event.closeReason(),
+                    event.peerStreamName(),
+                    event.peerState(),
+                    event.queueDepthAtDisconnect(),
+                    event.maxQueueDepth(),
+                    event.lastQueueLagMs(),
+                    event.maxQueueLagMs(),
+                    event.lastProcessTimeUs(),
+                    event.maxProcessTimeUs());
+        } else if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
             String peerRemote = redundancy.peerRemoteAddress().isEmpty() ? "unknown" : redundancy.peerRemoteAddress();
             Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, FAILOVER ACTIVE: peerStream=%s is %s @ %s — 0 ms stream outage, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
                     event.streamName(),

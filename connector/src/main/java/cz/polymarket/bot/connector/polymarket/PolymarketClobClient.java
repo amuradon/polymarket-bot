@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -174,6 +175,27 @@ public class PolymarketClobClient {
             List<String> tokenIds,
             RawWebSocketListener listener,
             Consumer<WebSocketStreamTelemetry> normalCloseListener) {
+        openMarketStream(marketSlug, tokenIds, listener, normalCloseListener, null);
+    }
+
+    /**
+     * Opens a dedicated CLOB WebSocket connection for a single market subscribed to its token IDs,
+     * forwarding all raw frames directly to the listener without parsing, invoking {@code normalCloseListener}
+     * when the server terminates the resolved market stream with {@code closeCode == 1000} or when the stream
+     * disconnects after {@code shouldReconnectSupplier} evaluates to {@code false}.
+     *
+     * @param marketSlug              Polymarket market slug
+     * @param tokenIds                CLOB asset token IDs belonging to the market
+     * @param listener                listener receiving raw JSON frames and receipt timestamps
+     * @param normalCloseListener     optional listener invoked upon terminal stream closure
+     * @param shouldReconnectSupplier optional supplier returning {@code true} if reconnection is allowed on disconnect
+     */
+    public synchronized void openMarketStream(
+            String marketSlug,
+            List<String> tokenIds,
+            RawWebSocketListener listener,
+            Consumer<WebSocketStreamTelemetry> normalCloseListener,
+            BooleanSupplier shouldReconnectSupplier) {
         if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
             return;
         }
@@ -208,6 +230,7 @@ public class PolymarketClobClient {
         );
         stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
         stream.setDisconnectListener(this.disconnectListener);
+        stream.setShouldReconnectSupplier(shouldReconnectSupplier);
         if (normalCloseListener != null) {
             stream.setNormalCloseListener(telemetry -> {
                 marketStreams.remove(marketSlug, stream);
