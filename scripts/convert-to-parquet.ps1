@@ -136,6 +136,12 @@ function Get-StreamType {
     if ($normalized -like "*/binance/spot/*/aggtrades/*" -or $normalized -like "*spot*aggtrades*") {
         return "binance-spot-aggtrades"
     }
+    if ($normalized -like "*/kraken/spot/*/trades/*" -or $normalized -like "*kraken*trades*") {
+        return "kraken-spot-trades"
+    }
+    if ($normalized -like "*/coinbase/spot/*/trades/*" -or $normalized -like "*coinbase*trades*") {
+        return "coinbase-spot-trades"
+    }
     if ($normalized -like "*/binance/futures/*/aggtrades/*" -or $normalized -like "*futures*aggtrades*") {
         return "binance-futures-aggtrades"
     }
@@ -310,6 +316,42 @@ SELECT
     CAST(payload->>'M' AS BOOLEAN) AS is_best_match
 FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC
+"@
+        }
+        "kraken-spot-trades" {
+            return @"
+SELECT 
+    ts,
+    CAST(epoch_ns(TRY_CAST(t->>'timestamp' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
+    t->>'symbol' AS symbol,
+    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
+    t->>'side' AS side,
+    t->>'ord_type' AS ord_type,
+    CAST(t->>'price' AS DOUBLE) AS price,
+    CAST(t->>'qty' AS DOUBLE) AS qty,
+    t->>'timestamp' AS timestamp
+FROM (
+    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
+    FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+    WHERE payload->>'channel' = 'trade' AND payload->>'type' = 'update'
+)
+ORDER BY ts ASC, trade_id ASC
+"@
+        }
+        "coinbase-spot-trades" {
+            return @"
+SELECT 
+    ts,
+    CAST(epoch_ns(TRY_CAST(payload->>'time' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
+    payload->>'product_id' AS symbol,
+    CAST(payload->>'trade_id' AS BIGINT) AS trade_id,
+    payload->>'side' AS side,
+    CAST(payload->>'price' AS DOUBLE) AS price,
+    CAST(payload->>'size' AS DOUBLE) AS qty,
+    payload->>'time' AS timestamp
+FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+WHERE payload->>'type' = 'match'
+ORDER BY ts ASC, trade_id ASC
 "@
         }
         "binance-futures-aggtrades" {
@@ -604,7 +646,7 @@ try {
             if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
                 $effectiveThreads = [Math]::Min($Threads, 2)
                 $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
-            } elseif (($streamType -eq "polymarket-clob-market") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+            } elseif (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
                 $effectiveRowGroupSize = 100000
             }
 

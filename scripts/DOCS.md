@@ -41,7 +41,9 @@ Stahuje denní Zstandard (`.jsonl.zst`) archivy z EC2 instance na lokální disk
 
 Konvertuje `.jsonl.zst` archivy do typovaných Apache Parquet (`.parquet`) souborů pomocí DuckDB, řadí záznamy podle `ts ASC` a po ověření smaže původní archivy.
 
-Pro trhy Polymarket CLOB (`*-updown-*.parquet`) vytváří kompaktní **10sloupcové primitivní schéma** (`ts`, `server_ts`, `frame_id`, `event_code`, `is_up`, `is_bid`, `tick`, `size`, `up_token_id`, `down_token_id`) seřazené podle `ts ASC, frame_id ASC` (`ROW_GROUP_SIZE = 100000`) bez surového JSON sloupce `payload` a bez událostí `market_lifecycle` / `market_resolved`.
+- **Kraken Spot Trades** (`kraken/spot/<SYMBOL>/trades/<SYMBOL>-trades-<YYYY-MM-DD>.parquet`): Rozbalí pole `payload.data[]` z `channel="trade", type="update"` do 9 sloupců (`ts`, `trade_timestamp`, `symbol`, `trade_id`, `side`, `ord_type`, `price`, `qty`, `timestamp`) seřazených podle `ts ASC, trade_id ASC` (`ROW_GROUP_SIZE = 100000`).
+- **Coinbase Spot Trades** (`coinbase/spot/<SYMBOL>/trades/<SYMBOL>-trades-<YYYY-MM-DD>.parquet`): Převede události `type="match"` do 8 sloupců (`ts`, `trade_timestamp`, `symbol`, `trade_id`, `side`, `price`, `qty`, `timestamp`) seřazených podle `ts ASC, trade_id ASC` (`ROW_GROUP_SIZE = 100000`).
+- **Polymarket CLOB** (`*-updown-*.parquet`): Vytváří kompaktní **10sloupcové primitivní schéma** (`ts`, `server_ts`, `frame_id`, `event_code`, `is_up`, `is_bid`, `tick`, `size`, `up_token_id`, `down_token_id`) seřazené podle `ts ASC, frame_id ASC` (`ROW_GROUP_SIZE = 100000`) bez surového JSON sloupce `payload` a bez událostí `market_lifecycle` / `market_resolved`.
 
 ### Linux (Bash)
 ```bash

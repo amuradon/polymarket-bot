@@ -3,14 +3,20 @@ package cz.polymarket.bot.data.service;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamListener;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
+import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
+import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
 import cz.polymarket.bot.connector.deribit.DeribitStreamConnector;
+import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
+import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
+import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
 import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
+import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import cz.polymarket.bot.data.web.CollectorStatusDto;
@@ -30,7 +36,7 @@ import java.util.Map;
 
 /**
  * Main orchestrator service for the Data Collector application.
- * Always starts recording Binance, Deribit, and Polymarket WebSocket streams on application startup
+ * Always starts recording Binance, Kraken, Coinbase, Deribit, and Polymarket WebSocket streams on application startup
  * using zero-decode {@code byte[]} Zstandard writing, schedules periodic Polymarket market discovery/resolution
  * checks and Zstandard frame flushes, and exposes runtime status.
  */
@@ -39,6 +45,10 @@ public class DataCollectorService {
 
     private final BinanceStreamConnector binanceConnector;
     private final DailyBinanceStorageManager binanceStorage;
+    private final KrakenStreamConnector krakenConnector;
+    private final DailyKrakenStorageManager krakenStorage;
+    private final CoinbaseStreamConnector coinbaseConnector;
+    private final DailyCoinbaseStorageManager coinbaseStorage;
     private final DeribitStreamConnector deribitConnector;
     private final DailyDeribitStorageManager deribitStorage;
     private final DailyPolyBoltStorageManager polyBoltDailyStorage;
@@ -48,12 +58,17 @@ public class DataCollectorService {
     private final PolymarketClobClient clobClient;
     private final String symbol;
     private final String timeframe;
+    private final boolean krakenUsdtUsdEnabled;
 
     /**
      * Constructs the Data Collector orchestrator service.
      *
      * @param binanceConnector      Binance 5-stream WebSocket connector
      * @param binanceStorage        daily Zstd storage manager for Binance streams
+     * @param krakenConnector       Kraken Spot trade WebSocket connector
+     * @param krakenStorage         daily Zstd storage manager for Kraken Spot trades
+     * @param coinbaseConnector     Coinbase Spot trade WebSocket connector
+     * @param coinbaseStorage       daily Zstd storage manager for Coinbase Spot trades
      * @param deribitConnector      Deribit Futures trade WebSocket connector
      * @param deribitStorage        daily Zstd storage manager for Deribit Futures trades
      * @param polyBoltDailyStorage  daily Zstd storage manager for PolyBolt {@code price.crypto} stream
@@ -63,11 +78,16 @@ public class DataCollectorService {
      * @param clobClient            Polymarket CLOB WebSocket client
      * @param symbol                configured trading symbol (default BTCUSDT)
      * @param timeframe             configured Polymarket market timeframe (default 15m)
+     * @param krakenUsdtUsdEnabled  whether to also listen and collect Kraken {@code USDTUSD} trade stream (default true)
      */
     @Inject
     public DataCollectorService(
             BinanceStreamConnector binanceConnector,
             DailyBinanceStorageManager binanceStorage,
+            KrakenStreamConnector krakenConnector,
+            DailyKrakenStorageManager krakenStorage,
+            CoinbaseStreamConnector coinbaseConnector,
+            DailyCoinbaseStorageManager coinbaseStorage,
             DeribitStreamConnector deribitConnector,
             DailyDeribitStorageManager deribitStorage,
             DailyPolyBoltStorageManager polyBoltDailyStorage,
@@ -78,9 +98,15 @@ public class DataCollectorService {
             @ConfigProperty(name = "polymarket.collector.symbol", defaultValue = "BTCUSDT")
             String symbol,
             @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
-            String timeframe) {
+            String timeframe,
+            @ConfigProperty(name = "polymarket.collector.kraken.usdtusd-enabled", defaultValue = "true")
+            boolean krakenUsdtUsdEnabled) {
         this.binanceConnector = binanceConnector;
         this.binanceStorage = binanceStorage;
+        this.krakenConnector = krakenConnector;
+        this.krakenStorage = krakenStorage;
+        this.coinbaseConnector = coinbaseConnector;
+        this.coinbaseStorage = coinbaseStorage;
         this.deribitConnector = deribitConnector;
         this.deribitStorage = deribitStorage;
         this.polyBoltDailyStorage = polyBoltDailyStorage;
@@ -90,14 +116,18 @@ public class DataCollectorService {
         this.clobClient = clobClient;
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
         this.timeframe = timeframe;
+        this.krakenUsdtUsdEnabled = krakenUsdtUsdEnabled;
         this.binanceConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.krakenConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
+        this.coinbaseConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.deribitConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.clobClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
     }
 
     void onStart(@Observes StartupEvent event) {
-        Log.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s...", symbol, timeframe);
+        Log.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s, krakenUsdtUsdEnabled=%s...",
+                symbol, timeframe, krakenUsdtUsdEnabled);
         try {
             polyBoltClient.startCryptoPriceStream(symbol, new RawWebSocketListener() {
                 @Override
@@ -136,6 +166,28 @@ public class DataCollectorService {
                     binanceStorage.recordBytes(streamType, rawUtf8Bytes, recvTimestampMs);
                 }
             });
+            krakenConnector.start(symbol, krakenUsdtUsdEnabled, new KrakenStreamListener() {
+                @Override
+                public void onStreamMessage(String normalizedSymbol, String rawJson, long recvTimestampMs) {
+                    krakenStorage.record(normalizedSymbol, rawJson, recvTimestampMs);
+                }
+
+                @Override
+                public void onStreamFrame(String normalizedSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                    krakenStorage.recordBytes(normalizedSymbol, rawUtf8Bytes, recvTimestampMs);
+                }
+            });
+            coinbaseConnector.start(symbol, new CoinbaseStreamListener() {
+                @Override
+                public void onStreamMessage(String normalizedSymbol, String rawJson, long recvTimestampMs) {
+                    coinbaseStorage.record(normalizedSymbol, rawJson, recvTimestampMs);
+                }
+
+                @Override
+                public void onStreamFrame(String normalizedSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                    coinbaseStorage.recordBytes(normalizedSymbol, rawUtf8Bytes, recvTimestampMs);
+                }
+            });
             deribitConnector.start(symbol, new RawWebSocketListener() {
                 @Override
                 public void onMessage(String rawJson, long recvTs) {
@@ -160,10 +212,14 @@ public class DataCollectorService {
     void onStop(@Observes ShutdownEvent event) {
         Log.info("Shutting down Data Collector and closing Zstd streams...");
         binanceConnector.stop();
+        krakenConnector.stop();
+        coinbaseConnector.stop();
         deribitConnector.stop();
         polymarketCoordinator.stop();
         polyBoltClient.stop();
         binanceStorage.closeAll();
+        krakenStorage.closeAll();
+        coinbaseStorage.closeAll();
         deribitStorage.closeAll();
         polyBoltDailyStorage.closeAll();
     }
@@ -198,6 +254,8 @@ public class DataCollectorService {
     @Scheduled(every = "${polymarket.collector.flush-interval:5s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledFlush() {
         binanceStorage.flushAll();
+        krakenStorage.flushAll();
+        coinbaseStorage.flushAll();
         deribitStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
@@ -212,6 +270,9 @@ public class DataCollectorService {
         Map<String, String> binanceStates = new LinkedHashMap<>();
         binanceConnector.getConnectionStates().forEach((type, state) -> binanceStates.put(type.name(), state.name()));
 
+        Map<String, String> krakenStates = new LinkedHashMap<>();
+        krakenConnector.getConnectionStates().forEach((sym, state) -> krakenStates.put(sym, state.name()));
+
         Map<String, String> clobStates = new LinkedHashMap<>();
         clobClient.getConnectionStates().forEach((slug, state) -> clobStates.put(slug, state.name()));
 
@@ -219,12 +280,17 @@ public class DataCollectorService {
                 symbol,
                 timeframe,
                 binanceStates,
+                krakenUsdtUsdEnabled,
+                krakenStates,
+                coinbaseConnector.getState().name(),
                 deribitConnector.getState().name(),
                 polyBoltClient.getTwapState().name(),
                 polyBoltClient.getCryptoPriceState().name(),
                 clobStates,
                 polymarketCoordinator.getTrackedMarketSlugs(),
                 binanceStorage.getTotalRecordsWritten(),
+                krakenStorage.getTotalRecordsWritten(),
+                coinbaseStorage.getTotalRecordsWritten(),
                 deribitStorage.getTotalRecordsWritten(),
                 polyBoltDailyStorage.getTotalRecordsWritten(),
                 polymarketStorage.getTotalRecordsWritten()

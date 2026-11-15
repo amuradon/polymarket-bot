@@ -3,7 +3,9 @@ package cz.polymarket.bot.data.web;
 import com.github.luben.zstd.ZstdInputStream;
 import cz.polymarket.bot.data.MockMarketStreamsTestResource;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
+import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
 import cz.polymarket.bot.data.storage.DailyDeribitStorageManager;
+import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import io.quarkus.test.common.QuarkusTestResource;
@@ -31,9 +33,10 @@ import static org.hamcrest.Matchers.hasSize;
 
 /**
  * Full-system integration test verifying that the Data Collector application automatically connects
- * on startup to all mocked Binance and Polymarket streams, tracks the current market plus 5 lookahead
- * future markets (6 total), writes daily Binance and PolyBolt ({@code price.crypto} and {@code price.crypto.twap})
- * files as well as per-market {@code .jsonl.zst} files to disk, and reports live status.
+ * on startup to all mocked Binance, Kraken, Coinbase, Deribit, and Polymarket streams, tracks the current
+ * market plus 5 lookahead future markets (6 total), writes daily Binance, Kraken, Coinbase, Deribit, and
+ * PolyBolt ({@code price.crypto} and {@code price.crypto.twap}) files as well as per-market {@code .jsonl.zst}
+ * files to disk, and reports live status.
  */
 @QuarkusTest
 @QuarkusTestResource(MockMarketStreamsTestResource.class)
@@ -41,6 +44,12 @@ class CollectorStatusResourceTest {
 
     @Inject
     DailyBinanceStorageManager binanceStorage;
+
+    @Inject
+    DailyKrakenStorageManager krakenStorage;
+
+    @Inject
+    DailyCoinbaseStorageManager coinbaseStorage;
 
     @Inject
     DailyDeribitStorageManager deribitStorage;
@@ -69,16 +78,24 @@ class CollectorStatusResourceTest {
                         .body("binanceStreams.FUTURES_DIFF_DEPTH_100MS", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_PARTIAL_DEPTH_100MS", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_FORCE_ORDER", equalTo("CONNECTED"))
+                        .body("krakenUsdtUsdEnabled", equalTo(true))
+                        .body("krakenStreams.USDTUSD", equalTo("CONNECTED"))
+                        .body("krakenStreams.BTCUSD", equalTo("CONNECTED"))
+                        .body("coinbaseStreamState", equalTo("CONNECTED"))
                         .body("deribitStreamState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltTwapState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltCryptoPriceState", equalTo("CONNECTED"))
                         .body("trackedPolymarketSlugs", hasSize(6))
                         .body("binanceRecordsWritten", greaterThanOrEqualTo(5))
+                        .body("krakenRecordsWritten", greaterThanOrEqualTo(2))
+                        .body("coinbaseRecordsWritten", greaterThanOrEqualTo(1))
                         .body("deribitRecordsWritten", greaterThanOrEqualTo(1))
                         .body("polyBoltRecordsWritten", greaterThanOrEqualTo(2))
                         .body("polymarketRecordsWritten", greaterThanOrEqualTo(18)));
 
         binanceStorage.flushAll();
+        krakenStorage.flushAll();
+        coinbaseStorage.flushAll();
         deribitStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
@@ -89,8 +106,37 @@ class CollectorStatusResourceTest {
             zstFiles = walk.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
         }
 
-        // 5 daily Binance stream files + 1 daily Deribit trades file + 2 daily PolyBolt files + 6 Polymarket market files = 14 .jsonl.zst files
-        assertThat(zstFiles).hasSize(14);
+        // 5 daily Binance + 2 daily Kraken (USDTUSD, BTCUSD) + 1 daily Coinbase (BTCUSD) + 1 daily Deribit + 2 daily PolyBolt + 6 Polymarket = 17 .jsonl.zst files
+        assertThat(zstFiles).hasSize(17);
+
+        // Verify daily Kraken trades files (USDTUSD and BTCUSD)
+        Path krakenUsdtTradesDir = root.resolve("kraken/spot/USDTUSD/trades");
+        List<Path> krakenUsdtFiles;
+        try (Stream<Path> list = Files.list(krakenUsdtTradesDir)) {
+            krakenUsdtFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(krakenUsdtFiles).hasSize(1);
+        List<String> krakenUsdtLines = readZstLines(krakenUsdtFiles.get(0));
+        assertThat(krakenUsdtLines).anyMatch(l -> l.contains("\"symbol\":\"USDT/USD\"") && l.contains("1.0001"));
+
+        Path krakenBtcTradesDir = root.resolve("kraken/spot/BTCUSD/trades");
+        List<Path> krakenBtcFiles;
+        try (Stream<Path> list = Files.list(krakenBtcTradesDir)) {
+            krakenBtcFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(krakenBtcFiles).hasSize(1);
+        List<String> krakenBtcLines = readZstLines(krakenBtcFiles.get(0));
+        assertThat(krakenBtcLines).anyMatch(l -> l.contains("\"symbol\":\"BTC/USD\"") && l.contains("78450.0"));
+
+        // Verify daily Coinbase trades file (BTCUSD)
+        Path coinbaseBtcTradesDir = root.resolve("coinbase/spot/BTCUSD/trades");
+        List<Path> coinbaseBtcFiles;
+        try (Stream<Path> list = Files.list(coinbaseBtcTradesDir)) {
+            coinbaseBtcFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(coinbaseBtcFiles).hasSize(1);
+        List<String> coinbaseBtcLines = readZstLines(coinbaseBtcFiles.get(0));
+        assertThat(coinbaseBtcLines).anyMatch(l -> l.contains("\"product_id\":\"BTC-USD\"") && l.contains("78455.25"));
 
         // Verify daily Deribit trades file
         Path deribitTradesDir = root.resolve("deribit/futures/BTC-PERPETUAL/trades");

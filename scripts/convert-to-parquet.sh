@@ -167,6 +167,10 @@ get_stream_type() {
     path_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     if [[ "$path_lower" =~ /binance/spot/.*/aggtrades/ ]] || [[ "$path_lower" =~ spot.*aggtrades ]]; then
         echo "binance-spot-aggtrades"
+    elif [[ "$path_lower" =~ /kraken/spot/.*/trades/ ]] || [[ "$path_lower" =~ kraken.*trades ]]; then
+        echo "kraken-spot-trades"
+    elif [[ "$path_lower" =~ /coinbase/spot/.*/trades/ ]] || [[ "$path_lower" =~ coinbase.*trades ]]; then
+        echo "coinbase-spot-trades"
     elif [[ "$path_lower" =~ /binance/futures/.*/aggtrades/ ]] || [[ "$path_lower" =~ futures.*aggtrades ]]; then
         echo "binance-futures-aggtrades"
     elif [[ "$path_lower" =~ forceorder ]]; then
@@ -333,6 +337,42 @@ SELECT
     CAST(payload->>'M' AS BOOLEAN) AS is_best_match
 FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC
+EOF
+            ;;
+        "kraken-spot-trades")
+            cat <<EOF
+SELECT 
+    ts,
+    CAST(epoch_ns(TRY_CAST(t->>'timestamp' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
+    t->>'symbol' AS symbol,
+    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
+    t->>'side' AS side,
+    t->>'ord_type' AS ord_type,
+    CAST(t->>'price' AS DOUBLE) AS price,
+    CAST(t->>'qty' AS DOUBLE) AS qty,
+    t->>'timestamp' AS timestamp
+FROM (
+    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
+    FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+    WHERE payload->>'channel' = 'trade' AND payload->>'type' = 'update'
+)
+ORDER BY ts ASC, trade_id ASC
+EOF
+            ;;
+        "coinbase-spot-trades")
+            cat <<EOF
+SELECT 
+    ts,
+    CAST(epoch_ns(TRY_CAST(payload->>'time' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
+    payload->>'product_id' AS symbol,
+    CAST(payload->>'trade_id' AS BIGINT) AS trade_id,
+    payload->>'side' AS side,
+    CAST(payload->>'price' AS DOUBLE) AS price,
+    CAST(payload->>'size' AS DOUBLE) AS qty,
+    payload->>'time' AS timestamp
+FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+WHERE payload->>'type' = 'match'
+ORDER BY ts ASC, trade_id ASC
 EOF
             ;;
         "binance-futures-aggtrades")
@@ -644,7 +684,7 @@ while IFS=$'\t' read -r src_path src_size; do
             effective_threads=2
         fi
         effective_row_group_size=25000
-    elif [ "$stream_type" = "polymarket-clob-market" ]; then
+    elif [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ]; then
         effective_row_group_size=100000
     fi
 

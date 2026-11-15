@@ -101,6 +101,25 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                                 ws.writeTextMessage("{\"event_type\":\"last_trade_price\",\"price\":\"0.50\",\"size\":\"25\",\"side\":\"BUY\"}");
                             }
                         });
+                    } else if (path.equals("/kraken/ws/v2")) {
+                        ws.textMessageHandler(msg -> {
+                            if (msg.contains("\"method\":\"subscribe\"") && msg.contains("\"channel\":\"trade\"")) {
+                                if (msg.contains("\"USDT/USD\"")) {
+                                    ws.writeTextMessage("{\"method\":\"subscribe\",\"result\":{\"channel\":\"trade\",\"symbol\":\"USDT/USD\"},\"success\":true}");
+                                    ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0001,\"qty\":500.0,\"ord_type\":\"limit\",\"trade_id\":9001,\"timestamp\":\"2026-11-13T00:00:00.127740Z\"}]}");
+                                } else if (msg.contains("\"BTC/USD\"")) {
+                                    ws.writeTextMessage("{\"method\":\"subscribe\",\"result\":{\"channel\":\"trade\",\"symbol\":\"BTC/USD\"},\"success\":true}");
+                                    ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"sell\",\"price\":78450.0,\"qty\":0.05,\"ord_type\":\"market\",\"trade_id\":9002,\"timestamp\":\"2026-11-13T00:00:00.250000Z\"}]}");
+                                }
+                            }
+                        });
+                    } else if (path.equals("/coinbase/ws")) {
+                        ws.textMessageHandler(msg -> {
+                            if (msg.contains("\"type\":\"subscribe\"") && msg.contains("\"matches\"") && msg.contains("\"BTC-USD\"")) {
+                                ws.writeTextMessage("{\"type\":\"subscriptions\",\"channels\":[{\"name\":\"matches\",\"product_ids\":[\"BTC-USD\"]}]}");
+                                ws.writeTextMessage("{\"type\":\"match\",\"trade_id\":8001,\"maker_order_id\":\"m1\",\"taker_order_id\":\"t1\",\"side\":\"buy\",\"size\":\"0.12000000\",\"price\":\"78455.25\",\"product_id\":\"BTC-USD\",\"sequence\":123456,\"time\":\"2026-11-13T00:00:00.090223Z\"}");
+                            }
+                        });
                     } else if (path.equals("/deribit/ws/api/v2")) {
                         ws.textMessageHandler(msg -> {
                             if (msg.contains("public/auth")) {
@@ -121,6 +140,8 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     Map.entry("polymarket.collector.flush-interval", "1s"),
                     Map.entry("polymarket.connector.binance.spot-ws-base-url", "ws://localhost:" + port + "/binance/spot"),
                     Map.entry("polymarket.connector.binance.futures-ws-base-url", "ws://localhost:" + port + "/binance/futures"),
+                    Map.entry("polymarket.connector.kraken.spot-ws-url", "ws://localhost:" + port + "/kraken/ws/v2"),
+                    Map.entry("polymarket.connector.coinbase.spot-ws-url", "ws://localhost:" + port + "/coinbase/ws"),
                     Map.entry("polymarket.connector.deribit.ws-url", "ws://localhost:" + port + "/deribit/ws/api/v2"),
                     Map.entry("polymarket.connector.gamma.base-url", "http://localhost:" + port + "/gamma"),
                     Map.entry("polymarket.connector.polybolt.ws-url", "ws://localhost:" + port + "/polybolt/ws"),
