@@ -78,7 +78,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 50L,
@@ -97,7 +96,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 20L,
@@ -140,7 +138,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0L, // synchronous for this test
@@ -191,7 +188,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0L,
@@ -240,11 +236,9 @@ class PaperTradingEngineTest {
 
     @Test
     void shouldAccumulateMultiBatchAndBidirectionalPositionsAndResolveAtExpiration() {
-        cz.polymarket.bot.service.TwapEngine mockTwapEngine = mock(cz.polymarket.bot.service.TwapEngine.class);
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                mockTwapEngine,
                 priceCache,
                 "utter_paramecium",
                 0L,
@@ -254,9 +248,8 @@ class PaperTradingEngineTest {
 
         assertThat(engine.getActiveStrategyName()).isEqualTo("UtterParameciumStrategy");
 
-        // Starting PaperTradingEngine with UtterParameciumStrategy must NOT register with TwapEngine or seed Binance candles
+        // Starting PaperTradingEngine with UtterParameciumStrategy must NOT seed Binance candles
         engine.onStart(new io.quarkus.runtime.StartupEvent());
-        verifyNoInteractions(mockTwapEngine);
         verifyNoInteractions(binanceHistoricalClient);
 
         long tStart = 1785542400L;
@@ -305,7 +298,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0L,
@@ -322,7 +314,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0L,
@@ -391,7 +382,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0L,
@@ -449,7 +439,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0,
@@ -488,7 +477,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "TWAPArbitrageStrategy",
                 0,
@@ -521,7 +509,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "utter_paramecium",
                 0L,
@@ -557,7 +544,6 @@ class PaperTradingEngineTest {
         PaperTradingEngine engine = new PaperTradingEngine(
                 registry,
                 repository,
-                null,
                 priceCache,
                 "utter_paramecium",
                 0L,

@@ -19,13 +19,13 @@ flowchart TD
     end
 
     subgraph TradingLayer["Trading Layer"]
-        trading["trading<br/>(TwapEngine, PriceTracker, Reconstructor, Web/WS/UI)"]
+        trading["trading<br/>(Shared Exchange Clients & Payload Parsers)"]
     end
 
     subgraph Applications["Standalone Executable Applications"]
         data["data<br/>(Market Data Collector Quarkus App)"]
-        live["live<br/>(Live Trading Quarkus App, /btc-usd)"]
-        paper["paper<br/>(Paper Trading Quarkus App, /btc-usd)"]
+        live["live<br/>(Live Trading Quarkus App)"]
+        paper["paper<br/>(Paper Trading Quarkus App)"]
         backtest["backtest<br/>(Backtest Engine Quarkus App)"]
     end
 
@@ -77,8 +77,8 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ## 3. Submodule Responsibilities
 
 ### `common`
-- **Domain Models**: Immutable records and compact structures for timeframes, candles, order book quotes, price snapshots, and trade records.
-- **Calculators & Math**: Quantitative calculators for rolling TWAP, VWAP, median, realized volatility, position sizing, and performance metrics.
+- **Domain Models**: Immutable records and compact structures for timeframes, candles, order book quotes, and trade records.
+- **Calculators & Math**: Quantitative calculators for rolling calculated Spot & 60s TWAP (`CalculatedSpotTwapEngine`), VWAP, realized volatility, position sizing, and performance metrics.
 - **In-Memory Cache**: Sliding 3600-second window price caching for low-latency lookups.
 - **Strategy & Execution Contracts**: Core strategy interfaces, execution routing contracts, strategy registry, and shared trading strategies that execute identically across backtest, paper, and live modes.
 
@@ -98,10 +98,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 - **Status Endpoint**: Exposes `/api/collector/status` for monitoring active streams and storage health.
 
 ### `trading`
-- **Exchange Trackers & Reconstructors**: Multi-exchange WebSocket price trackers, historical candle clients, payload parsers, and startup state reconstruction.
-- **Engines**: Real-time multi-exchange TWAP engine (1-second tick loop, candle rollover lifecycle, timestamp synchronization), conditionally started only when required by the active strategy.
-- **Web & Streaming**: REST endpoints, WebSocket streaming endpoints, Qute templates, and frontend assets for real-time charting and monitoring.
-- **Configuration**: Runtime configuration bindings for charting and view ranges.
+- **Exchange Clients & Parsers**: Historical candle REST clients (`BinanceHistoricalClient`) and payload parsers (`ExchangePayloadParser`) shared across `paper` and `live` applications.
 
 ### `live`
 - Standalone runnable Quarkus application for live real-money execution.

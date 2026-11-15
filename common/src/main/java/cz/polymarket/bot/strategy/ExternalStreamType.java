@@ -39,10 +39,5 @@ public enum ExternalStreamType {
     /**
      * Deribit Perpetual Futures trade stream ({@code deribit/futures/<INSTRUMENT>/trades}).
      */
-    DERIBIT_FUTURES_TRADES,
-
-    /**
-     * Multi-exchange (Binance, Coinbase, Kraken) aggregated TWAP engine stream ({@code TwapEngine}).
-     */
-    TWAP_ENGINE
+    DERIBIT_FUTURES_TRADES
 }

@@ -11,12 +11,12 @@ import static org.hamcrest.Matchers.containsString;
 class PaperTradingApplicationTest {
 
     @Test
-    void shouldServeBtcUsdConsoleInPaperMode() {
+    void shouldServePaperDashboardInPaperMode() {
         given()
-                .when().get("/btc-usd")
+                .when().get("/")
                 .then()
                 .statusCode(200)
                 .contentType(ContentType.HTML)
-                .body(containsString("BTC-USD TWAP Console"));
+                .body(containsString("Polymarket Bot :: Paper Trading"));
     }
 }

@@ -8,16 +8,13 @@ import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.exchange.BinanceHistoricalClient;
 import cz.polymarket.bot.paper.storage.PaperTradeRepository;
-import cz.polymarket.bot.service.TwapEngine;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
-import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,7 +42,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     private final StrategyRegistry strategyRegistry;
     private final PaperTradeRepository repository;
-    private final TwapEngine twapEngine;
     private final HourlyPriceCache priceCache;
     private final String strategyName;
     private final long orderLatencyMs;
@@ -69,7 +65,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     public PaperTradingEngine(
             StrategyRegistry strategyRegistry,
             PaperTradeRepository repository,
-            TwapEngine twapEngine,
             HourlyPriceCache priceCache,
             @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "TWAPArbitrageStrategy") String strategyName,
             @ConfigProperty(name = "polymarket.paper.order-latency-ms", defaultValue = "50") long orderLatencyMs,
@@ -87,7 +82,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
         this.strategyRegistry = strategyRegistry;
         this.repository = repository;
-        this.twapEngine = twapEngine;
         this.priceCache = priceCache != null ? priceCache : new HourlyPriceCache(3600L);
         this.strategyName = strategyName;
         this.orderLatencyMs = Math.max(0, orderLatencyMs);
@@ -100,14 +94,14 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 this.activeStrategy.getName(), this.orderLatencyMs);
     }
 
-    private boolean requiresTwapEngine() {
+    private boolean shouldSeedHistoricalCandles() {
         return activeStrategy.getRequiredExternalStreams() != null
-                && activeStrategy.getRequiredExternalStreams().contains(ExternalStreamType.TWAP_ENGINE);
+                && !activeStrategy.getRequiredExternalStreams().isEmpty();
     }
 
     void onStart(@Observes StartupEvent ev) {
-        if (!requiresTwapEngine()) {
-            Log.infof("Active strategy '%s' does not require TWAP_ENGINE; skipping TwapEngine listener and Binance historical seeding",
+        if (!shouldSeedHistoricalCandles()) {
+            Log.infof("Active strategy '%s' does not require external exchange streams; skipping Binance historical seeding",
                     activeStrategy.getName());
             return;
         }
@@ -119,11 +113,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
             });
         } else if (binanceHistoricalClient != null) {
             seedInitialCandles();
-        }
-
-        if (twapEngine != null) {
-            Log.infof("Registering PaperTradingEngine listener with TwapEngine...");
-            twapEngine.registerListener(this::onTwapUpdate);
         }
     }
 
@@ -144,12 +133,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
             }
         } catch (Exception e) {
             Log.warnf("Failed to seed initial candles from Binance: %s", e.getMessage());
-        }
-    }
-
-    void onStop(@Observes ShutdownEvent ev) {
-        if (requiresTwapEngine() && twapEngine != null) {
-            twapEngine.removeListener(this::onTwapUpdate);
         }
     }
 
