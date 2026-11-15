@@ -17,8 +17,8 @@ import java.util.stream.Stream;
 /**
  * Quarkus test resource starting an embedded Vert.x server that mocks all external streams:
  * <ul>
- *   <li>Binance Spot WebSocket ({@code @aggTrade})</li>
- *   <li>Binance Futures WebSocket ({@code @aggTrade})</li>
+ *   <li>Binance Spot WebSockets ({@code @aggTrade}, {@code @bookTicker})</li>
+ *   <li>Binance Futures WebSockets ({@code @aggTrade}, {@code @bookTicker})</li>
  *   <li>Kraken Spot v2 WebSocket ({@code /kraken/ws/v2})</li>
  *   <li>Coinbase Exchange Spot WebSocket ({@code /coinbase/ws})</li>
  *   <li>Polymarket Gamma HTTP API ({@code /gamma/markets/slug/...})</li>
@@ -67,10 +67,16 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                 .webSocketHandler(ws -> {
                     String path = ws.path();
                     if (path.startsWith("/binance/spot/")) {
-                        ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600100,\"s\":\"BTCUSDT\",\"a\":1001,\"p\":\"78450.10\",\"q\":\"0.25\",\"m\":false}");
+                        if (path.endsWith("@aggTrade")) {
+                            ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600100,\"s\":\"BTCUSDT\",\"a\":1001,\"p\":\"78450.10\",\"q\":\"0.25\",\"m\":false}");
+                        } else if (path.endsWith("@bookTicker")) {
+                            ws.writeTextMessage("{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"78450.00\",\"B\":\"1.25\",\"a\":\"78450.10\",\"A\":\"0.80\"}");
+                        }
                     } else if (path.startsWith("/binance/futures/")) {
                         if (path.endsWith("@aggTrade")) {
                             ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600110,\"s\":\"BTCUSDT\",\"a\":2001,\"p\":\"78451.00\",\"q\":\"1.50\",\"m\":true}");
+                        } else if (path.endsWith("@bookTicker")) {
+                            ws.writeTextMessage("{\"e\":\"bookTicker\",\"u\":400900218,\"s\":\"BTCUSDT\",\"b\":\"78450.50\",\"B\":\"2.50\",\"a\":\"78451.00\",\"A\":\"1.75\",\"T\":1789041600115,\"E\":1789041600116}");
                         }
                     } else if (path.equals("/polybolt/ws")) {
                         AtomicBoolean authed = new AtomicBoolean(false);

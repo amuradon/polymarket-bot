@@ -59,7 +59,7 @@ public class DataCollectorService {
     /**
      * Constructs the Data Collector orchestrator service.
      *
-     * @param binanceConnector      Binance Spot & Futures {@code aggTrades} WebSocket connector
+     * @param binanceConnector      Binance Spot & Futures {@code aggTrades} and {@code bookTicker} WebSocket connector
      * @param binanceStorage        daily Zstd storage manager for Binance streams
      * @param krakenConnector       Kraken Spot trade WebSocket connector
      * @param krakenStorage         daily Zstd storage manager for Kraken Spot trades

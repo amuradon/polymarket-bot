@@ -84,7 +84,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 
 ### `connector`
 - **Resilient WebSocket Core**: Reconnecting WebSocket stream abstractions, connection state management, and raw/parsed listener contracts.
-- **Binance Connectors**: Connectors for Binance Spot and USD-M Futures `aggTrades` streams.
+- **Binance Connectors**: Connectors for Binance Spot and USD-M Futures `aggTrades` and `bookTicker` streams (`SPOT_AGG_TRADES`, `SPOT_BOOK_TICKER`, `FUTURES_AGG_TRADES`, `FUTURES_BOOK_TICKER`).
 - **Kraken Connectors**: Kraken Spot v2 WebSocket stream connector (`wss://ws.kraken.com/v2`) for `trade` channel updates (`USDTUSD` and configured symbol, e.g., `BTCUSD`, `ETHUSD`, `SOLUSD`) with dedicated event-loop I/O reader and zero-decode frame filtering.
 - **Coinbase Connectors**: Coinbase Exchange Spot WebSocket stream connector (`wss://ws-feed.exchange.coinbase.com`) for `matches` trade streams (`BTC-USD`, `ETH-USD`, `SOL-USD`) with dedicated event-loop I/O reader and zero-decode frame filtering.
 - **Polymarket Connectors**: Clients for Gamma market discovery and resolution polling, PolyBolt v2 (`wss://ws-live-v2.polymarket.com/ws`) for `price.crypto.twap` (60s TWAP) and `price.crypto`, and per-market CLOB order book and trade WebSocket streams.
@@ -93,7 +93,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 ### `data`
 - Standalone runnable Quarkus application (`quarkus.http.port=8084`) for low-latency raw stream recording in AWS `eu-west`.
 - **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format with zero WebSocket JSON parsing overhead.
-- **Binance, Kraken, Coinbase & PolyBolt Daily Files**: Writes the 2 Binance `aggTrades` streams (`SPOT_AGG_TRADES`, `FUTURES_AGG_TRADES`), the Kraken Spot `trade` streams (`<SYMBOL>` and optionally `USDTUSD` controlled by `polymarket.collector.kraken.usdtusd-enabled`), the Coinbase Spot `matches` trade stream (`<SYMBOL>`), and the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
+- **Binance, Kraken, Coinbase & PolyBolt Daily Files**: Writes the 4 Binance streams (`SPOT_AGG_TRADES`, `SPOT_BOOK_TICKER`, `FUTURES_AGG_TRADES`, `FUTURES_BOOK_TICKER`), the Kraken Spot `trade` streams (`<SYMBOL>` and optionally `USDTUSD` controlled by `polymarket.collector.kraken.usdtusd-enabled`), the Coinbase Spot `matches` trade stream (`<SYMBOL>`), and the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
 - **Polymarket Per-Market Lifecycle Files**: Records the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
 - **Status Endpoint**: Exposes `/api/collector/status` for monitoring active streams and storage health.
 

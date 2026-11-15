@@ -1,12 +1,15 @@
 package cz.polymarket.bot.connector.binance;
 
 /**
- * Enumeration of Binance Spot and USD-M Futures {@code aggTrades} WebSocket streams collected for backtesting and live execution.
+ * Enumeration of Binance Spot and USD-M Futures {@code aggTrades} and {@code bookTicker} WebSocket streams
+ * collected for backtesting and live execution.
  */
 public enum BinanceStreamType {
 
     SPOT_AGG_TRADES("spot", "aggTrades", "", "@aggTrade", true),
-    FUTURES_AGG_TRADES("futures", "aggTrades", "/market/ws", "@aggTrade", false);
+    SPOT_BOOK_TICKER("spot", "bookTicker", "", "@bookTicker", true),
+    FUTURES_AGG_TRADES("futures", "aggTrades", "/market/ws", "@aggTrade", false),
+    FUTURES_BOOK_TICKER("futures", "bookTicker", "/public/ws", "@bookTicker", false);
 
     private final String marketCategory;
     private final String streamFolder;
@@ -32,7 +35,7 @@ public enum BinanceStreamType {
     }
 
     /**
-     * Returns the stream subfolder and file descriptor ("aggTrades").
+     * Returns the stream subfolder and file descriptor ("aggTrades", "bookTicker").
      *
      * @return stream folder name
      */
@@ -41,7 +44,7 @@ public enum BinanceStreamType {
     }
 
     /**
-     * Returns the Binance WebSocket stream suffix (e.g. "@aggTrade").
+     * Returns the Binance WebSocket stream suffix (e.g. "@aggTrade", "@bookTicker").
      *
      * @return stream suffix
      */

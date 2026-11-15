@@ -5,13 +5,17 @@
     Also supports cleaning up remote files that were already downloaded previously.
 
 .DESCRIPTION
-    Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files (Binance Spot & Futures,
-    Deribit Futures trades, Polymarket PolyBolt) and per-market Polymarket CLOB files for the specified UTC date (YYYY-MM-DD),
-    streams them via tar directly into the local destination directory without creating intermediate archives on EC2, verifies
-    every file's byte size locally, and upon 100% verification deletes the downloaded files from the remote EBS volume.
+    Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files (Binance Spot & Futures
+    aggTrades and bookTicker, Kraken Spot trades including USDTUSD, Coinbase Spot trades, Polymarket PolyBolt) and per-market
+    Polymarket CLOB files for the specified UTC date (YYYY-MM-DD), streams them via tar directly into the local destination
+    directory without creating intermediate archives on EC2, verifies every file's byte size locally, and upon 100% verification
+    deletes the downloaded files from the remote EBS volume.
 
 .PARAMETER Date
     Target UTC date in YYYY-MM-DD format (e.g. 2026-10-12, 2026-10-15). Optional when using -CleanAlreadyDownloaded.
+
+.PARAMETER Stream
+    Optional substring to filter by stream type, exchange, or symbol (e.g. 'bookTicker', 'aggTrades', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
 
 .PARAMETER DestinationDir
     Local root directory for collector data. Defaults to 'D:\Crypto\data\Polymarket\collector'.
@@ -42,6 +46,9 @@ param(
     [Parameter(ParameterSetName = "Download", Mandatory = $true, Position = 0, HelpMessage = "Target UTC date in YYYY-MM-DD format")]
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')]
     [string]$Date,
+
+    [Parameter(ParameterSetName = "Download")]
+    [string]$Stream = "",
 
     [Parameter(ParameterSetName = "CleanOnly", Mandatory = $true)]
     [switch]$CleanAlreadyDownloaded,
@@ -205,6 +212,9 @@ if ($Date -eq $utcToday -and -not $KeepRemoteFiles) {
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host " Polymarket Data Collector - Daily Archive Downloader" -ForegroundColor Cyan
 Write-Host " Target Date (UTC) : $Date" -ForegroundColor White
+if ($Stream) {
+    Write-Host " Stream Filter     : $Stream" -ForegroundColor Yellow
+}
 Write-Host " EC2 Instance Host : $Ec2Host" -ForegroundColor White
 Write-Host " Remote Base Dir   : $RemoteBaseDir" -ForegroundColor White
 Write-Host " Local Destination : $DestinationDir" -ForegroundColor White
@@ -222,6 +232,7 @@ $remotePythonScript = @"
 import os, datetime
 
 date_str = "$Date"
+stream_filter = "$Stream".lower()
 try:
     day_start = int(datetime.datetime.strptime(date_str + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
 except Exception as e:
@@ -234,14 +245,16 @@ if not os.path.exists(base):
     print(f"ERROR: Base directory {base} does not exist")
     exit(1)
 
-manifest_lines = []
-files_lines = []
+manifest_entries = []
 
 for root, dirs, files in os.walk(base):
     for f in files:
         if not f.endswith(".jsonl.zst"):
             continue
         full_path = os.path.join(root, f)
+        rel = os.path.relpath(full_path, base).replace('\\\\', '/')
+        if stream_filter and (stream_filter not in rel.lower()):
+            continue
         matched = False
         if ("-" + date_str + ".jsonl.zst") in f:
             matched = True
@@ -255,10 +268,12 @@ for root, dirs, files in os.walk(base):
                 except ValueError:
                     pass
         if matched:
-            rel = os.path.relpath(full_path, base).replace('\\\\', '/')
             size = os.path.getsize(full_path)
-            manifest_lines.append(f"{rel}\t{size}")
-            files_lines.append(rel)
+            manifest_entries.append((rel, size))
+
+manifest_entries.sort(key=lambda x: x[0])
+manifest_lines = [f"{r}\t{s}" for r, s in manifest_entries]
+files_lines = [r for r, _ in manifest_entries]
 
 manifest_path = f"/tmp/collector-{date_str}.manifest"
 files_path = f"/tmp/collector-{date_str}.files"

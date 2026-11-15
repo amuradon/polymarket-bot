@@ -8,7 +8,7 @@ import java.util.Map;
  *
  * @param symbol                             configured trading symbol (e.g. BTCUSDT)
  * @param timeframe                          configured Polymarket market timeframe (e.g. 15m)
- * @param binanceStreams                     connection state of each of the Binance {@code aggTrades} WebSocket streams
+ * @param binanceStreams                     connection state of each of the 4 Binance ({@code aggTrades} and {@code bookTicker}) WebSocket streams
  * @param krakenUsdtUsdEnabled               whether listening and collecting of the Kraken {@code USDTUSD} stream is enabled
  * @param krakenStreams                      connection state of each active Kraken Spot trade WebSocket stream (e.g. {@code BTCUSD}, {@code USDTUSD})
  * @param coinbaseStreamState                connection state of the Coinbase Spot trade WebSocket stream

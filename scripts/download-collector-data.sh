@@ -39,6 +39,8 @@ Usage:
 
 Modes:
   -d, --date <YYYY-MM-DD>       Target UTC date (e.g. 2026-10-15).
+  -s, --stream <pattern>        Optional substring filter by stream, exchange, or symbol
+                                (e.g. 'bookTicker', 'aggTrades', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
   -c, --clean-already-downloaded
                                 Scan local files in destination-dir, compare against EC2 files,
                                 and delete verified matching files on EC2.
@@ -65,6 +67,7 @@ EOF
 
 # Default values
 TARGET_DATE=""
+STREAM_FILTER=""
 CLEAN_ALREADY_DOWNLOADED=false
 DESTINATION_DIR=""
 EC2_HOST="i-0e826b5eb507d87be"
@@ -84,6 +87,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--date)
             TARGET_DATE="$2"
+            shift 2
+            ;;
+        -s|--stream)
+            STREAM_FILTER="$2"
             shift 2
             ;;
         -c|--clean-already-downloaded)
@@ -291,6 +298,9 @@ fi
 log_info "================================================================="
 log_info " Polymarket Data Collector - Daily Archive Downloader (Linux)"
 echo -e "${COLOR_WHITE} Target Date (UTC) : ${TARGET_DATE}${COLOR_RESET}"
+if [ -n "$STREAM_FILTER" ]; then
+    log_warn " Stream Filter     : $STREAM_FILTER"
+fi
 echo -e "${COLOR_WHITE} EC2 Instance Host : ${EC2_HOST}${COLOR_RESET}"
 echo -e "${COLOR_WHITE} Remote Base Dir   : ${REMOTE_BASE_DIR}${COLOR_RESET}"
 echo -e "${COLOR_WHITE} Local Destination : ${DESTINATION_DIR}${COLOR_RESET}"
@@ -310,6 +320,7 @@ python3 - << 'PYEOF'
 import os, sys, datetime
 
 date_str = "$TARGET_DATE"
+stream_filter = "$STREAM_FILTER".lower()
 try:
     day_start = int(datetime.datetime.strptime(date_str + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
 except Exception as e:
@@ -322,14 +333,16 @@ if not os.path.exists(base):
     print(f"ERROR: Base directory {base} does not exist")
     sys.exit(1)
 
-manifest_lines = []
-files_lines = []
+manifest_entries = []
 
 for root, dirs, files in os.walk(base):
     for f in files:
         if not f.endswith(".jsonl.zst"):
             continue
         full_path = os.path.join(root, f)
+        rel = os.path.relpath(full_path, base).replace('\\\\', '/')
+        if stream_filter and (stream_filter not in rel.lower()):
+            continue
         matched = False
         if ("-" + date_str + ".jsonl.zst") in f:
             matched = True
@@ -343,10 +356,12 @@ for root, dirs, files in os.walk(base):
                 except ValueError:
                     pass
         if matched:
-            rel = os.path.relpath(full_path, base).replace('\\\\', '/')
             size = os.path.getsize(full_path)
-            manifest_lines.append(f"{rel}\t{size}")
-            files_lines.append(rel)
+            manifest_entries.append((rel, size))
+
+manifest_entries.sort(key=lambda x: x[0])
+manifest_lines = [f"{r}\t{s}" for r, s in manifest_entries]
+files_lines = [r for r, _ in manifest_entries]
 
 manifest_path = f"/tmp/collector-{date_str}.manifest"
 files_path = f"/tmp/collector-{date_str}.files"

@@ -19,7 +19,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for each of the Binance {@code aggTrades} streams,
+ * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for each of the 4 Binance
+ * ({@code aggTrades} and {@code bookTicker} for Spot and USD-M Futures) streams,
  * automatically rotating files at UTC midnight with per-stream lock isolation and zero-decode {@code byte[]} writing.
  */
 @ApplicationScoped

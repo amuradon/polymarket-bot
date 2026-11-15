@@ -136,6 +136,9 @@ function Get-StreamType {
     if ($normalized -like "*/binance/spot/*/aggtrades/*" -or $normalized -like "*spot*aggtrades*") {
         return "binance-spot-aggtrades"
     }
+    if ($normalized -like "*/binance/spot/*/bookticker/*" -or $normalized -like "*spot*bookticker*") {
+        return "binance-spot-bookticker"
+    }
     if ($normalized -like "*/kraken/spot/*/trades/*" -or $normalized -like "*kraken*trades*") {
         return "kraken-spot-trades"
     }
@@ -144,6 +147,9 @@ function Get-StreamType {
     }
     if ($normalized -like "*/binance/futures/*/aggtrades/*" -or $normalized -like "*futures*aggtrades*") {
         return "binance-futures-aggtrades"
+    }
+    if ($normalized -like "*/binance/futures/*/bookticker/*" -or $normalized -like "*futures*bookticker*") {
+        return "binance-futures-bookticker"
     }
     if ($normalized -like "*forceorder*") {
         return "binance-futures-forceorder"
@@ -318,6 +324,20 @@ FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}
 ORDER BY ts ASC
 "@
         }
+        "binance-spot-bookticker" {
+            return @"
+SELECT 
+    ts,
+    CAST(payload->>'u' AS UBIGINT) AS update_id,
+    payload->>'s' AS symbol,
+    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+ORDER BY ts ASC, update_id ASC
+"@
+        }
         "kraken-spot-trades" {
             return @"
 SELECT 
@@ -369,6 +389,22 @@ SELECT
     CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker
 FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC
+"@
+        }
+        "binance-futures-bookticker" {
+            return @"
+SELECT 
+    ts,
+    CAST(payload->>'E' AS UBIGINT) AS event_time,
+    CAST(payload->>'T' AS UBIGINT) AS transaction_time,
+    CAST(payload->>'u' AS UBIGINT) AS update_id,
+    payload->>'s' AS symbol,
+    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+ORDER BY ts ASC, update_id ASC
 "@
         }
         "binance-futures-forceorder" {
@@ -646,7 +682,7 @@ try {
             if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
                 $effectiveThreads = [Math]::Min($Threads, 2)
                 $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
-            } elseif (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+            } elseif (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades", "binance-spot-bookticker", "binance-futures-bookticker") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
                 $effectiveRowGroupSize = 100000
             }
 

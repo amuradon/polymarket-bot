@@ -167,12 +167,16 @@ get_stream_type() {
     path_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     if [[ "$path_lower" =~ /binance/spot/.*/aggtrades/ ]] || [[ "$path_lower" =~ spot.*aggtrades ]]; then
         echo "binance-spot-aggtrades"
+    elif [[ "$path_lower" =~ /binance/spot/.*/bookticker/ ]] || [[ "$path_lower" =~ spot.*bookticker ]]; then
+        echo "binance-spot-bookticker"
     elif [[ "$path_lower" =~ /kraken/spot/.*/trades/ ]] || [[ "$path_lower" =~ kraken.*trades ]]; then
         echo "kraken-spot-trades"
     elif [[ "$path_lower" =~ /coinbase/spot/.*/trades/ ]] || [[ "$path_lower" =~ coinbase.*trades ]]; then
         echo "coinbase-spot-trades"
     elif [[ "$path_lower" =~ /binance/futures/.*/aggtrades/ ]] || [[ "$path_lower" =~ futures.*aggtrades ]]; then
         echo "binance-futures-aggtrades"
+    elif [[ "$path_lower" =~ /binance/futures/.*/bookticker/ ]] || [[ "$path_lower" =~ futures.*bookticker ]]; then
+        echo "binance-futures-bookticker"
     elif [[ "$path_lower" =~ forceorder ]]; then
         echo "binance-futures-forceorder"
     elif [[ "$path_lower" =~ depthdiff ]]; then
@@ -339,6 +343,20 @@ FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, form
 ORDER BY ts ASC
 EOF
             ;;
+        "binance-spot-bookticker")
+            cat <<EOF
+SELECT 
+    ts,
+    CAST(payload->>'u' AS UBIGINT) AS update_id,
+    payload->>'s' AS symbol,
+    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+ORDER BY ts ASC, update_id ASC
+EOF
+            ;;
         "kraken-spot-trades")
             cat <<EOF
 SELECT 
@@ -390,6 +408,22 @@ SELECT
     CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker
 FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC
+EOF
+            ;;
+        "binance-futures-bookticker")
+            cat <<EOF
+SELECT 
+    ts,
+    CAST(payload->>'E' AS UBIGINT) AS event_time,
+    CAST(payload->>'T' AS UBIGINT) AS transaction_time,
+    CAST(payload->>'u' AS UBIGINT) AS update_id,
+    payload->>'s' AS symbol,
+    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
+ORDER BY ts ASC, update_id ASC
 EOF
             ;;
         "binance-futures-forceorder")
@@ -684,7 +718,7 @@ while IFS=$'\t' read -r src_path src_size; do
             effective_threads=2
         fi
         effective_row_group_size=25000
-    elif [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ]; then
+    elif [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ] || [ "$stream_type" = "binance-spot-bookticker" ] || [ "$stream_type" = "binance-futures-bookticker" ]; then
         effective_row_group_size=100000
     fi
 

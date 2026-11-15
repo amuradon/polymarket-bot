@@ -70,7 +70,9 @@ class CollectorStatusResourceTest {
                         .body("symbol", equalTo("BTCUSDT"))
                         .body("timeframe", equalTo("15m"))
                         .body("binanceStreams.SPOT_AGG_TRADES", equalTo("CONNECTED"))
+                        .body("binanceStreams.SPOT_BOOK_TICKER", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_AGG_TRADES", equalTo("CONNECTED"))
+                        .body("binanceStreams.FUTURES_BOOK_TICKER", equalTo("CONNECTED"))
                         .body("krakenUsdtUsdEnabled", equalTo(true))
                         .body("krakenStreams.USDTUSD", equalTo("CONNECTED"))
                         .body("krakenStreams.BTCUSD", equalTo("CONNECTED"))
@@ -78,7 +80,7 @@ class CollectorStatusResourceTest {
                         .body("polymarketPolyBoltTwapState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltCryptoPriceState", equalTo("CONNECTED"))
                         .body("trackedPolymarketSlugs", hasSize(6))
-                        .body("binanceRecordsWritten", greaterThanOrEqualTo(2))
+                        .body("binanceRecordsWritten", greaterThanOrEqualTo(4))
                         .body("krakenRecordsWritten", greaterThanOrEqualTo(2))
                         .body("coinbaseRecordsWritten", greaterThanOrEqualTo(1))
                         .body("polyBoltRecordsWritten", greaterThanOrEqualTo(2))
@@ -96,8 +98,27 @@ class CollectorStatusResourceTest {
             zstFiles = walk.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
         }
 
-        // 2 daily Binance + 2 daily Kraken (USDTUSD, BTCUSD) + 1 daily Coinbase (BTCUSD) + 2 daily PolyBolt + 6 Polymarket = 13 .jsonl.zst files
-        assertThat(zstFiles).hasSize(13);
+        // 4 daily Binance + 2 daily Kraken (USDTUSD, BTCUSD) + 1 daily Coinbase (BTCUSD) + 2 daily PolyBolt + 6 Polymarket = 15 .jsonl.zst files
+        assertThat(zstFiles).hasSize(15);
+
+        // Verify daily Binance Spot and Futures bookTicker files contain host receipt timestamp "ts" and payload
+        Path spotBookTickerDir = root.resolve("binance/spot/BTCUSDT/bookTicker");
+        List<Path> spotBookTickerFiles;
+        try (Stream<Path> list = Files.list(spotBookTickerDir)) {
+            spotBookTickerFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(spotBookTickerFiles).hasSize(1);
+        List<String> spotBookTickerLines = readZstLines(spotBookTickerFiles.get(0));
+        assertThat(spotBookTickerLines).anyMatch(l -> l.startsWith("{\"ts\":") && l.contains("\"u\":400900217") && l.contains("\"b\":\"78450.00\""));
+
+        Path futuresBookTickerDir = root.resolve("binance/futures/BTCUSDT/bookTicker");
+        List<Path> futuresBookTickerFiles;
+        try (Stream<Path> list = Files.list(futuresBookTickerDir)) {
+            futuresBookTickerFiles = list.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
+        }
+        assertThat(futuresBookTickerFiles).hasSize(1);
+        List<String> futuresBookTickerLines = readZstLines(futuresBookTickerFiles.get(0));
+        assertThat(futuresBookTickerLines).anyMatch(l -> l.startsWith("{\"ts\":") && l.contains("\"e\":\"bookTicker\"") && l.contains("\"u\":400900218"));
 
         // Verify daily Kraken trades files (USDTUSD and BTCUSD)
         Path krakenUsdtTradesDir = root.resolve("kraken/spot/USDTUSD/trades");
