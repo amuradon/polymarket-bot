@@ -120,5 +120,13 @@ class CalculatedSpotTwapEngineTest {
         // At t = 90s, the entire 60s window [30s, 90s] was at $80,600 -> TWAP = $80,600
         engine.onBinanceUsdtTrade(90_000L, 80_600.0, 1.0);
         assertThat(engine.getLastTwap60sPriceUsd()).isCloseTo(80_600.0, within(1e-6));
+        assertThat(engine.getLastAssetTimestampMs()).isEqualTo(90_000L);
+
+        // Out-of-order venue tick (timestamp < lastAssetTimestampMs) preserves monotonic lastAssetTimestampMs
+        engine.onKrakenUsdTrade(89_995L, 80_610.0, 0.5);
+        assertThat(engine.getLastAssetTimestampMs()).isEqualTo(90_000L);
+
+        engine.reset();
+        assertThat(engine.getLastAssetTimestampMs()).isEqualTo(-1L);
     }
 }

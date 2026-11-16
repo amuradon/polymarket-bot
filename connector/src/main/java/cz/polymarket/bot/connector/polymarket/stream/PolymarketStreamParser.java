@@ -65,6 +65,15 @@ public class PolymarketStreamParser {
     }
 
     /**
+     * Returns the underlying Jackson {@link ObjectMapper}.
+     *
+     * @return Jackson object mapper
+     */
+    public ObjectMapper getObjectMapper() {
+        return objectMapper;
+    }
+
+    /**
      * Parses a raw PolyBolt v2 WebSocket text frame into zero, one, or more {@link PolyBoltTick} updates
      * using streaming {@link JsonParser} without building a DOM tree.
      * <ul>
@@ -782,7 +791,15 @@ public class PolymarketStreamParser {
         return changed;
     }
 
-    private static double parseCurrentNumberOrText(JsonParser parser) throws IOException {
+    /**
+     * Parses the current Jackson token as a {@code double}, supporting both numeric JSON tokens and
+     * string-encoded decimal numbers via zero-allocation {@code char[]} parsing.
+     *
+     * @param parser active Jackson {@link JsonParser} positioned at a value token
+     * @return parsed {@code double} value, or {@code 0.0} if not a valid number
+     * @throws IOException if token reading fails
+     */
+    public static double parseCurrentNumberOrText(JsonParser parser) throws IOException {
         JsonToken token = parser.currentToken();
         if (token == JsonToken.VALUE_NUMBER_FLOAT || token == JsonToken.VALUE_NUMBER_INT) {
             return parser.getDoubleValue();

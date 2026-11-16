@@ -1,5 +1,14 @@
 package cz.polymarket.bot.paper.engine;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
+import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
+import cz.polymarket.bot.connector.binance.BinanceStreamListener;
+import cz.polymarket.bot.connector.binance.BinanceStreamType;
+import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
+import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
+import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
+import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
@@ -11,11 +20,15 @@ import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import cz.polymarket.bot.trading.stream.CalculatedSpotStreamProcessor;
+import io.quarkus.logging.Log;
+import io.quarkus.runtime.ShutdownEvent;
+import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import io.quarkus.logging.Log;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -27,7 +40,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Paper trading execution engine coordinating virtual order fills with simulated latency,
- * position management, candle settlement, and persistence.
+ * multi-exchange spot stream ingestion ({@link CalculatedSpotTwapEngine}), position management,
+ * candle settlement, and persistence.
  */
 @ApplicationScoped
 public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
@@ -36,8 +50,15 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     private final StrategyRegistry strategyRegistry;
     private final PaperTradeRepository repository;
+    private final BinanceStreamConnector binanceConnector;
+    private final KrakenStreamConnector krakenConnector;
+    private final CoinbaseStreamConnector coinbaseConnector;
+    private final CalculatedSpotTwapEngine calculatedSpotTwapEngine;
+    private final CalculatedSpotStreamProcessor spotStreamProcessor;
     private final String strategyName;
+    private final String symbol;
     private final long orderLatencyMs;
+    private final boolean streamsEnabled;
     private final Vertx vertx;
 
     private final TradingStrategy activeStrategy;
@@ -53,12 +74,33 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     private volatile long currentTimestampSec = 0;
     private volatile OrderBookQuote latestQuote = null;
 
+    /**
+     * Constructs the Paper Trading Engine.
+     *
+     * @param strategyRegistry  registry of available trading strategies
+     * @param repository        persistent paper trade repository
+     * @param binanceConnector  Binance Spot {@code aggTrades} WebSocket connector
+     * @param krakenConnector   Kraken Spot {@code trade} WebSocket connector ({@code USDTUSD} + {@code <SYMBOL>})
+     * @param coinbaseConnector Coinbase Spot {@code matches} WebSocket connector
+     * @param objectMapper      shared Jackson object mapper for streaming JSON parsing
+     * @param strategyName      configured strategy name (defaults to {@code UtterParameciumStrategy})
+     * @param symbol            trading asset symbol (defaults to {@code BTCUSDT})
+     * @param orderLatencyMs    simulated order execution latency in milliseconds
+     * @param streamsEnabled    whether to auto-connect live WebSocket spot streams on startup
+     * @param vertx             Vert.x instance for simulated latency timers
+     */
     @Inject
     public PaperTradingEngine(
             StrategyRegistry strategyRegistry,
             PaperTradeRepository repository,
+            BinanceStreamConnector binanceConnector,
+            KrakenStreamConnector krakenConnector,
+            CoinbaseStreamConnector coinbaseConnector,
+            ObjectMapper objectMapper,
             @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "UtterParameciumStrategy") String strategyName,
+            @ConfigProperty(name = "polymarket.paper.symbol", defaultValue = "BTCUSDT") String symbol,
             @ConfigProperty(name = "polymarket.paper.order-latency-ms", defaultValue = "50") long orderLatencyMs,
+            @ConfigProperty(name = "polymarket.paper.streams-enabled", defaultValue = "true") boolean streamsEnabled,
             Vertx vertx) {
         if (strategyRegistry == null) {
             throw new IllegalArgumentException("strategyRegistry cannot be null");
@@ -66,20 +108,106 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         if (repository == null) {
             throw new IllegalArgumentException("repository cannot be null");
         }
+        if (binanceConnector == null) {
+            throw new IllegalArgumentException("binanceConnector cannot be null");
+        }
+        if (krakenConnector == null) {
+            throw new IllegalArgumentException("krakenConnector cannot be null");
+        }
+        if (coinbaseConnector == null) {
+            throw new IllegalArgumentException("coinbaseConnector cannot be null");
+        }
+        if (objectMapper == null) {
+            throw new IllegalArgumentException("objectMapper cannot be null");
+        }
         if (strategyName == null || strategyName.isBlank()) {
             throw new IllegalArgumentException("strategyName cannot be null or blank");
         }
 
         this.strategyRegistry = strategyRegistry;
         this.repository = repository;
+        this.binanceConnector = binanceConnector;
+        this.krakenConnector = krakenConnector;
+        this.coinbaseConnector = coinbaseConnector;
         this.strategyName = strategyName;
+        this.symbol = (symbol != null && !symbol.isBlank()) ? symbol.trim() : "BTCUSDT";
         this.orderLatencyMs = Math.max(0, orderLatencyMs);
+        this.streamsEnabled = streamsEnabled;
         this.vertx = vertx;
+        this.calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
+        this.spotStreamProcessor = new CalculatedSpotStreamProcessor(
+                objectMapper,
+                this.calculatedSpotTwapEngine,
+                this.symbol
+        );
 
         this.activeStrategy = this.strategyRegistry.getStrategy(this.strategyName);
         this.activeStrategy.init(this);
-        Log.infof("Initialized PaperTradingEngine with strategy '%s' (orderLatencyMs: %d ms)",
-                this.activeStrategy.getName(), this.orderLatencyMs);
+        Log.infof("Initialized PaperTradingEngine with strategy '%s' (symbol=%s, orderLatencyMs=%d ms, streamsEnabled=%b)",
+                this.activeStrategy.getName(), this.symbol, this.orderLatencyMs, this.streamsEnabled);
+    }
+
+    /**
+     * Starts live spot WebSocket streams when the application starts if {@code streamsEnabled} is {@code true}.
+     *
+     * @param event Quarkus startup event
+     */
+    public void onStart(@Observes StartupEvent event) {
+        if (streamsEnabled) {
+            startSpotStreams();
+        }
+    }
+
+    /**
+     * Stops active spot WebSocket streams when the application shuts down.
+     *
+     * @param event Quarkus shutdown event
+     */
+    public void onStop(@Observes ShutdownEvent event) {
+        binanceConnector.stop();
+        krakenConnector.stop();
+        coinbaseConnector.stop();
+    }
+
+    /**
+     * Starts Binance Spot ({@code SPOT_AGG_TRADES}), Kraken Spot ({@code USDTUSD} + {@code <SYMBOL>}),
+     * and Coinbase Spot ({@code <SYMBOL>}) WebSocket trade streams feeding {@link CalculatedSpotTwapEngine}.
+     */
+    public synchronized void startSpotStreams() {
+        Log.infof("Starting PaperTradingEngine Binance, Kraken, and Coinbase spot WebSocket streams for symbol=%s...", symbol);
+        binanceConnector.startSpotAggTrades(symbol, new BinanceStreamListener() {
+            @Override
+            public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+                onRawBinanceFrame(streamType, rawJson, recvTimestampMs);
+            }
+
+            @Override
+            public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                onRawBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs);
+            }
+        });
+        krakenConnector.start(symbol, true, new KrakenStreamListener() {
+            @Override
+            public void onStreamMessage(String normSymbol, String rawJson, long recvTimestampMs) {
+                onRawKrakenFrame(normSymbol, rawJson, recvTimestampMs);
+            }
+
+            @Override
+            public void onStreamFrame(String normSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                onRawKrakenFrameBytes(normSymbol, rawUtf8Bytes, recvTimestampMs);
+            }
+        });
+        coinbaseConnector.start(symbol, new CoinbaseStreamListener() {
+            @Override
+            public void onStreamMessage(String normSymbol, String rawJson, long recvTimestampMs) {
+                onRawCoinbaseFrame(normSymbol, rawJson, recvTimestampMs);
+            }
+
+            @Override
+            public void onStreamFrame(String normSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                onRawCoinbaseFrameBytes(normSymbol, rawUtf8Bytes, recvTimestampMs);
+            }
+        });
     }
 
     @Override
@@ -420,6 +548,100 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         activeStrategy.onPolymarketCryptoPrice(timestampMs, symbol, source, price, priceTimestampMs);
     }
 
+    /**
+     * Processes a raw JSON text frame from the Binance Spot {@code aggTrades} WebSocket stream,
+     * updating {@link CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
+     * to the active strategy.
+     *
+     * @param streamType      Binance stream type
+     * @param rawJson         raw Binance JSON frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawBinanceFrame(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+        spotStreamProcessor.processBinanceFrame(streamType, rawJson, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Processes a raw UTF-8 {@code byte[]} frame from the Binance Spot {@code aggTrades} WebSocket stream
+     * without intermediate {@link String} allocation.
+     *
+     * @param streamType      Binance stream type
+     * @param rawUtf8Bytes    raw UTF-8 JSON bytes
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawBinanceFrameBytes(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
+        spotStreamProcessor.processBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Processes a raw JSON text frame from the Kraken Spot v2 {@code trade} WebSocket stream
+     * ({@code USDTUSD} or {@code <SYMBOL>}), updating {@link CalculatedSpotTwapEngine} and forwarding
+     * the calculated USD spot and 60s TWAP to the active strategy.
+     *
+     * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
+     * @param rawJson         raw Kraken JSON frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawKrakenFrame(String streamSymbol, String rawJson, long recvTimestampMs) {
+        spotStreamProcessor.processKrakenFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Processes a raw UTF-8 {@code byte[]} frame from the Kraken Spot v2 {@code trade} WebSocket stream
+     * ({@code USDTUSD} or {@code <SYMBOL>}) without intermediate {@link String} allocation.
+     *
+     * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
+     * @param rawUtf8Bytes    raw UTF-8 JSON bytes
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawKrakenFrameBytes(String streamSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+        spotStreamProcessor.processKrakenFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Processes a raw JSON text frame from the Coinbase Spot {@code matches} WebSocket stream,
+     * updating {@link CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
+     * to the active strategy.
+     *
+     * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
+     * @param rawJson         raw Coinbase JSON frame
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawCoinbaseFrame(String streamSymbol, String rawJson, long recvTimestampMs) {
+        spotStreamProcessor.processCoinbaseFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Processes a raw UTF-8 {@code byte[]} frame from the Coinbase Spot {@code matches} WebSocket stream
+     * without intermediate {@link String} allocation.
+     *
+     * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
+     * @param rawUtf8Bytes    raw UTF-8 JSON bytes
+     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     */
+    public synchronized void onRawCoinbaseFrameBytes(String streamSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
+        spotStreamProcessor.processCoinbaseFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+    }
+
+    /**
+     * Forwards a calculated multi-exchange USD spot price and 60-second rolling TWAP directly to the active strategy.
+     *
+     * @param timestampMs  local receipt timestamp in milliseconds UTC
+     * @param symbol       lowercase USD asset symbol (e.g. {@code "btcusd"})
+     * @param spotPrice    calculated multi-exchange USD spot price
+     * @param twap60sPrice calculated 60-second time-weighted average USD price
+     */
+    public synchronized void onCalculatedSpotTwap(
+            long timestampMs,
+            String symbol,
+            double spotPrice,
+            double twap60sPrice) {
+        if (spotPrice <= 0.0 || Double.isNaN(spotPrice) || timestampMs <= 0L) {
+            return;
+        }
+        activeStrategy.onCalculatedSpotTwap(timestampMs, symbol, spotPrice, twap60sPrice);
+    }
+
     public synchronized void onOrderBookQuote(OrderBookQuote quote) {
         if (quote == null) {
             return;
@@ -440,6 +662,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         openPositions.clear();
         activePosition.set(null);
         activeStrategy.reset();
+        spotStreamProcessor.reset();
         activeCandleStart.set(0);
         activeCandleEnd.set(0);
         twapOpenPrice = 0.0;
@@ -480,5 +703,32 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     public double getCurrentSpotPrice() {
         return currentSpotPrice;
+    }
+
+    /**
+     * Returns the most recently calculated Chainlink-emulated USD spot price from {@link CalculatedSpotTwapEngine}.
+     *
+     * @return calculated multi-exchange USD spot price
+     */
+    public double getLastCalculatedSpotPriceUsd() {
+        return spotStreamProcessor.getLastSpotPriceUsd();
+    }
+
+    /**
+     * Returns the most recently calculated 60-second time-weighted average USD price from {@link CalculatedSpotTwapEngine}.
+     *
+     * @return calculated 60-second TWAP in USD
+     */
+    public double getLastCalculatedTwap60sPriceUsd() {
+        return spotStreamProcessor.getLastTwap60sPriceUsd();
+    }
+
+    /**
+     * Returns the current 5-second time-weighted EMA of the {@code USDT/USD} peg from {@link CalculatedSpotTwapEngine}.
+     *
+     * @return current {@code USDT/USD} EMA
+     */
+    public double getUsdtUsdEma() {
+        return spotStreamProcessor.getUsdtUsdEma();
     }
 }

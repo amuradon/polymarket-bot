@@ -495,6 +495,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
             return;
         }
         ensureActiveCandle(timestampMs);
+        maybeRefreshBalanceBeforeActivation(timestampMs);
         long spotCents = Math.round(spotPrice * 100.0);
         calcSpotBuffer.record(timestampMs, spotCents);
         lastCalcSpotCents = spotCents;
@@ -510,7 +511,7 @@ public class UtterParameciumStrategy implements TradingStrategy {
         OrderBookQuote quote = this.latestValidQuote;
         if (quote != null
                 && (quote.timestampMs() <= 0L
-                || (timestampMs >= quote.timestampMs() && timestampMs - quote.timestampMs() <= 5_000L))) {
+                || (timestampMs + 2_000L >= quote.timestampMs() && timestampMs - quote.timestampMs() <= 5_000L))) {
             if (Math.abs(spotCents - lastEvalCalcSpotCents) >= 15L || (timestampMs - lastCalcEvalMs) >= 50L) {
                 lastEvalCalcSpotCents = spotCents;
                 lastCalcEvalMs = timestampMs;

@@ -20,7 +20,7 @@ The project is structured as a Maven Multi-Module project with 7 submodules:
 | :--- | :--- | :--- | :--- |
 | **`common`** | Library (`jar`) | Shared domain records, math calculators, and strategy execution contracts. | N/A |
 | **`connector`** | Library (`jar`) | Shared Binance, Kraken, Coinbase, and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
-| **`trading`** | Library (`jar`) | Shared trading runtime layer for `paper` and `live`. | N/A |
+| **`trading`** | Library (`jar`) | Shared trading runtime layer and zero-allocation multi-exchange spot stream processor (`CalculatedSpotStreamProcessor`) for `paper` and `live`. | N/A |
 | **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance, Kraken, Coinbase, and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
 | **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
 | **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |

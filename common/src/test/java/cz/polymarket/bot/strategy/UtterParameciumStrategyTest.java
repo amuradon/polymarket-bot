@@ -170,6 +170,33 @@ class UtterParameciumStrategyTest {
         assertThat(snipeOrder.token()).isEqualTo("BTC-UP");
         assertThat(snipeOrder.side()).isEqualTo("BUY");
         assertThat(snipeOrder.price()).isBetween(new BigDecimal("0.460"), new BigDecimal("0.490"));
+        assertThat(balanceRefreshCount).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Should evaluate breakout onCalculatedSpotTwap even when concurrent live CLOB quote timestamp is slightly ahead")
+    void shouldEvaluateCalculatedSpotBreakoutWhenConcurrentQuoteTimestampIsSlightlyAhead() {
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
+
+        long windowStartMs = CANDLE_END_MS - 60_000L;
+        for (int s = 0; s <= 14; s++) {
+            long ts = windowStartMs + (s * 1000L);
+            double osc = (s % 2 == 0) ? 0.75 : -0.75;
+            strategy.onCalculatedSpotTwap(ts - 200L, "btcusd", 89_995.00 + osc, 89_995.00);
+            strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_997.00 + osc, ts);
+        }
+
+        long tau46Ms = CANDLE_END_MS - 46_000L;
+        long breakoutTs = tau46Ms + 400L;
+        // Concurrent live CLOB quote stamped 5ms ahead of the spot trade receipt timestamp
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, 0.46, 0.72, breakoutTs + 5L
+        ));
+        assertThat(submittedOrders).isEmpty();
+
+        strategy.onCalculatedSpotTwap(breakoutTs, "btcusd", 90_015.75, 89_996.00);
+        assertThat(submittedOrders).hasSize(1);
+        assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
     }
 
     @Test

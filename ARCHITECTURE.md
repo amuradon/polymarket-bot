@@ -97,17 +97,17 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 - **Status & Blue-Green Cutover Endpoints**: Exposes `/api/collector/status` for monitoring active streams, `writeMode` (`ACTIVE`, `STANDBY`, `FROZEN`), and `readyForCutover`, plus `/api/collector/cutover/freeze` and `/api/collector/cutover/activate` for zero-loss, zero-duplicate In-Host Blue-Green deployment cutovers.
 
 ### `trading`
-- **Shared Trading Runtime**: Shared runtime configuration and Quarkus platform extensions consumed by `paper` and `live` applications.
+- **Shared Trading Runtime**: Shared runtime configuration, Quarkus platform extensions, and zero-allocation multi-exchange spot stream processing (`CalculatedSpotStreamProcessor`) bridging Binance Spot (`aggTrades`), Kraken Spot (`USDTUSD` + `<SYMBOL>` `trade` updates), and Coinbase Spot (`matches`) WebSocket frames into `CalculatedSpotTwapEngine` and `TradingStrategy` for both `paper` and `live` applications.
 
 ### `live`
 - Standalone runnable Quarkus application for live real-money execution.
 - Configured with `quarkus.http.port=8080`, `polymarket.trading.mode=live`.
-- Direct connectivity to Polymarket CLOB and wallet signing.
+- Streams Polymarket CLOB, PolyBolt (`price.crypto` and `price.crypto.twap`), Binance Spot, Kraken Spot (`USDTUSD` + `<SYMBOL>`), and Coinbase Spot WebSocket feeds into `CalculatedSpotTwapEngine` and `UtterParameciumStrategy`, with direct EIP-712 signing and CLOB execution.
 
 ### `paper`
 - Standalone runnable Quarkus application for real-time virtual trading.
 - Configured with `quarkus.http.port=8082`, `polymarket.trading.mode=paper`.
-- Streams real market data but routes orders to a paper execution simulator.
+- Streams real market data (including Binance, Kraken, and Coinbase spot feeds via `CalculatedSpotTwapEngine` into `UtterParameciumStrategy`) and routes orders to a paper execution simulator.
 
 ### `backtest`
 - Standalone runnable Quarkus application for backtesting strategies against historical datasets.

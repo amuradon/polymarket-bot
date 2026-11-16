@@ -198,4 +198,38 @@ class BinanceStreamConnectorTest {
         LockSupport.unpark(externalWorker);
         connector.destroy();
     }
+
+    @Test
+    void shouldConnectOnlySpotAggTradesWhenStartSpotAggTradesIsCalled() throws Exception {
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.writeTextMessage("{\"streamPath\":\"" + ws.path() + "\",\"spotOnly\":true}"));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String spotWsBase = "ws://localhost:" + port + "/spot";
+        String futuresWsBase = "ws://localhost:" + port + "/futures";
+
+        BinanceStreamConnector connector = new BinanceStreamConnector(
+                vertx,
+                spotWsBase,
+                futuresWsBase,
+                200L,
+                5000L
+        );
+
+        Map<BinanceStreamType, String> receivedByType = new ConcurrentHashMap<>();
+        connector.startSpotAggTrades("BTCUSDT", (type, rawJson, recvTs) -> receivedByType.put(type, rawJson));
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(receivedByType).containsOnlyKeys(BinanceStreamType.SPOT_AGG_TRADES);
+                    assertThat(receivedByType.get(BinanceStreamType.SPOT_AGG_TRADES))
+                            .contains("/spot/btcusdt@aggTrade");
+                    assertThat(connector.isAllConnected()).isTrue();
+                    assertThat(connector.getStreamTelemetries()).hasSize(1);
+                });
+
+        connector.destroy();
+        assertThat(connector.isAllConnected()).isFalse();
+    }
 }

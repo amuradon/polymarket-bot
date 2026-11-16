@@ -430,4 +430,11 @@ public final class CalculatedSpotTwapEngine {
     public double getLastTwap60sPriceUsd() {
         return lastTwap60sPriceUsd;
     }
+
+    /**
+     * Returns the monotonic effective asset trade timestamp in milliseconds UTC, or {@code -1} if no trade has been processed.
+     */
+    public long getLastAssetTimestampMs() {
+        return lastAssetTimestampMs;
+    }
 }

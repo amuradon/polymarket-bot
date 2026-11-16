@@ -2,6 +2,10 @@ package cz.polymarket.bot.live.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
+import cz.polymarket.bot.connector.binance.BinanceStreamType;
+import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
+import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
@@ -61,6 +65,9 @@ class LiveTradingEngineTest {
     private HttpServer mockServer;
     private int port;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private BinanceStreamConnector binanceConnector;
+    private KrakenStreamConnector krakenConnector;
+    private CoinbaseStreamConnector coinbaseConnector;
 
     private final List<String> orderBodies = new CopyOnWriteArrayList<>();
     private final List<String> polyAddresses = new CopyOnWriteArrayList<>();
@@ -73,6 +80,9 @@ class LiveTradingEngineTest {
     private final List<ServerWebSocket> polyBoltSockets = new CopyOnWriteArrayList<>();
     private final List<ServerWebSocket> clobSockets = new CopyOnWriteArrayList<>();
     private final List<ServerWebSocket> userSockets = new CopyOnWriteArrayList<>();
+    private final List<ServerWebSocket> binanceSockets = new CopyOnWriteArrayList<>();
+    private final List<ServerWebSocket> krakenSockets = new CopyOnWriteArrayList<>();
+    private final List<ServerWebSocket> coinbaseSockets = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() throws Exception {
@@ -87,6 +97,9 @@ class LiveTradingEngineTest {
         polyBoltSockets.clear();
         clobSockets.clear();
         userSockets.clear();
+        binanceSockets.clear();
+        krakenSockets.clear();
+        coinbaseSockets.clear();
         vertx = Vertx.vertx();
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
@@ -245,16 +258,65 @@ class LiveTradingEngineTest {
                         clobUserAuthed.set(true);
                     }
                 });
+            } else if (ws.path().startsWith("/binance/spot/")) {
+                binanceSockets.add(ws);
+                if (ws.path().endsWith("@aggTrade")) {
+                    ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1775261657000,\"s\":\"BTCUSDT\",\"a\":1001,\"p\":\"85020.00\",\"q\":\"0.50\",\"m\":false}");
+                }
+            } else if ("/kraken/ws/v2".equals(ws.path())) {
+                krakenSockets.add(ws);
+                ws.textMessageHandler(msg -> {
+                    if (msg.contains("\"USDT/USD\"")) {
+                        ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0000,\"qty\":250.0,\"trade_id\":9001}]}");
+                    } else if (msg.contains("\"BTC/USD\"")) {
+                        ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"price\":85020.0,\"qty\":0.40,\"trade_id\":9002}]}");
+                    }
+                });
+            } else if ("/coinbase/ws".equals(ws.path())) {
+                coinbaseSockets.add(ws);
+                ws.textMessageHandler(msg -> {
+                    if (msg.contains("\"matches\"") && msg.contains("\"BTC-USD\"")) {
+                        ws.writeTextMessage("{\"type\":\"match\",\"trade_id\":8001,\"side\":\"buy\",\"size\":\"0.60\",\"price\":\"85020.00\",\"product_id\":\"BTC-USD\"}");
+                    }
+                });
             }
         });
 
         mockServer.requestHandler(router);
         mockServer.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         port = mockServer.actualPort();
+        binanceConnector = new BinanceStreamConnector(
+                vertx,
+                "ws://localhost:" + port + "/binance/spot",
+                "ws://localhost:" + port + "/binance/futures",
+                1000L,
+                10000L
+        );
+        krakenConnector = new KrakenStreamConnector(
+                vertx,
+                "ws://localhost:" + port + "/kraken/ws/v2",
+                1000L,
+                10000L
+        );
+        coinbaseConnector = new CoinbaseStreamConnector(
+                vertx,
+                "ws://localhost:" + port + "/coinbase/ws",
+                1000L,
+                10000L
+        );
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (binanceConnector != null) {
+            binanceConnector.destroy();
+        }
+        if (krakenConnector != null) {
+            krakenConnector.destroy();
+        }
+        if (coinbaseConnector != null) {
+            coinbaseConnector.destroy();
+        }
         if (mockServer != null) {
             mockServer.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -309,6 +371,9 @@ class LiveTradingEngineTest {
                 gammaClient,
                 clobClient,
                 polyBoltClient,
+                binanceConnector,
+                krakenConnector,
+                coinbaseConnector,
                 streamParser,
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",
@@ -333,6 +398,10 @@ class LiveTradingEngineTest {
                         assertThat(engine.getActiveMarketInfo().yesTokenId()).isEqualTo(TEST_TOKEN_UP);
                         assertThat(engine.getActiveMarketInfo().noTokenId()).isEqualTo(TEST_TOKEN_DOWN);
                         assertThat(engine.getCurrentSpotPrice()).isEqualTo(85020.0);
+                        assertThat(engine.getLastCalculatedSpotPriceUsd()).isEqualTo(85020.0);
+                        assertThat(engine.getBinanceMarketMessageCount()).isGreaterThanOrEqualTo(1L);
+                        assertThat(engine.getKrakenMarketMessageCount()).isGreaterThanOrEqualTo(2L);
+                        assertThat(engine.getCoinbaseMarketMessageCount()).isGreaterThanOrEqualTo(1L);
                         assertThat(engine.getLatestQuote()).isNotNull();
                         assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.55);
                     });
@@ -628,6 +697,9 @@ class LiveTradingEngineTest {
                     new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
                     new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
                             Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L),
+                    binanceConnector,
+                    krakenConnector,
+                    coinbaseConnector,
                     new PolymarketStreamParser(objectMapper, "BTCUSDT"),
                     new SystemNetworkTelemetryMonitor(),
                     "UtterParameciumStrategy",
@@ -755,6 +827,9 @@ class LiveTradingEngineTest {
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
                         1000L, 10000L),
+                binanceConnector,
+                krakenConnector,
+                coinbaseConnector,
                 new PolymarketStreamParser(objectMapper, "BTCUSDT"),
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",
@@ -1126,6 +1201,85 @@ class LiveTradingEngineTest {
         }
     }
 
+    @Test
+    void shouldProcessBinanceKrakenAndCoinbaseSpotStreamsIntoCalculatedSpotTwapEngineAndUtterParameciumStrategy() throws Exception {
+        clobAutoRespond.set(false);
+        LiveTradingEngine engine = createTestEngine(2_500L);
+        try {
+            long candleStartSec = 1_785_542_400L;
+            long candleStartMs = candleStartSec * 1_000L;
+            long candleEndMs = (candleStartSec + 900L) * 1_000L;
+
+            engine.discoverAndRotateMarket(candleStartSec);
+            engine.onPolymarketCryptoTwap60s(candleStartMs, "btcusd", "chainlink", 90_000.00, 60, candleStartMs);
+
+            // 1. Kraken USDT/USD peg update
+            engine.onRawKrakenFrame(
+                    "USDTUSD",
+                    "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0000,\"qty\":500.0}]}",
+                    candleEndMs - 61_000L
+            );
+            assertThat(engine.getUsdtUsdEma()).isEqualTo(1.0);
+
+            // 2. Warm up 15s of Binance, Coinbase, and Kraken spot trades + Chainlink ticks in settlement window
+            long windowStartMs = candleEndMs - 60_000L;
+            for (int s = 0; s <= 14; s++) {
+                long ts = windowStartMs + s * 1_000L;
+                double osc = (s % 2 == 0) ? 0.75 : -0.75;
+                double spot = 89_995.00 + osc;
+                engine.onRawBinanceFrame(
+                        BinanceStreamType.SPOT_AGG_TRADES,
+                        "{\"e\":\"aggTrade\",\"p\":\"" + spot + "\",\"q\":\"1.0\",\"m\":false}",
+                        ts - 240L
+                );
+                engine.onRawCoinbaseFrame(
+                        "BTCUSD",
+                        "{\"type\":\"match\",\"price\":\"" + spot + "\",\"size\":\"1.0\"}",
+                        ts - 220L
+                );
+                engine.onRawKrakenFrame(
+                        "BTCUSD",
+                        "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"price\":" + spot + ",\"qty\":1.0}]}",
+                        ts - 200L
+                );
+                engine.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_997.00 + osc, ts);
+            }
+
+            long tau46Ms = candleEndMs - 46_000L;
+            engine.onOrderBookQuote(new OrderBookQuote(
+                    0.46, 0.44, 0.72, 0.70, 100.0, 100.0, 0.46, 0.72, tau46Ms + 100L
+            ));
+            assertThat(orderBodies).isEmpty();
+
+            // 3. Breakout across Binance, Coinbase, and Kraken before Chainlink updates -> triggers live FAK order!
+            long breakoutTs = tau46Ms + 400L;
+            engine.onRawBinanceFrame(
+                    BinanceStreamType.SPOT_AGG_TRADES,
+                    "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.0\",\"m\":false}",
+                    breakoutTs
+            );
+            engine.onRawCoinbaseFrame(
+                    "BTCUSD",
+                    "{\"type\":\"match\",\"price\":\"90018.00\",\"size\":\"2.0\"}",
+                    breakoutTs + 5L
+            );
+            engine.onRawKrakenFrame(
+                    "BTCUSD",
+                    "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"price\":90018.00,\"qty\":2.0}]}",
+                    breakoutTs + 10L
+            );
+
+            assertThat(engine.getLastCalculatedSpotPriceUsd()).isGreaterThan(90_010.0);
+            assertThat(engine.getLastCalculatedTwap60sPriceUsd()).isGreaterThan(89_990.0);
+            assertThat(orderBodies).hasSize(1);
+            assertThat(engine.getOpenPositions()).hasSize(1);
+            assertThat(engine.getOpenPositions().getFirst().clobTokenId()).isEqualTo(TEST_TOKEN_UP);
+        } finally {
+            clobAutoRespond.set(true);
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(long maxQuoteAgeMs) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),
@@ -1149,6 +1303,9 @@ class LiveTradingEngineTest {
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
                         1000L, 10000L),
+                binanceConnector,
+                krakenConnector,
+                coinbaseConnector,
                 new PolymarketStreamParser(objectMapper, "BTCUSDT"),
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",

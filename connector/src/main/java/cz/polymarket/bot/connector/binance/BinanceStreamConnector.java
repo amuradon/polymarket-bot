@@ -19,8 +19,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Manages resilient WebSocket connections for the 4 Binance Spot and USD-M Futures data streams:
@@ -126,27 +128,69 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Starts all 5 Binance WebSocket streams for the given symbol and routes messages to the listener.
+     * Starts all 4 Binance WebSocket streams for the given symbol and routes messages to the listener.
      *
      * @param symbol   trading pair symbol (e.g. BTCUSDT)
      * @param listener callback receiving stream type, payload, and local receipt timestamp
      */
     public synchronized void start(String symbol, BinanceStreamListener listener) {
-        start(symbol, listener, null);
+        start(symbol, EnumSet.allOf(BinanceStreamType.class), listener, null);
     }
 
     /**
-     * Starts all 5 Binance WebSocket streams for the given symbol, optionally bound to an external worker thread.
+     * Starts all 4 Binance WebSocket streams for the given symbol, optionally bound to an external worker thread.
      *
      * @param symbol         trading pair symbol (e.g. BTCUSDT)
      * @param listener       callback receiving stream type, payload, and local receipt timestamp
      * @param externalWorker optional dedicated platform worker thread responsible for draining these streams
      */
     public synchronized void start(String symbol, BinanceStreamListener listener, Thread externalWorker) {
+        start(symbol, EnumSet.allOf(BinanceStreamType.class), listener, externalWorker);
+    }
+
+    /**
+     * Starts only the Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES}) WebSocket stream
+     * for the given symbol.
+     *
+     * @param symbol   trading pair symbol (e.g. BTCUSDT)
+     * @param listener callback receiving stream type, payload, and local receipt timestamp
+     */
+    public synchronized void startSpotAggTrades(String symbol, BinanceStreamListener listener) {
+        start(symbol, EnumSet.of(BinanceStreamType.SPOT_AGG_TRADES), listener, null);
+    }
+
+    /**
+     * Starts only the Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES}) WebSocket stream
+     * for the given symbol, optionally bound to an external worker thread.
+     *
+     * @param symbol         trading pair symbol (e.g. BTCUSDT)
+     * @param listener       callback receiving stream type, payload, and local receipt timestamp
+     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
+     */
+    public synchronized void startSpotAggTrades(String symbol, BinanceStreamListener listener, Thread externalWorker) {
+        start(symbol, EnumSet.of(BinanceStreamType.SPOT_AGG_TRADES), listener, externalWorker);
+    }
+
+    /**
+     * Starts the specified subset of Binance WebSocket streams for the given symbol, optionally bound to an external worker thread.
+     *
+     * @param symbol         trading pair symbol (e.g. BTCUSDT)
+     * @param streamTypes    set of {@link BinanceStreamType} streams to connect
+     * @param listener       callback receiving stream type, payload, and local receipt timestamp
+     * @param externalWorker optional dedicated platform worker thread responsible for draining these streams
+     */
+    public synchronized void start(
+            String symbol,
+            Set<BinanceStreamType> streamTypes,
+            BinanceStreamListener listener,
+            Thread externalWorker) {
         stop();
+        if (streamTypes == null || streamTypes.isEmpty()) {
+            return;
+        }
         String normalizedSymbol = normalizeSymbol(symbol);
 
-        for (BinanceStreamType type : BinanceStreamType.values()) {
+        for (BinanceStreamType type : streamTypes) {
             String wsUrl = type.buildWsUrl(spotWsBaseUrl, futuresWsBaseUrl, normalizedSymbol);
             String streamName = "BINANCE-" + type.name() + "-" + normalizedSymbol;
             RawWebSocketListener rawListener = new RawWebSocketListener() {
@@ -264,12 +308,12 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Checks whether all 5 Binance streams are currently in the {@link ConnectionState#CONNECTED} state.
+     * Checks whether all active Binance streams are currently in the {@link ConnectionState#CONNECTED} state.
      *
-     * @return true if all 5 streams are connected
+     * @return true if at least one stream is registered and all active streams are connected
      */
     public synchronized boolean isAllConnected() {
-        if (streams.size() != BinanceStreamType.values().length) {
+        if (streams.isEmpty()) {
             return false;
         }
         for (ReconnectingWebSocketStream stream : streams.values()) {
