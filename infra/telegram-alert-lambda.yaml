@@ -97,11 +97,11 @@ Resources:
     DependsOn: TelegramAlertPermission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Filters Live Trading logs strictly for [FATAL], [ERROR], [WARN], and *Exception occurrences, routing matching events to the alerting Lambda.
+        why: Filters Live Trading logs strictly for [FATAL], [ERROR], and *Exception occurrences ([WARN] intentionally excluded at subscription level; kept in Lambda code for future reactivation).
     Properties:
       LogGroupName:
         Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupName"
-      FilterPattern: '%\[FATAL\]|\[ERROR\]|\[WARN\]|\w*Exception\W|\w*Exception$%'
+      FilterPattern: '%\[FATAL\]|\[ERROR\]|\w*Exception\W|\w*Exception$%'
       DestinationArn: !GetAtt TelegramAlertFunction.Arn
 
   TelegramAlertDataPermission:
@@ -122,16 +122,16 @@ Resources:
     DependsOn: TelegramAlertDataPermission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Filters Data Collector logs strictly for [FATAL], [ERROR], [WARN], and *Exception occurrences, routing matching events to the alerting Lambda.
+        why: Filters Data Collector logs strictly for [FATAL], [ERROR], and *Exception occurrences ([WARN] intentionally excluded at subscription level; kept in Lambda code for future reactivation).
     Properties:
       LogGroupName:
         Fn::ImportValue: !Sub "${DataBaseStackName}-LogGroupName"
-      FilterPattern: '%\[FATAL\]|\[ERROR\]|\[WARN\]|\w*Exception\W|\w*Exception$%'
+      FilterPattern: '%\[FATAL\]|\[ERROR\]|\w*Exception\W|\w*Exception$%'
       DestinationArn: !GetAtt TelegramAlertFunction.Arn
 
 Outputs:
   TelegramAlertFunctionArn:
-    Description: AWS Lambda Function ARN dispatching Telegram alerts for live trading and data collector errors and warnings
+    Description: AWS Lambda Function ARN dispatching Telegram alerts for live trading and data collector fatals, errors, and exceptions
     Value: !GetAtt TelegramAlertFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-TelegramAlertFunctionArn"
