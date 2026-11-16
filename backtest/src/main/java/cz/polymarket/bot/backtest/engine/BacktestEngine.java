@@ -548,7 +548,6 @@ public class BacktestEngine {
                             if (hasIndicators) {
                                 notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
                             }
-                            activeStrategy.onBinanceSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
                         }
                         case BacktestEvent.BinanceFuturesTradeEvent e -> {
                             indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
@@ -558,7 +557,6 @@ public class BacktestEngine {
                                     activeStrategy.onIndicatorUpdate(IndicatorType.BASIS, val, evTs);
                                 }
                             }
-                            activeStrategy.onBinanceFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
                         }
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);

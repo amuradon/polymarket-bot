@@ -184,7 +184,7 @@ class BacktestEngineTest {
             }
 
             @Override
-            public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
+            public void onIndicatorUpdate(IndicatorType type, double value, long timestampMs) {
                 externalSpotTradeCount.incrementAndGet();
             }
 

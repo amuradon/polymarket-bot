@@ -42,11 +42,8 @@ class CalculatedSpotStreamProcessorTest {
     }
 
     @Test
-    @DisplayName("Should validate constructor arguments and normalize crypto symbol")
-    void shouldValidateConstructorArgumentsAndNormalizeCryptoSymbol() {
-        assertThat(processor.getCryptoSymbol()).isEqualTo("btcusd");
-        assertThat(processor.getCalculatedSpotTwapEngine()).isSameAs(twapEngine);
-
+    @DisplayName("Should validate constructor arguments")
+    void shouldValidateConstructorArguments() {
         assertThatThrownBy(() -> new CalculatedSpotStreamProcessor(null, twapEngine, "BTCUSDT"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new CalculatedSpotStreamProcessor(objectMapper, null, "BTCUSDT"))
@@ -57,7 +54,6 @@ class CalculatedSpotStreamProcessorTest {
     @DisplayName("Should process Kraken USDT/USD peg updates and aggregate Binance, Coinbase, and Kraken spot trades")
     void shouldProcessKrakenUsdtPegAndAggregateThreeVenueSpotTrades() {
         List<double[]> recordedSpotTwap = new ArrayList<>();
-        List<double[]> recordedBinanceTrades = new ArrayList<>();
         List<String> recordedSymbols = new ArrayList<>();
 
         TradingStrategy recordingStrategy = new TradingStrategy() {
@@ -74,19 +70,13 @@ class CalculatedSpotStreamProcessorTest {
                 recordedSymbols.add(symbol);
                 recordedSpotTwap.add(new double[]{timestampMs, spotPrice, twap60sPrice});
             }
-
-            @Override
-            public void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-                recordedBinanceTrades.add(new double[]{timestampMs, price, quantity, isBuyerMaker ? 1.0 : 0.0});
-            }
         };
 
         // 1. Kraken USDT/USD update initializes peg to 0.9990 without firing onCalculatedSpotTwap
         byte[] krakenUsdtBytes = """
                 {"channel":"trade","type":"update","data":[{"symbol":"USDT/USD","side":"sell","price":0.9990,"qty":500.0,"trade_id":101}]}
                 """.getBytes(StandardCharsets.UTF_8);
-        boolean processedUsdt = processor.processKrakenFrameBytes("USDTUSD", krakenUsdtBytes, 1_000L, recordingStrategy);
-        assertThat(processedUsdt).isTrue();
+        processor.processKrakenFrameBytes("USDTUSD", krakenUsdtBytes, 1_000L, recordingStrategy);
         assertThat(twapEngine.getUsdtUsdEma()).isCloseTo(0.9990, within(1e-8));
         assertThat(recordedSpotTwap).isEmpty();
 
@@ -94,39 +84,32 @@ class CalculatedSpotStreamProcessorTest {
         byte[] bookTickerBytes = """
                 {"u":400900217,"s":"BTCUSDT","b":"70000.00","B":"1.25","a":"70000.10","A":"0.80"}
                 """.getBytes(StandardCharsets.UTF_8);
-        assertThat(processor.processBinanceFrameBytes(BinanceStreamType.SPOT_BOOK_TICKER, bookTickerBytes, 1_000L, recordingStrategy))
-                .isFalse();
+        processor.processBinanceFrameBytes(BinanceStreamType.SPOT_BOOK_TICKER, bookTickerBytes, 1_000L, recordingStrategy);
         assertThat(recordedSpotTwap).isEmpty();
 
         // 3. Binance SPOT_AGG_TRADES at 70,070.0701 USDT -> converted via 0.9990 EMA = $70,000.00 USD
         byte[] binanceAggTradeBytes = """
                 {"e":"aggTrade","E":1000,"s":"BTCUSDT","a":1001,"p":"70070.07007007","q":"1.00000000","m":true}
                 """.getBytes(StandardCharsets.UTF_8);
-        boolean processedBinance = processor.processBinanceFrameBytes(
+        processor.processBinanceFrameBytes(
                 BinanceStreamType.SPOT_AGG_TRADES, binanceAggTradeBytes, 1_000L, recordingStrategy
         );
-        assertThat(processedBinance).isTrue();
         assertThat(recordedSpotTwap).hasSize(1);
         assertThat(recordedSymbols).containsExactly("btcusd");
         assertThat(recordedSpotTwap.getFirst()[1]).isCloseTo(70_000.0, within(1e-2));
-        assertThat(recordedBinanceTrades).hasSize(1);
-        assertThat(recordedBinanceTrades.getFirst()[2]).isCloseTo(1.0, within(1e-6));
-        assertThat(recordedBinanceTrades.getFirst()[3]).isEqualTo(1.0);
 
         // 4. Coinbase match at $70,020.00 USD (qty = 1.0)
         byte[] coinbaseMatchBytes = """
                 {"type":"match","trade_id":1120371409,"side":"buy","size":"1.00000000","price":"70020.00","product_id":"BTC-USD"}
                 """.getBytes(StandardCharsets.UTF_8);
-        boolean processedCoinbase = processor.processCoinbaseFrameBytes("BTCUSD", coinbaseMatchBytes, 1_000L, recordingStrategy);
-        assertThat(processedCoinbase).isTrue();
+        processor.processCoinbaseFrameBytes("BTCUSD", coinbaseMatchBytes, 1_000L, recordingStrategy);
         assertThat(recordedSpotTwap).hasSize(2);
 
         // 5. Kraken BTC/USD update at $70,040.00 USD (qty = 1.0) -> 3-venue blend: 0.415*70000 + 0.345*70020 + 0.240*70040
         byte[] krakenBtcBytes = """
                 {"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"buy","price":70040.0,"qty":1.0,"trade_id":202}]}
                 """.getBytes(StandardCharsets.UTF_8);
-        boolean processedKrakenBtc = processor.processKrakenFrameBytes("BTCUSD", krakenBtcBytes, 1_000L, recordingStrategy);
-        assertThat(processedKrakenBtc).isTrue();
+        processor.processKrakenFrameBytes("BTCUSD", krakenBtcBytes, 1_000L, recordingStrategy);
         assertThat(recordedSpotTwap).hasSize(3);
 
         double expectedBlendedSpot = 0.415 * 70_000.0 + 0.345 * 70_020.0 + 0.240 * 70_040.0;
@@ -153,26 +136,26 @@ class CalculatedSpotStreamProcessorTest {
             }
         };
 
-        assertThat(processor.processKrakenFrame(
+        processor.processKrakenFrame(
                 "BTCUSD",
                 "{\"channel\":\"trade\",\"type\":\"snapshot\",\"data\":[{\"symbol\":\"BTC/USD\",\"price\":70000.0,\"qty\":1.0}]}",
                 1_000L,
                 strategy
-        )).isFalse();
+        );
 
-        assertThat(processor.processKrakenFrame(
+        processor.processKrakenFrame(
                 "BTCUSD",
                 "{\"channel\":\"heartbeat\"}",
                 1_000L,
                 strategy
-        )).isFalse();
+        );
 
-        assertThat(processor.processCoinbaseFrame(
+        processor.processCoinbaseFrame(
                 "BTCUSD",
                 "{\"type\":\"last_match\",\"price\":\"70000.0\",\"size\":\"1.0\"}",
                 1_000L,
                 strategy
-        )).isFalse();
+        );
 
         assertThat(spots).isEmpty();
     }

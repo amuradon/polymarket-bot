@@ -65,15 +65,6 @@ public class PolymarketStreamParser {
     }
 
     /**
-     * Returns the underlying Jackson {@link ObjectMapper}.
-     *
-     * @return Jackson object mapper
-     */
-    public ObjectMapper getObjectMapper() {
-        return objectMapper;
-    }
-
-    /**
      * Parses a raw PolyBolt v2 WebSocket text frame into zero, one, or more {@link PolyBoltTick} updates
      * using streaming {@link JsonParser} without building a DOM tree.
      * <ul>

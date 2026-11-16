@@ -2,6 +2,7 @@ package cz.polymarket.bot.live.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
@@ -20,6 +21,7 @@ import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
+import cz.polymarket.bot.trading.stream.CalculatedSpotStreamProcessor;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.ServerWebSocket;
@@ -68,6 +70,8 @@ class LiveTradingEngineTest {
     private BinanceStreamConnector binanceConnector;
     private KrakenStreamConnector krakenConnector;
     private CoinbaseStreamConnector coinbaseConnector;
+    private CalculatedSpotTwapEngine calculatedSpotTwapEngine;
+    private CalculatedSpotStreamProcessor spotStreamProcessor;
 
     private final List<String> orderBodies = new CopyOnWriteArrayList<>();
     private final List<String> polyAddresses = new CopyOnWriteArrayList<>();
@@ -304,6 +308,8 @@ class LiveTradingEngineTest {
                 1000L,
                 10000L
         );
+        calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
+        spotStreamProcessor = new CalculatedSpotStreamProcessor(objectMapper, calculatedSpotTwapEngine, "BTCUSDT");
     }
 
     @AfterEach
@@ -375,6 +381,7 @@ class LiveTradingEngineTest {
                 krakenConnector,
                 coinbaseConnector,
                 streamParser,
+                spotStreamProcessor,
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",
                 "BTCUSDT",
@@ -398,10 +405,7 @@ class LiveTradingEngineTest {
                         assertThat(engine.getActiveMarketInfo().yesTokenId()).isEqualTo(TEST_TOKEN_UP);
                         assertThat(engine.getActiveMarketInfo().noTokenId()).isEqualTo(TEST_TOKEN_DOWN);
                         assertThat(engine.getCurrentSpotPrice()).isEqualTo(85020.0);
-                        assertThat(engine.getLastCalculatedSpotPriceUsd()).isEqualTo(85020.0);
-                        assertThat(engine.getBinanceMarketMessageCount()).isGreaterThanOrEqualTo(1L);
-                        assertThat(engine.getKrakenMarketMessageCount()).isGreaterThanOrEqualTo(2L);
-                        assertThat(engine.getCoinbaseMarketMessageCount()).isGreaterThanOrEqualTo(1L);
+                        assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd()).isEqualTo(85020.0);
                         assertThat(engine.getLatestQuote()).isNotNull();
                         assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.55);
                     });
@@ -701,6 +705,7 @@ class LiveTradingEngineTest {
                     krakenConnector,
                     coinbaseConnector,
                     new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                    spotStreamProcessor,
                     new SystemNetworkTelemetryMonitor(),
                     "UtterParameciumStrategy",
                     "BTCUSDT",
@@ -831,6 +836,7 @@ class LiveTradingEngineTest {
                 krakenConnector,
                 coinbaseConnector,
                 new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                spotStreamProcessor,
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",
                 "BTCUSDT",
@@ -1219,7 +1225,7 @@ class LiveTradingEngineTest {
                     "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0000,\"qty\":500.0}]}",
                     candleEndMs - 61_000L
             );
-            assertThat(engine.getUsdtUsdEma()).isEqualTo(1.0);
+            assertThat(calculatedSpotTwapEngine.getUsdtUsdEma()).isEqualTo(1.0);
 
             // 2. Warm up 15s of Binance, Coinbase, and Kraken spot trades + Chainlink ticks in settlement window
             long windowStartMs = candleEndMs - 60_000L;
@@ -1269,8 +1275,8 @@ class LiveTradingEngineTest {
                     breakoutTs + 10L
             );
 
-            assertThat(engine.getLastCalculatedSpotPriceUsd()).isGreaterThan(90_010.0);
-            assertThat(engine.getLastCalculatedTwap60sPriceUsd()).isGreaterThan(89_990.0);
+            assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd()).isGreaterThan(90_010.0);
+            assertThat(calculatedSpotTwapEngine.getLastTwap60sPriceUsd()).isGreaterThan(89_990.0);
             assertThat(orderBodies).hasSize(1);
             assertThat(engine.getOpenPositions()).hasSize(1);
             assertThat(engine.getOpenPositions().getFirst().clobTokenId()).isEqualTo(TEST_TOKEN_UP);
@@ -1307,6 +1313,7 @@ class LiveTradingEngineTest {
                 krakenConnector,
                 coinbaseConnector,
                 new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                spotStreamProcessor,
                 new SystemNetworkTelemetryMonitor(),
                 "UtterParameciumStrategy",
                 "BTCUSDT",

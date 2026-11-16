@@ -1,5 +1,7 @@
 package cz.polymarket.bot.calculator;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 /**
  * Zero-allocation multi-exchange spot & 60-second Time-Weighted Average Price (TWAP) calculator
  * emulating Chainlink Data Streams ({@code price.crypto} and {@code price.crypto.twap}).
@@ -14,7 +16,8 @@ package cz.polymarket.bot.calculator;
  * <p>
  * Maintainable per worker/stream instance without heap allocations on the hot path.
  */
-public final class CalculatedSpotTwapEngine {
+@ApplicationScoped
+public class CalculatedSpotTwapEngine {
 
     /**
      * Constituent spot exchanges contributing to the Chainlink-emulated USD spot price.

@@ -175,26 +175,6 @@ public interface TradingStrategy {
     default void onCandleResolution(TradeDirection actualOutcome) {}
 
     /**
-     * Optional callback triggered when an aggressive spot trade occurs on Binance.
-     *
-     * @param timestampMs event receipt timestamp in milliseconds UTC
-     * @param price execution price
-     * @param quantity trade volume
-     * @param isBuyerMaker true if maker was a buyer (aggressive sell), false if aggressive buy
-     */
-    default void onBinanceSpotTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {}
-
-    /**
-     * Optional callback triggered when an aggressive futures trade occurs on Binance.
-     *
-     * @param timestampMs event receipt timestamp in milliseconds UTC
-     * @param price execution price
-     * @param quantity trade volume
-     * @param isBuyerMaker true if maker was a buyer (aggressive sell), false if aggressive buy
-     */
-    default void onBinanceFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {}
-
-    /**
      * Optional callback triggered when a technical indicator value is updated.
      *
      * @param type indicator type

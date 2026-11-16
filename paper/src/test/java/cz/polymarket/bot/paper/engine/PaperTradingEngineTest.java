@@ -1,6 +1,7 @@
 package cz.polymarket.bot.paper.engine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
@@ -15,6 +16,7 @@ import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
+import cz.polymarket.bot.trading.stream.CalculatedSpotStreamProcessor;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import org.awaitility.Awaitility;
@@ -46,6 +48,8 @@ class PaperTradingEngineTest {
     private BinanceStreamConnector binanceConnector;
     private KrakenStreamConnector krakenConnector;
     private CoinbaseStreamConnector coinbaseConnector;
+    private CalculatedSpotTwapEngine calculatedSpotTwapEngine;
+    private CalculatedSpotStreamProcessor spotStreamProcessor;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -102,6 +106,8 @@ class PaperTradingEngineTest {
                 1000L,
                 10000L
         );
+        calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
+        spotStreamProcessor = new CalculatedSpotStreamProcessor(objectMapper, calculatedSpotTwapEngine, "BTCUSDT");
     }
 
     @AfterEach
@@ -130,7 +136,7 @@ class PaperTradingEngineTest {
                 binanceConnector,
                 krakenConnector,
                 coinbaseConnector,
-                objectMapper,
+                spotStreamProcessor,
                 strategyName,
                 "BTCUSDT",
                 orderLatencyMs,
@@ -385,7 +391,7 @@ class PaperTradingEngineTest {
                 "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0000,\"qty\":500.0}]}",
                 candleEndMs - 61_000L
         );
-        assertThat(engine.getUsdtUsdEma()).isCloseTo(1.0, within(1e-8));
+        assertThat(calculatedSpotTwapEngine.getUsdtUsdEma()).isCloseTo(1.0, within(1e-8));
 
         // 2. Warm up 15s of Binance, Coinbase, and Kraken spot trades + Chainlink ticks in settlement window
         long windowStartMs = candleEndMs - 60_000L;
@@ -435,8 +441,8 @@ class PaperTradingEngineTest {
                 breakoutTs + 10L
         );
 
-        assertThat(engine.getLastCalculatedSpotPriceUsd()).isGreaterThan(90_010.0);
-        assertThat(engine.getLastCalculatedTwap60sPriceUsd()).isGreaterThan(89_990.0);
+        assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd()).isGreaterThan(90_010.0);
+        assertThat(calculatedSpotTwapEngine.getLastTwap60sPriceUsd()).isGreaterThan(89_990.0);
         assertThat(engine.getOpenPositions()).hasSize(1);
         assertThat(engine.getOpenPositions().getFirst().side()).isEqualTo(TradeDirection.UP);
         assertThat(engine.getOpenPositions().getFirst().entryPrice()).isEqualTo(0.46);
@@ -451,9 +457,9 @@ class PaperTradingEngineTest {
             Awaitility.await()
                     .atMost(Duration.ofSeconds(5))
                     .untilAsserted(() -> {
-                        assertThat(engine.getLastCalculatedSpotPriceUsd()).isCloseTo(85_010.0, within(1e-2));
-                        assertThat(engine.getLastCalculatedTwap60sPriceUsd()).isCloseTo(85_010.0, within(1e-2));
-                        assertThat(engine.getUsdtUsdEma()).isCloseTo(1.0, within(1e-6));
+                        assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd()).isCloseTo(85_010.0, within(1e-2));
+                        assertThat(calculatedSpotTwapEngine.getLastTwap60sPriceUsd()).isCloseTo(85_010.0, within(1e-2));
+                        assertThat(calculatedSpotTwapEngine.getUsdtUsdEma()).isCloseTo(1.0, within(1e-6));
                     });
         } finally {
             engine.onStop(null);

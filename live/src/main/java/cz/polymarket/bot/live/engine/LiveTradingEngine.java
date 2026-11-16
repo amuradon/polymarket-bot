@@ -1,6 +1,5 @@
 package cz.polymarket.bot.live.engine;
 
-import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamListener;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
@@ -98,7 +97,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final KrakenStreamConnector krakenConnector;
     private final CoinbaseStreamConnector coinbaseConnector;
     private final PolymarketStreamParser streamParser;
-    private final CalculatedSpotTwapEngine calculatedSpotTwapEngine;
     private final CalculatedSpotStreamProcessor spotStreamProcessor;
     private final SystemNetworkTelemetryMonitor telemetryMonitor;
     private final TradingStrategy activeStrategy;
@@ -119,9 +117,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicReference<PolymarketLocalBook> activeLocalBook = new AtomicReference<>();
     private final AtomicLong polyBoltMarketMsgCount = new AtomicLong(0L);
     private final AtomicLong clobMarketMsgCount = new AtomicLong(0L);
-    private final AtomicLong binanceMarketMsgCount = new AtomicLong(0L);
-    private final AtomicLong krakenMarketMsgCount = new AtomicLong(0L);
-    private final AtomicLong coinbaseMarketMsgCount = new AtomicLong(0L);
     private final AtomicLong lastEvaluatedMarketCycleStart = new AtomicLong(0L);
     private final AtomicLong lastTwapOracleTimestampMs = new AtomicLong(0L);
     private final AtomicLong lastCryptoPriceOracleTimestampMs = new AtomicLong(0L);
@@ -185,17 +180,18 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * @param gammaClient       Polymarket Gamma REST client ({@code GET /markets/slug/{slug}})
      * @param clobWsClient      Polymarket CLOB Market WebSocket client
      * @param polyBoltClient    Polymarket PolyBolt v2 authenticated WebSocket client
-     * @param binanceConnector  Binance Spot {@code aggTrades} WebSocket connector
-     * @param krakenConnector   Kraken Spot {@code trade} WebSocket connector ({@code USDTUSD} + {@code <SYMBOL>})
-     * @param coinbaseConnector Coinbase Spot {@code matches} WebSocket connector
-     * @param streamParser      JSON frame parser for PolyBolt and CLOB streams
-     * @param telemetryMonitor  OS kernel TCP buffer, JVM ZGC, and per-thread CPU utilization monitor
-     * @param strategyName      configured strategy name (defaults to {@code UtterParameciumStrategy})
-     * @param symbol            trading asset symbol (defaults to {@code BTCUSDT})
-     * @param timeframe         market timeframe (defaults to {@code 15m})
-     * @param streamsEnabled    whether to auto-connect live WebSocket streams on startup
-     * @param orderType         CLOB order time-in-force (defaults to {@code FAK})
-     * @param maxQuoteAgeMs     maximum allowed orderbook quote age in milliseconds before skipping signal evaluation
+     * @param binanceConnector    Binance Spot {@code aggTrades} WebSocket connector
+     * @param krakenConnector     Kraken Spot {@code trade} WebSocket connector ({@code USDTUSD} + {@code <SYMBOL>})
+     * @param coinbaseConnector   Coinbase Spot {@code matches} WebSocket connector
+     * @param streamParser        JSON frame parser for PolyBolt and CLOB streams
+     * @param spotStreamProcessor CDI processor parsing Binance, Kraken, and Coinbase spot trades into {@code CalculatedSpotTwapEngine}
+     * @param telemetryMonitor    OS kernel TCP buffer, JVM ZGC, and per-thread CPU utilization monitor
+     * @param strategyName        configured strategy name (defaults to {@code UtterParameciumStrategy})
+     * @param symbol              trading asset symbol (defaults to {@code BTCUSDT})
+     * @param timeframe           market timeframe (defaults to {@code 15m})
+     * @param streamsEnabled      whether to auto-connect live WebSocket streams on startup
+     * @param orderType           CLOB order time-in-force (defaults to {@code FAK})
+     * @param maxQuoteAgeMs       maximum allowed orderbook quote age in milliseconds before skipping signal evaluation
      */
     @Inject
     public LiveTradingEngine(
@@ -209,6 +205,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             KrakenStreamConnector krakenConnector,
             CoinbaseStreamConnector coinbaseConnector,
             PolymarketStreamParser streamParser,
+            CalculatedSpotStreamProcessor spotStreamProcessor,
             SystemNetworkTelemetryMonitor telemetryMonitor,
             @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "UtterParameciumStrategy")
             String strategyName,
@@ -252,6 +249,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (streamParser == null) {
             throw new IllegalArgumentException("streamParser cannot be null");
         }
+        if (spotStreamProcessor == null) {
+            throw new IllegalArgumentException("spotStreamProcessor cannot be null");
+        }
         if (telemetryMonitor == null) {
             throw new IllegalArgumentException("telemetryMonitor cannot be null");
         }
@@ -265,14 +265,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         this.krakenConnector = krakenConnector;
         this.coinbaseConnector = coinbaseConnector;
         this.streamParser = streamParser;
+        this.spotStreamProcessor = spotStreamProcessor;
         this.telemetryMonitor = telemetryMonitor;
         this.symbol = symbol != null && !symbol.isBlank() ? symbol.trim() : "BTCUSDT";
-        this.calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
-        this.spotStreamProcessor = new CalculatedSpotStreamProcessor(
-                streamParser.getObjectMapper(),
-                this.calculatedSpotTwapEngine,
-                this.symbol
-        );
         this.timeframe = timeframe != null && !timeframe.isBlank() ? timeframe.trim() : "15m";
         this.durationSeconds = PolymarketMarketInfo.parseTimeframeSeconds(this.timeframe);
         this.streamsEnabled = streamsEnabled;
@@ -1560,7 +1555,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
 
     /**
      * Processes a raw JSON text frame from the Binance Spot {@code aggTrades} WebSocket stream,
-     * updating {@link CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
+     * updating {@code CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
      * to the active strategy.
      *
      * @param streamType      Binance stream type
@@ -1572,9 +1567,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processBinanceFrame(streamType, rawJson, recvTimestampMs, activeStrategy)) {
-                binanceMarketMsgCount.incrementAndGet();
-            }
+            spotStreamProcessor.processBinanceFrame(streamType, rawJson, recvTimestampMs, activeStrategy);
         }
     }
 
@@ -1591,15 +1584,13 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs, activeStrategy)) {
-                binanceMarketMsgCount.incrementAndGet();
-            }
+            spotStreamProcessor.processBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs, activeStrategy);
         }
     }
 
     /**
      * Processes a raw JSON text frame from the Kraken Spot v2 {@code trade} WebSocket stream
-     * ({@code USDTUSD} or {@code <SYMBOL>}), updating {@link CalculatedSpotTwapEngine} and forwarding
+     * ({@code USDTUSD} or {@code <SYMBOL>}), updating {@code CalculatedSpotTwapEngine} and forwarding
      * the calculated USD spot and 60s TWAP to the active strategy.
      *
      * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
@@ -1611,9 +1602,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processKrakenFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy)) {
-                krakenMarketMsgCount.incrementAndGet();
-            }
+            spotStreamProcessor.processKrakenFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
         }
     }
 
@@ -1630,15 +1619,13 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processKrakenFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy)) {
-                krakenMarketMsgCount.incrementAndGet();
-            }
+            spotStreamProcessor.processKrakenFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
         }
     }
 
     /**
      * Processes a raw JSON text frame from the Coinbase Spot {@code matches} WebSocket stream,
-     * updating {@link CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
+     * updating {@code CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
      * to the active strategy.
      *
      * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
@@ -1650,9 +1637,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processCoinbaseFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy)) {
-                coinbaseMarketMsgCount.incrementAndGet();
-            }
+            spotStreamProcessor.processCoinbaseFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
         }
     }
 
@@ -1669,33 +1654,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            if (spotStreamProcessor.processCoinbaseFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy)) {
-                coinbaseMarketMsgCount.incrementAndGet();
-            }
-        }
-    }
-
-    /**
-     * Forwards a calculated multi-exchange USD spot price and 60-second rolling TWAP directly to the active strategy.
-     *
-     * @param timestampMs   local receipt timestamp in milliseconds UTC
-     * @param symbol        lowercase USD asset symbol (e.g. {@code "btcusd"})
-     * @param spotPrice     calculated multi-exchange USD spot price
-     * @param twap60sPrice  calculated 60-second time-weighted average USD price
-     */
-    public void onCalculatedSpotTwap(
-            long timestampMs,
-            String symbol,
-            double spotPrice,
-            double twap60sPrice) {
-        if (spotPrice <= 0.0 || Double.isNaN(spotPrice) || timestampMs <= 0L) {
-            return;
-        }
-        if (timestampMs > latestOracleRecvTimestampMs) {
-            latestOracleRecvTimestampMs = timestampMs;
-        }
-        synchronized (strategyLock) {
-            activeStrategy.onCalculatedSpotTwap(timestampMs, symbol, spotPrice, twap60sPrice);
+            spotStreamProcessor.processCoinbaseFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
         }
     }
 
@@ -1772,9 +1731,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             activeCandleEnd.set(0L);
             polyBoltMarketMsgCount.set(0L);
             clobMarketMsgCount.set(0L);
-            binanceMarketMsgCount.set(0L);
-            krakenMarketMsgCount.set(0L);
-            coinbaseMarketMsgCount.set(0L);
             lastEvaluatedMarketCycleStart.set(0L);
             lastTwapOracleTimestampMs.set(0L);
             lastCryptoPriceOracleTimestampMs.set(0L);
@@ -2049,60 +2005,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     public long getClobMarketMessageCount() {
         return clobMarketMsgCount.get();
-    }
-
-    /**
-     * Returns the number of Binance Spot {@code aggTrades} WebSocket messages processed.
-     *
-     * @return Binance Spot message count
-     */
-    public long getBinanceMarketMessageCount() {
-        return binanceMarketMsgCount.get();
-    }
-
-    /**
-     * Returns the number of Kraken Spot {@code trade} WebSocket messages processed.
-     *
-     * @return Kraken Spot message count
-     */
-    public long getKrakenMarketMessageCount() {
-        return krakenMarketMsgCount.get();
-    }
-
-    /**
-     * Returns the number of Coinbase Spot {@code matches} WebSocket messages processed.
-     *
-     * @return Coinbase Spot message count
-     */
-    public long getCoinbaseMarketMessageCount() {
-        return coinbaseMarketMsgCount.get();
-    }
-
-    /**
-     * Returns the most recently calculated Chainlink-emulated USD spot price from {@link CalculatedSpotTwapEngine}.
-     *
-     * @return calculated multi-exchange USD spot price
-     */
-    public double getLastCalculatedSpotPriceUsd() {
-        return spotStreamProcessor.getLastSpotPriceUsd();
-    }
-
-    /**
-     * Returns the most recently calculated 60-second time-weighted average USD price from {@link CalculatedSpotTwapEngine}.
-     *
-     * @return calculated 60-second TWAP in USD
-     */
-    public double getLastCalculatedTwap60sPriceUsd() {
-        return spotStreamProcessor.getLastTwap60sPriceUsd();
-    }
-
-    /**
-     * Returns the current 5-second time-weighted EMA of the {@code USDT/USD} peg from {@link CalculatedSpotTwapEngine}.
-     *
-     * @return current {@code USDT/USD} EMA
-     */
-    public double getUsdtUsdEma() {
-        return spotStreamProcessor.getUsdtUsdEma();
     }
 
     /**
