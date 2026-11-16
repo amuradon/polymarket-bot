@@ -1,79 +1,53 @@
 # Repository Agent Guidelines
 
-This repository contains the Polymarket Bot application.
+All global rules for **Polymarket Bot** live here.
+
+## 1. Progressive Context Disclosure & Exclusions (CRITICAL)
+
+- **Never Preload Docs**: Do NOT read skill files, reference manuals, or unrelated configs upfront. Load workspace skills (`.agents/skills/<name>/SKILL.md`) and their `references/` **only just-in-time** when your task directly requires them (`project-architecture`, `aws-deployment`, `data-and-backtest-ops`).
+- **Strict `./docs/` Prohibition**: **NEVER** read, scan, grep, or load any files inside `./docs/` unless the user explicitly asks to edit those specific files.
 
 ---
 
-## 1. Development Lifecycle & Workflow Protocol (NON-NEGOTIABLE)
+## 2. Module Boundaries (7 Maven Submodules)
 
-All agents working on this repository **MUST ALWAYS** follow the engineering protocol defined in:
+Only the internal dependencies listed under **Allowed Internal Deps** are permitted; **all other internal submodule dependencies are strictly forbidden**:
 
-👉 [`.agents/rules/workflow.md`](.agents/rules/workflow.md)
+| Submodule | Type | Allowed Internal Deps (Strict Whitelist) | Scope & Isolation Notes |
+| :--- | :--- | :--- | :--- |
+| **`common`** | Library | *None* | Pure domain records, math/TWAP calculators (`CalculatedSpotTwapEngine`), `TradingStrategy`, `StrategyContext`, `ExecutionRouter`. No heavy frameworks. |
+| **`connector`** | Library | *None* | Resilient WS/REST clients (Binance, Kraken, Coinbase, Polymarket Gamma/PolyBolt/CLOB). **Never depends on `common` or `trading`.** |
+| **`data`** | App (`:8084`) | `connector` | Raw `.jsonl.zst` stream recorder with Blue-Green cutover. **Never depends on `common` or `trading`.** |
+| **`trading`** | Library | `common`, `connector` | Shared runtime, UI/REST/WS wiring, and `CalculatedSpotStreamProcessor` for `paper` and `live`. Zero `data`/`backtest` leakage. |
+| **`live`** | App (`:8080`) | `trading`, `connector` | Real-money Polymarket execution (EIP-712 signing, CLOB gateway, risk guards). Zero `backtest` leakage. |
+| **`paper`** | App (`:8082`) | `trading`, `connector` | Virtual order simulator against live market feeds. Zero `backtest` leakage. |
+| **`backtest`** | App (`:8083`) | `common` | Historical simulation engine (DuckDB, Parquet replay, simulated `ExecutionRouter`). Isolated from `connector`/`trading`/`live`/`paper`. |
 
-### Key Lifecycle Mandates:
-
-- **Adhere to the Plan**
-- **Clean Code**
-- **Test-Driven Development (TDD)**
-- **Synthetic Test Data Only**: Never use live or production data in automated tests; always use deterministic synthetic test fixtures.
-- **Human-Readable JavaDoc**: Document classes, records, interfaces, constructors, public methods, and non-trivial methods with clear, concise JavaDoc for human clarity.
-- **Multi-Level Test Pyramid**
-- **Local Git Commit Only (NO Git Push)**: Always commit locally after completing the task and verifying all tests pass. Never execute `git push`.
-
----
-
-## 2. Architecture & Vision Mandates (CRITICAL)
-
-Before proposing plans, designing features, or writing any code in this repository, agents **MUST ALWAYS** study and strictly abide by the following foundational documents:
-
-1. 👉 [`ARCHITECTURE.md`](ARCHITECTURE.md):
-   - Agents must familiarize themselves with the 5-submodule architecture (`common`, `trading`, `live`, `paper`, `backtest`) and strictly obey module boundaries and prohibited dependencies.
-   - **Zero Backtest Leakage**: Never introduce backtesting tools or heavy simulation dependencies into `live` or `paper`.
-   - **Zero Discrepancy**: Ensure strategies and engine logic in `common` execute identically across backtesting, paper, and live trading.
-
-2. 👉 [`VISION.md`](VISION.md):
-   - Agents must study the platform vision (multi-token support for BTC, ETH, SOL; 15m/5m/1h timeframes; AWS `eu-west-1` Dublin deployment near London data centers).
-   - All code must be designed to be easily extensible, modular, and optimized for ultra-low latency (Java 25, GC-free hot path, non-blocking Vert.x event loops).
-
-3. 👉 [`DEPLOYMENT.md`](DEPLOYMENT.md):
-   - When deploying data, paper, or live applications to AWS EC2 with EBS in `eu-west-1`, agents and developers **MUST ALWAYS** ensure continuous 24/7 execution (`--restart unless-stopped`), non-throttled CPU allocation, and persistent EBS volume mounting.
+- **Zero Discrepancy**: Strategy (`TradingStrategy`) and calculator bytecode in `common` executes identically across `backtest`, `paper`, and `live` via `StrategyContext` and `ExecutionRouter`.
+- **Jandex Indexing**: Shared Quarkus libraries (`common`, `connector`, `trading`) must include `jandex-maven-plugin` and `META-INF/beans.xml`.
 
 ---
 
-## 3. Java & Quarkus Development Rules
+## 3. Engineering Standards & Workflow
 
-When working on any Java and Quarkus code in this repository, agents **MUST ALWAYS** follow the specific rules and instructions defined in:
-
-👉 [`.agents/rules/quarkus.md`](.agents/rules/quarkus.md)
-
-### Key Mandates from Quarkus Rules:
-- **Extension-First Rule**: Before writing any code, always search for existing Quarkus extensions (`quarkus_searchDocs`, `quarkus_searchTools`). Never implement custom logic if a Quarkus extension exists.
-- **User Consultation**: If multiple matching extensions exist, present all options to the user with a recommendation and wait for their choice.
-- **Skills Usage**: Load extension skills with `quarkus_skills` prior to writing code or tests.
-- **Testing & Dev MCP Tools**: Use Quarkus Dev MCP tools (`quarkus_callTool`, `devui-testing_runTests`, etc.) rather than running ad-hoc Maven commands.
-- **No `mvn clean` in Dev Mode**: Never run `mvn clean` or `gradle clean` while dev mode is running.
-- **Always use Quarkus native logging**: Always use `io.quarkus.logging.Log` for logging
-
----
-
-## 4. AWS Cloud & Infrastructure Rules
-
-When working with AWS services, infrastructure, or deployment in this repository, agents **MUST ALWAYS** follow the rules defined in:
-
-1. 👉 [`.agents/rules/aws-agent-rules.md`](.agents/rules/aws-agent-rules.md)
-2. 👉 [`.agents/rules/aws-starter-rules.md`](.agents/rules/aws-starter-rules.md)
-
-### Key Mandates from AWS Rules:
-- **Target Region**: Deploy regional resources in AWS `eu-west-1` (Ireland / Dublin).
-- **AWS MCP & Skills First**: Prefer the AWS MCP Server over direct CLI commands and check/load relevant AWS skills before starting any AWS task.
-- **Infrastructure as Code**: Prefer AWS CDK or CloudFormation over imperative CLI resource creation.
-- **Secret Safety**: Never expose raw secrets in context; follow the `aws-secrets-manager` resolution guidelines.
+- **Plan First**: Before modifying source code, use `/plan` and present an Implementation Plan artifact for review. Follow the approved plan strictly; pause and update it if unexpected architectural issues arise.
+- **Clean Code & Full Refactoring**: Enforce DRY (shared math/domain in `common`), SOLID/SRP, and domain-accurate naming. Leave zero dead code, unused imports/fields, or **unused constructor/method overloads**.
+- **No Backward Compatibility & Fail Fast**: Never add `@Deprecated` shims, compatibility wrappers, heuristics, or silent fallbacks. Refactor all call sites across all 7 submodules, tests, and scripts immediately; fail fast with descriptive errors.
+- **Low-Latency Java 25 & Extensibility**: Keep the WS-to-order hot path GC-free (no heap allocations or `Double`/`Long`/`BigDecimal` boxing in real-time loops), use non-blocking Vert.x event loops without locks, and design extensibly for multiple tokens (`BTC`, `ETH`, `SOL`) and `Timeframe` intervals.
+- **DI, Logging & JavaDoc**:
+  - **Constructor injection** into `private final` fields only (field `@Inject` is forbidden).
+  - Log exclusively via `io.quarkus.logging.Log`.
+  - Add concise, human-readable JavaDoc to classes, records, interfaces, constructors, public methods, and non-trivial methods.
+  - Never add test-only methods or hooks in `src/main/java`.
+- **Quarkus Extension-First**: Search Quarkus extensions (`quarkus_searchDocs`, `quarkus_searchTools`) and load `quarkus_skills` before coding capabilities; present options when multiple match (`.agents/rules/quarkus.md` auto-loads on Java/Maven files).
+- **TDD, Synthetic Data & Git**:
+  - Follow Red-Green-Refactor TDD using **100% deterministic synthetic test fixtures** (never live/production data).
+  - Pass all affected Unit, `@QuarkusTest` Component, REST/WebSocket, and UI tests (`0` failures).
+  - Stage relevant changes and run local `git commit` once verified — **NEVER execute `git push`**.
 
 ---
 
-## 5. User Education Documentation Exclusion (`docs/` — DO NOT LOAD)
+## 4. AWS Guardrails
 
-- **STRICT PROHIBITION**: Agents **MUST NEVER** read, scan, grep, or load any files inside `./docs/` (`docs/strategy/`, `docs/theory/`) into their context unless the user explicitly asks to edit those specific documentation files.
-- **Purpose**: The `./docs/` directory exists **purely for human/user study and theoretical education** and is not source-of-truth specification for coding or agent workflows.
-
-
+- **Region & IaC**: Deploy regional resources strictly in `eu-west-1` (Dublin) via CloudFormation (`infra/`) and prefer the AWS MCP Server.
+- **Secrets**: Never fetch or expose raw secrets in context (`get-secret-value` is forbidden); use dynamic runtime resolution (`{{resolve:secretsmanager:...}}` / `asm-exec`). Load `aws-deployment` before any AWS work.
