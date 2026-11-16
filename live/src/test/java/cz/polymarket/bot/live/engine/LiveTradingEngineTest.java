@@ -1045,7 +1045,7 @@ class LiveTradingEngineTest {
     }
 
     @Test
-    void shouldRecordPeerFailoverActiveOnSingleLegDisconnectAndErrorWhenBothStreamsDrop() {
+    void shouldRecordPeerFailoverActiveOnSingleLegDisconnectAndWarnWhenBothStreamsDrop() {
         List<LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
         Logger engineLogger = Logger.getLogger(LiveTradingEngine.class.getName());
         Handler testHandler = new Handler() {
@@ -1096,9 +1096,30 @@ class LiveTradingEngineTest {
                             && r.getMessage() != null
                             && r.getMessage().contains("FAILOVER ACTIVE"));
             assertThat(capturedLogs)
-                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue()
+                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
+
+            // Also verify that when BOTH legs of the dual CLOB stream disconnect (or closeCode=1000 occurs),
+            // LiveTradingEngine logs WARN and never ERROR
+            capturedLogs.clear();
+            for (ServerWebSocket ws : List.copyOf(clobSockets)) {
+                try {
+                    ws.close((short) 1013, "simultaneous restart");
+                } catch (Exception ignored) {
+                }
+            }
+            engine.onStreamUnexpectedDisconnect(new cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry(
+                    "POLYMARKET-CLOB-btc-updown-15m-1794240900",
+                    cz.polymarket.bot.connector.ws.ConnectionState.RECONNECTING,
+                    "127.0.0.1:" + port,
+                    0, 5, 0L, 2L, 10L, 50L, 10L, 0L, 1L, System.currentTimeMillis(), 1000, "normal close"
+            ));
+
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= Level.SEVERE.intValue());
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().equals(Level.WARNING)
                             && r.getMessage() != null
-                            && r.getMessage().contains("BOTH CLOB STREAMS DOWN"));
+                            && r.getMessage().contains("code=1000"));
         } finally {
             engineLogger.removeHandler(testHandler);
             engine.onStop(null);

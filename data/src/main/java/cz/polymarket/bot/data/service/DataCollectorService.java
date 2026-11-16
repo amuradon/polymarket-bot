@@ -203,19 +203,6 @@ public class DataCollectorService {
             return;
         }
         String remoteLabel = snapshot.remoteAddress().isEmpty() ? "unknown" : snapshot.remoteAddress();
-        if (snapshot.lastCloseCode() == 1000) {
-            Log.infof("Data Collector stream closed normally [%s]: remote=%s, closeCode=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, maxQueueLagMs=%d, totalFrames=%d, reconnectCount=%d",
-                    snapshot.streamName(),
-                    remoteLabel,
-                    snapshot.lastCloseCode(),
-                    snapshot.lastCloseReason(),
-                    snapshot.queueDepth(),
-                    snapshot.maxQueueDepth(),
-                    snapshot.maxQueueLagMs(),
-                    snapshot.totalFramesReceived(),
-                    snapshot.reconnectCount());
-            return;
-        }
         Log.warnf("Data Collector stream disconnect telemetry [%s]: remote=%s, closeCode=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, maxQueueLagMs=%d, totalFrames=%d, reconnectCount=%d",
                 snapshot.streamName(),
                 remoteLabel,

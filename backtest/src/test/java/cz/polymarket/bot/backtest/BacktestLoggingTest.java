@@ -129,18 +129,27 @@ class BacktestLoggingTest {
     }
 
     @Test
-    @DisplayName("application.properties should configure quarkus.log.console.format as <datetime> <logLevel> <loggerName> <message>")
+    @DisplayName("application.properties should configure quarkus.log.console.format and quarkus.log.file.format with [%p] bracketed logLevel")
     void shouldConfigureConsoleLogPatternInApplicationProperties() throws IOException {
         Properties props = new Properties();
         try (InputStream in = Files.newInputStream(Path.of("src/main/resources/application.properties"))) {
             props.load(in);
         }
-        String format = props.getProperty("quarkus.log.console.format");
-        assertThat(format)
-                .as("quarkus.log.console.format must be defined in application.properties")
+        String consoleFormat = props.getProperty("quarkus.log.console.format");
+        assertThat(consoleFormat)
+                .as("quarkus.log.console.format must be defined with [%p] in application.properties")
                 .isNotNull()
                 .contains("%d")
-                .contains("%p")
+                .contains("[%p]")
+                .contains("%c")
+                .contains("%s");
+
+        String fileFormat = props.getProperty("quarkus.log.file.format");
+        assertThat(fileFormat)
+                .as("quarkus.log.file.format must be defined with [%p] in application.properties")
+                .isNotNull()
+                .contains("%d")
+                .contains("[%p]")
                 .contains("%c")
                 .contains("%s");
     }

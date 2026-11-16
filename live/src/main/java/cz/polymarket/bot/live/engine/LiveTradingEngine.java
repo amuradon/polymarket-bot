@@ -1655,21 +1655,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 clobWorkerCpu
         );
         telemetryMonitor.recordDisconnectEvent(event);
-        if (event.closeCode() == 1000) {
-            Log.infof("[%s] Recorded WebSocket normal closure (remote=%s, code=%d, reason=%s, peerStream=%s, peerState=%s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d)",
-                    event.streamName(),
-                    remoteLabel,
-                    event.closeCode(),
-                    event.closeReason(),
-                    event.peerStreamName(),
-                    event.peerState(),
-                    event.queueDepthAtDisconnect(),
-                    event.maxQueueDepth(),
-                    event.lastQueueLagMs(),
-                    event.maxQueueLagMs(),
-                    event.lastProcessTimeUs(),
-                    event.maxProcessTimeUs());
-        } else if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
+        if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
             String peerRemote = redundancy.peerRemoteAddress().isEmpty() ? "unknown" : redundancy.peerRemoteAddress();
             Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, FAILOVER ACTIVE: peerStream=%s is %s @ %s — 0 ms stream outage, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
                     event.streamName(),
@@ -1691,7 +1677,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     event.ioReaderCpuPct(),
                     event.clobBookWorkerCpuPct());
         } else if (redundancy.dualMarketStream()) {
-            Log.errorf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, BOTH CLOB STREAMS DOWN: peerStream=%s is %s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, BOTH CLOB STREAMS DOWN: peerStream=%s is %s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
                     event.streamName(),
                     remoteLabel,
                     event.closeCode(),

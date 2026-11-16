@@ -92,4 +92,85 @@ class DataCollectorServiceTest {
         verify(krakenStorage).closeAll();
         verify(coinbaseStorage).closeAll();
     }
+
+    @Test
+    void shouldLogWarnForAllUnexpectedStreamDisconnectsInDataCollector() {
+        List<java.util.logging.LogRecord> capturedLogs = new java.util.concurrent.CopyOnWriteArrayList<>();
+        java.util.logging.Logger serviceLogger = java.util.logging.Logger.getLogger(DataCollectorService.class.getName());
+        java.util.logging.Handler testHandler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        serviceLogger.addHandler(testHandler);
+
+        try {
+            BinanceStreamConnector binanceConnector = mock(BinanceStreamConnector.class);
+            DailyBinanceStorageManager binanceStorage = mock(DailyBinanceStorageManager.class);
+            KrakenStreamConnector krakenConnector = mock(KrakenStreamConnector.class);
+            DailyKrakenStorageManager krakenStorage = mock(DailyKrakenStorageManager.class);
+            CoinbaseStreamConnector coinbaseConnector = mock(CoinbaseStreamConnector.class);
+            DailyCoinbaseStorageManager coinbaseStorage = mock(DailyCoinbaseStorageManager.class);
+            DailyPolyBoltStorageManager polyBoltDailyStorage = mock(DailyPolyBoltStorageManager.class);
+            PolymarketLifecycleCoordinator polymarketCoordinator = mock(PolymarketLifecycleCoordinator.class);
+            PolymarketMarketStorageManager polymarketStorage = mock(PolymarketMarketStorageManager.class);
+            PolymarketPolyBoltClient polyBoltClient = mock(PolymarketPolyBoltClient.class);
+            PolymarketClobClient clobClient = mock(PolymarketClobClient.class);
+
+            org.mockito.ArgumentCaptor<cz.polymarket.bot.connector.ws.WebSocketDisconnectListener> listenerCaptor =
+                    org.mockito.ArgumentCaptor.forClass(cz.polymarket.bot.connector.ws.WebSocketDisconnectListener.class);
+
+            new DataCollectorService(
+                    binanceConnector,
+                    binanceStorage,
+                    krakenConnector,
+                    krakenStorage,
+                    coinbaseConnector,
+                    coinbaseStorage,
+                    polyBoltDailyStorage,
+                    polymarketCoordinator,
+                    polymarketStorage,
+                    polyBoltClient,
+                    clobClient,
+                    "BTCUSDT",
+                    "15m",
+                    true
+            );
+
+            verify(binanceConnector).setDisconnectListener(listenerCaptor.capture());
+            cz.polymarket.bot.connector.ws.WebSocketDisconnectListener disconnectListener = listenerCaptor.getValue();
+
+            disconnectListener.onUnexpectedDisconnect(new cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry(
+                    "BINANCE-SPOT_AGG_TRADES-BTCUSDT",
+                    ConnectionState.RECONNECTING,
+                    "stream.binance.com:9443",
+                    0, 5, 0L, 2L, 10L, 50L, 100L, 0L, 1L, 1789041600000L, 1000, "24h rotation"
+            ));
+            disconnectListener.onUnexpectedDisconnect(new cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry(
+                    "POLYMARKET-POLYBOLT-TWAP",
+                    ConnectionState.RECONNECTING,
+                    "ws-live-v2.polymarket.com:443",
+                    0, 5, 0L, 2L, 10L, 50L, 100L, 0L, 1L, 1789041600000L, 1013, "slow consumer"
+            ));
+
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue());
+            assertThat(capturedLogs)
+                    .filteredOn(r -> r.getLevel().equals(java.util.logging.Level.WARNING))
+                    .hasSize(2);
+        } finally {
+            serviceLogger.removeHandler(testHandler);
+        }
+    }
 }

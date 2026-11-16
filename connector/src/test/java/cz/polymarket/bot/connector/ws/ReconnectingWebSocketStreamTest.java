@@ -672,4 +672,111 @@ class ReconnectingWebSocketStreamTest {
         assertThat(finalTelemetry.totalFramesReceived()).isEqualTo(2L);
         assertThat(finalTelemetry.queueDepth()).isZero();
     }
+
+    @Test
+    void shouldLogWarnOnDisconnectAndReconnectAndLogErrorOnlyWhenConnectFails() throws Exception {
+        List<java.util.logging.LogRecord> capturedLogs = new CopyOnWriteArrayList<>();
+        java.util.logging.Logger streamLogger = java.util.logging.Logger.getLogger(ReconnectingWebSocketStream.class.getName());
+        java.util.logging.Handler testHandler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record != null) {
+                    capturedLogs.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        streamLogger.addHandler(testHandler);
+
+        try {
+            AtomicInteger connCount = new AtomicInteger(0);
+            server = vertx.createHttpServer()
+                    .webSocketHandler(ws -> {
+                        int attempt = connCount.incrementAndGet();
+                        ws.textMessageHandler(msg -> {
+                            ws.writeTextMessage("{\"attempt\":" + attempt + "}");
+                            if (attempt == 1) {
+                                vertx.setTimer(20L, id -> ws.close((short) 1013, "try again later"));
+                            } else if (attempt == 2) {
+                                vertx.setTimer(20L, id -> ws.close((short) 1000, "periodic rotation"));
+                            }
+                        });
+                    });
+
+            int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+            String wsUrl = "ws://localhost:" + port + "/ws/warn-disconnect-test";
+
+            ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                    vertx,
+                    "WARN-DISCONNECT-WS",
+                    wsUrl,
+                    () -> List.of("{\"action\":\"subscribe\"}"),
+                    (rawJson, recvTs) -> {
+                    },
+                    60L,
+                    0L
+            );
+
+            stream.start();
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(connCount.get()).isGreaterThanOrEqualTo(3));
+
+            stream.stop();
+
+            // Disconnections (both 1013 and 1000 on an active stream) must log WARN and never ERROR (SEVERE)
+            assertThat(capturedLogs)
+                    .noneMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue());
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().equals(java.util.logging.Level.WARNING)
+                            && r.getMessage() != null
+                            && r.getMessage().contains("code=1013")
+                            && r.getMessage().contains("scheduling reconnect"));
+            assertThat(capturedLogs)
+                    .anyMatch(r -> r.getLevel().equals(java.util.logging.Level.WARNING)
+                            && r.getMessage() != null
+                            && r.getMessage().contains("code=1000")
+                            && r.getMessage().contains("scheduling reconnect"));
+
+            // Now close the server and verify that a failed connection establishment logs ERROR (SEVERE)
+            server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            server = null;
+            capturedLogs.clear();
+
+            ReconnectingWebSocketStream failingConnectStream = new ReconnectingWebSocketStream(
+                    vertx,
+                    "FAIL-CONNECT-WS",
+                    "ws://localhost:" + port + "/ws/unreachable",
+                    List::of,
+                    (rawJson, recvTs) -> {
+                    },
+                    100L,
+                    0L
+            );
+
+            failingConnectStream.start();
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(failingConnectStream.getReconnectCount()).isGreaterThanOrEqualTo(1L);
+                        assertThat(capturedLogs)
+                                .anyMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue()
+                                        && r.getMessage() != null
+                                        && r.getMessage().contains("WebSocket connect failed"));
+                    });
+
+            failingConnectStream.stop();
+        } finally {
+            streamLogger.removeHandler(testHandler);
+        }
+    }
 }

@@ -660,23 +660,13 @@ public class ReconnectingWebSocketStream {
                                 long nextDelayMs = computeNextReconnectDelayMs(
                                         consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
                                 WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
-                                if (closeCode == 1000) {
-                                    Log.infof("[%s] WebSocket connection closed with code=1000 (remote=%s, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
-                                            streamName, remoteLabel, closeReason,
-                                            eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
-                                            eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
-                                            eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
-                                            eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
-                                            eventSnapshot.reconnectCount(), nextDelayMs);
-                                } else {
-                                    Log.errorf("[%s] WebSocket connection closed unexpectedly (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
-                                            streamName, remoteLabel, closeCode, closeReason,
-                                            eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
-                                            eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
-                                            eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
-                                            eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
-                                            eventSnapshot.reconnectCount(), nextDelayMs);
-                                }
+                                Log.warnf("[%s] WebSocket connection closed (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                                        streamName, remoteLabel, closeCode, closeReason,
+                                        eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
+                                        eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
+                                        eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
+                                        eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
+                                        eventSnapshot.reconnectCount(), nextDelayMs);
                                 if (this.currentWebSocket == ws) {
                                     notifyDisconnectListener(eventSnapshot);
                                 }
@@ -689,7 +679,7 @@ public class ReconnectingWebSocketStream {
                         ws.exceptionHandler(err -> {
                             String msg = err.getMessage() != null && !err.getMessage().isEmpty() ? err.getMessage() : "exception";
                             lastCloseReason.set(msg);
-                            Log.errorf("[%s] WebSocket error: %s", streamName, msg);
+                            Log.warnf("[%s] WebSocket error: %s", streamName, msg);
                             if (running.get() && this.currentWebSocket == ws) {
                                 int code = lastCloseCode.get() != 0 ? lastCloseCode.get() : -1;
                                 lastCloseCode.compareAndSet(0, -1);

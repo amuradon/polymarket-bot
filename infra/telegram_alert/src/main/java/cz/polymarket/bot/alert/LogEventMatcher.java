@@ -6,29 +6,21 @@ import java.util.regex.Pattern;
  * Filter evaluating whether an individual CloudWatch log message qualifies for dispatching
  * an alert to Telegram.
  * <p>
- * Matches log events containing:
+ * Matches log events containing strictly:
  * <ul>
- *   <li>Log level markers: {@code WARN}, {@code WARNING}, {@code ERROR}, {@code FATAL} (case-insensitive)</li>
+ *   <li>Bracketed log level markers: {@code [FATAL]}, {@code [ERROR]}, {@code [WARN]}</li>
  *   <li>Any Java Exception class or token ending with {@code *Exception} (e.g. {@code NullPointerException},
- *       {@code TimeoutException}, {@code PolymarketClobException}) or {@code Exception:}</li>
- *   <li>Any Java Error class or token ending with {@code *Error} (e.g. {@code OutOfMemoryError},
- *       {@code AssertionError}, {@code StackOverflowError}) or general {@code error} markers</li>
+ *       {@code TimeoutException}, {@code PolymarketClobException}, {@code Exception})</li>
  * </ul>
  */
 public class LogEventMatcher {
 
-    private static final Pattern LEVEL_OR_ERROR_PATTERN = Pattern.compile(
-            "(?i)\\b(?:WARN(?:ING)?|ERROR|FATAL)\\b"
+    private static final Pattern BRACKETED_LEVEL_PATTERN = Pattern.compile(
+            "\\[(?:FATAL|ERROR|WARN)\\]"
     );
 
     private static final Pattern JAVA_EXCEPTION_PATTERN = Pattern.compile(
-            "\\b[A-Za-z0-9_$]*Exception\\b|Exception:",
-            Pattern.CASE_INSENSITIVE
-    );
-
-    private static final Pattern JAVA_ERROR_PATTERN = Pattern.compile(
-            "\\b[A-Za-z0-9_$]*Error\\b|Error:",
-            Pattern.CASE_INSENSITIVE
+            "\\b[A-Za-z0-9_$]*Exception\\b"
     );
 
     /**
@@ -42,14 +34,10 @@ public class LogEventMatcher {
             return false;
         }
 
-        if (LEVEL_OR_ERROR_PATTERN.matcher(message).find()) {
+        if (BRACKETED_LEVEL_PATTERN.matcher(message).find()) {
             return true;
         }
 
-        if (JAVA_EXCEPTION_PATTERN.matcher(message).find()) {
-            return true;
-        }
-
-        return JAVA_ERROR_PATTERN.matcher(message).find();
+        return JAVA_EXCEPTION_PATTERN.matcher(message).find();
     }
 }

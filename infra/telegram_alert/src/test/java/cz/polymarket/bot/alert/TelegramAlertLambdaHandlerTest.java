@@ -81,12 +81,12 @@ class TelegramAlertLambdaHandlerTest {
                     {
                       "id": "e1",
                       "timestamp": 1762336800000,
-                      "message": "2026-11-05 10:00:00 INFO [cz.polymarket.bot] Normal tick processed"
+                      "message": "2026-11-05 10:00:00,000 [INFO] [cz.polymarket.bot] Normal tick processed"
                     },
                     {
                       "id": "e2",
                       "timestamp": 1762336801000,
-                      "message": "2026-11-05 10:00:01 WARN [cz.polymarket.bot] High memory usage"
+                      "message": "2026-11-05 10:00:01,000 [WARN] [cz.polymarket.bot] High memory usage"
                     },
                     {
                       "id": "e3",

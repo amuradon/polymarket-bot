@@ -97,11 +97,11 @@ Resources:
     DependsOn: TelegramAlertPermission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Filters Live Trading logs for ERROR, FATAL, and Java exceptions or errors, routing matching events to the alerting Lambda.
+        why: Filters Live Trading logs strictly for [FATAL], [ERROR], [WARN], and *Exception occurrences, routing matching events to the alerting Lambda.
     Properties:
       LogGroupName:
         Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupName"
-      FilterPattern: "?ERROR ?error ?FATAL ?fatal ?Exception ?Error"
+      FilterPattern: '%\[FATAL\]|\[ERROR\]|\[WARN\]|\w*Exception\W|\w*Exception$%'
       DestinationArn: !GetAtt TelegramAlertFunction.Arn
 
   TelegramAlertDataPermission:
@@ -122,11 +122,11 @@ Resources:
     DependsOn: TelegramAlertDataPermission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Filters Data Collector logs for ERROR, FATAL, and Java exceptions or errors, routing matching events to the alerting Lambda.
+        why: Filters Data Collector logs strictly for [FATAL], [ERROR], [WARN], and *Exception occurrences, routing matching events to the alerting Lambda.
     Properties:
       LogGroupName:
         Fn::ImportValue: !Sub "${DataBaseStackName}-LogGroupName"
-      FilterPattern: "?ERROR ?error ?FATAL ?fatal ?Exception ?Error"
+      FilterPattern: '%\[FATAL\]|\[ERROR\]|\[WARN\]|\w*Exception\W|\w*Exception$%'
       DestinationArn: !GetAtt TelegramAlertFunction.Arn
 
 Outputs:
