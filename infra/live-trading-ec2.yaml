@@ -140,6 +140,14 @@ Resources:
               EOF
               sysctl --system || true
 
+              # Enable Transparent Huge Pages (madvise) and shared memory THP (advise) for Java 25 ZGC
+              echo madvise > /sys/kernel/mm/transparent_hugepage/enabled || true
+              echo advise > /sys/kernel/mm/transparent_hugepage/shmem_enabled || true
+              cat << 'EOF' > /etc/tmpfiles.d/polymarket-thp.conf
+              w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise
+              w /sys/kernel/mm/transparent_hugepage/shmem_enabled - - - - advise
+              EOF
+
               # Configure systemd service for Bare-OS 24/7 HFT execution
               cat << 'EOF' > /etc/systemd/system/polymarket-live.service
               [Unit]
