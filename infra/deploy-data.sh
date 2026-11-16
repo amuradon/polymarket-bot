@@ -102,6 +102,20 @@ fi
 RELEASE_VERSION="${BASH_REMATCH[1]}"
 echo "      Detected artifact: ${JAR_NAME} (Version: ${RELEASE_VERSION})"
 
+GENERATED_BYTECODE_JAR="${QUARKUS_APP_DIR}/quarkus/generated-bytecode.jar"
+if [ ! -f "$GENERATED_BYTECODE_JAR" ]; then
+    echo "Error: Missing '${GENERATED_BYTECODE_JAR}'. Run './mvnw package -pl data -am -DskipTests' before deploying." >&2
+    exit 1
+fi
+GENERATED_ENTRIES="$(jar tf "$GENERATED_BYTECODE_JAR")"
+for MARKER in "DataCollectorService_Bean.class" "DataCollectorService_Observer_onStart" "CollectorStatusResource_Bean.class"; do
+    if ! grep -q "$MARKER" <<< "$GENERATED_ENTRIES"; then
+        echo "Error: Verification failed: '${GENERATED_BYTECODE_JAR}' is missing CDI bean entry matching '${MARKER}'. Run './mvnw package -pl data -am -DskipTests' and re-run deploy-data.sh." >&2
+        exit 1
+    fi
+done
+echo "      Verified Quarkus CDI bytecode in generated-bytecode.jar"
+
 # 2. Resolve S3 Artifact Bucket Name
 if [ -z "$ARTIFACT_BUCKET" ]; then
     echo "[2/4] Resolving S3 Artifact Bucket name from stack '${BASE_STACK_NAME}'..."

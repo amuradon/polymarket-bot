@@ -190,7 +190,14 @@ class CollectorStatusResourceTest {
         assertThat(lines)
                 .contains("%prod.quarkus.secretsmanager.aws.region=eu-west-1")
                 .contains("quarkus.package.jar.manifest.attributes.\"Enable-Native-Access\"=ALL-UNNAMED")
-                .noneMatch(line -> line.startsWith("%prod.quarkus.secretsmanager.region="));
+                .contains("quarkus.arc.remove-unused-beans=fwk")
+                .noneMatch(line -> line.startsWith("%prod.quarkus.secretsmanager.region="))
+                .noneMatch(line -> line.startsWith("quarkus.index-dependency.common."));
+
+        Path beansXml = Path.of("src/main/resources/META-INF/beans.xml");
+        assertThat(beansXml).exists();
+        assertThat(Files.readString(beansXml, StandardCharsets.UTF_8))
+                .contains("bean-discovery-mode=\"annotated\"");
     }
 
     private static List<String> readZstLines(Path zstFile) throws Exception {

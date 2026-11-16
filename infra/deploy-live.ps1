@@ -82,6 +82,24 @@ if ($JarName -notmatch '^live-(\d+\.\d+\.\d+)\.jar$') {
 $ReleaseVersion = $matches[1]
 Write-Host "      Detected artifact: $JarName (Version: $ReleaseVersion)" -ForegroundColor Green
 
+# Verify that quarkus/generated-bytecode.jar contains the LiveTradingEngine and LiveDashboardResource CDI beans
+$GeneratedBytecodeJar = Join-Path $QuarkusAppDir "quarkus\generated-bytecode.jar"
+if (-not (Test-Path $GeneratedBytecodeJar)) {
+    throw "Missing '$GeneratedBytecodeJar'. Run '.\mvnw package -pl live -am -DskipTests' before deploying."
+}
+$GeneratedEntries = @(jar tf $GeneratedBytecodeJar)
+$RequiredBeanMarkers = @(
+    "LiveTradingEngine_Bean.class",
+    "LiveTradingEngine_Observer_onStart",
+    "LiveDashboardResource_Bean.class"
+)
+foreach ($Marker in $RequiredBeanMarkers) {
+    if (-not ($GeneratedEntries | Where-Object { $_ -like "*$Marker*" })) {
+        throw "Verification failed: '$GeneratedBytecodeJar' is missing CDI bean entry matching '$Marker' (likely caused by a concurrent IDE clean during build). Run '.\mvnw package -pl live -am -DskipTests' and re-run deploy-live.ps1."
+    }
+}
+Write-Host "      Verified Quarkus CDI bytecode in generated-bytecode.jar ($($GeneratedEntries.Count) entries)" -ForegroundColor Green
+
 # 2. Resolve S3 Artifact Bucket Name
 if (-not $ArtifactBucket) {
     Write-Host "[2/4] Resolving S3 Artifact Bucket name from stack '$BaseStackName'..." -ForegroundColor Yellow
