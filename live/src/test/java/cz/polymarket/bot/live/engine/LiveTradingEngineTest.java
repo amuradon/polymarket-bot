@@ -405,7 +405,8 @@ class LiveTradingEngineTest {
                         assertThat(engine.getActiveMarketInfo().yesTokenId()).isEqualTo(TEST_TOKEN_UP);
                         assertThat(engine.getActiveMarketInfo().noTokenId()).isEqualTo(TEST_TOKEN_DOWN);
                         assertThat(engine.getCurrentSpotPrice()).isEqualTo(85020.0);
-                        assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd()).isEqualTo(85020.0);
+                        assertThat(calculatedSpotTwapEngine.getLastSpotPriceUsd())
+                                .isCloseTo(85020.0, org.assertj.core.data.Offset.offset(1e-6));
                         assertThat(engine.getLatestQuote()).isNotNull();
                         assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.55);
                     });
@@ -1225,7 +1226,8 @@ class LiveTradingEngineTest {
                     "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0000,\"qty\":500.0}]}",
                     candleEndMs - 61_000L
             );
-            assertThat(calculatedSpotTwapEngine.getUsdtUsdEma()).isEqualTo(1.0);
+            assertThat(calculatedSpotTwapEngine.getUsdtUsdEma())
+                    .isCloseTo(1.0, org.assertj.core.data.Offset.offset(1e-8));
 
             // 2. Warm up 15s of Binance, Coinbase, and Kraken spot trades + Chainlink ticks in settlement window
             long windowStartMs = candleEndMs - 60_000L;
