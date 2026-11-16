@@ -32,8 +32,11 @@ Only the internal dependencies listed under **Allowed Internal Deps** are permit
 
 - **Plan First**: Before modifying source code, use `/plan` and present an Implementation Plan artifact for review. Follow the approved plan strictly; pause and update it if unexpected architectural issues arise.
 - **Clean Code & Full Refactoring**: Enforce DRY (shared math/domain in `common`), SOLID/SRP, and domain-accurate naming. Leave zero dead code, unused imports/fields, or **unused constructor/method overloads**.
-- **No Backward Compatibility & Fail Fast**: Never add `@Deprecated` shims, compatibility wrappers, heuristics, or silent fallbacks. Refactor all call sites across all 7 submodules, tests, and scripts immediately; fail fast with descriptive errors.
-- **Low-Latency Java 25 & Extensibility**: Keep the WS-to-order hot path GC-free (no heap allocations or `Double`/`Long`/`BigDecimal` boxing in real-time loops), use non-blocking Vert.x event loops without locks, and design extensibly for multiple tokens (`BTC`, `ETH`, `SOL`) and `Timeframe` intervals.
+- **No Backward Compatibility & Production Code Priority (Fail Fast)**: Never add `@Deprecated` shims, compatibility wrappers, legacy overloads, heuristics, or silent fallbacks — **never retain backward-compatible code in `src/main/java` just to keep existing tests compiling or passing**. Production code cleanliness always takes strict priority: refactor all call sites across all 7 submodules and scripts, and **rewrite `src/test/java` tests to adapt to the clean production contract**. Fail fast with descriptive errors.
+- **Hot-Path Purity & Low-Latency Java 25**:
+  - **Zero Non-Essential Code on the Hot Path**: Every instruction on the WS-to-order critical path must strictly serve real-time pricing, signal calculation, or order execution. **NEVER** add unnecessary instructions, state updates, or bookkeeping on the hot path (e.g., counters, flags, or probes added to assert behavior in tests, diagnostics, or convenience).
+  - **GC-Free & Lock-Free**: Eliminate heap allocations and `Double`/`Long`/`BigDecimal` boxing in real-time loops; use non-blocking Vert.x event loops without locks.
+  - **Extensibility**: Design cleanly for multiple tokens (`BTC`, `ETH`, `SOL`) and `Timeframe` intervals without hardcoding single-market assumptions.
 - **DI, Logging & JavaDoc**:
   - **Constructor injection** into `private final` fields only (field `@Inject` is forbidden).
   - Log exclusively via `io.quarkus.logging.Log`.
