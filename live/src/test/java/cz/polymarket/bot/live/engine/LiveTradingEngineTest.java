@@ -731,81 +731,87 @@ class LiveTradingEngineTest {
 
     @Test
     void shouldDeduplicateClobPriceChangeEventsWhenTopOfBookPricesDoNotChange() {
+        clobAutoRespond.set(false);
         LiveTradingEngine engine = createTestEngine(250L);
-        engine.discoverAndRotateMarket(1792741500L);
+        try {
+            engine.discoverAndRotateMarket(1792741500L);
 
-        String initialBook = """
-                [
-                  {
-                    "event_type": "book",
-                    "asset_id": "%s",
-                    "bids": [{"price": "0.54", "size": "250"}],
-                    "asks": [{"price": "0.55", "size": "300"}]
-                  },
-                  {
-                    "event_type": "book",
-                    "asset_id": "%s",
-                    "bids": [{"price": "0.44", "size": "250"}],
-                    "asks": [{"price": "0.45", "size": "300"}]
-                  }
-                ]
-                """.formatted(TEST_TOKEN_UP, TEST_TOKEN_DOWN);
-        engine.onRawClobFrame(initialBook, 1792741501000L);
-        var firstQuote = engine.getLatestQuote();
-        assertThat(firstQuote).isNotNull();
-        assertThat(firstQuote.timestampMs()).isEqualTo(1792741501000L);
+            String initialBook = """
+                    [
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "bids": [{"price": "0.54", "size": "250"}],
+                        "asks": [{"price": "0.55", "size": "300"}]
+                      },
+                      {
+                        "event_type": "book",
+                        "asset_id": "%s",
+                        "bids": [{"price": "0.44", "size": "250"}],
+                        "asks": [{"price": "0.45", "size": "300"}]
+                      }
+                    ]
+                    """.formatted(TEST_TOKEN_UP, TEST_TOKEN_DOWN);
+            engine.onRawClobFrame(initialBook, 1792741501000L);
+            var firstQuote = engine.getLatestQuote();
+            assertThat(firstQuote).isNotNull();
+            assertThat(firstQuote.timestampMs()).isEqualTo(1792741501000L);
 
-        // Price change that updates ask size at 0.55 from 300 to 450 and deep bid at 0.10, but keeps BBO prices identical
-        String sameBboPricesFrame = """
-                {
-                  "market": "%s",
-                  "price_changes": [
+            // Price change that updates ask size at 0.55 from 300 to 450 and deep bid at 0.10, but keeps BBO prices identical
+            String sameBboPricesFrame = """
                     {
-                      "asset_id": "%s",
-                      "price": "0.55",
-                      "size": "450",
-                      "side": "SELL",
-                      "best_bid": "0.54",
-                      "best_ask": "0.55"
-                    },
-                    {
-                      "asset_id": "%s",
-                      "price": "0.10",
-                      "size": "900",
-                      "side": "BUY",
-                      "best_bid": "0.44",
-                      "best_ask": "0.45"
+                      "market": "%s",
+                      "price_changes": [
+                        {
+                          "asset_id": "%s",
+                          "price": "0.55",
+                          "size": "450",
+                          "side": "SELL",
+                          "best_bid": "0.54",
+                          "best_ask": "0.55"
+                        },
+                        {
+                          "asset_id": "%s",
+                          "price": "0.10",
+                          "size": "900",
+                          "side": "BUY",
+                          "best_bid": "0.44",
+                          "best_ask": "0.45"
+                        }
+                      ],
+                      "timestamp": "1792741502000",
+                      "event_type": "price_change"
                     }
-                  ],
-                  "timestamp": "1792741502000",
-                  "event_type": "price_change"
-                }
-                """.formatted("0xcond_test", TEST_TOKEN_UP, TEST_TOKEN_DOWN);
-        engine.onRawClobFrame(sameBboPricesFrame, 1792741502000L);
-        assertThat(engine.getLatestQuote()).isSameAs(firstQuote);
+                    """.formatted("0xcond_test", TEST_TOKEN_UP, TEST_TOKEN_DOWN);
+            engine.onRawClobFrame(sameBboPricesFrame, 1792741502000L);
+            assertThat(engine.getLatestQuote()).isSameAs(firstQuote);
 
-        // Price change that changes best_ask on UP to 0.56 -> should update latestQuote
-        String changedBboFrame = """
-                {
-                  "market": "%s",
-                  "price_changes": [
+            // Price change that changes best_ask on UP to 0.56 -> should update latestQuote
+            String changedBboFrame = """
                     {
-                      "asset_id": "%s",
-                      "price": "0.55",
-                      "size": "0",
-                      "side": "SELL",
-                      "best_bid": "0.54",
-                      "best_ask": "0.56"
+                      "market": "%s",
+                      "price_changes": [
+                        {
+                          "asset_id": "%s",
+                          "price": "0.55",
+                          "size": "0",
+                          "side": "SELL",
+                          "best_bid": "0.54",
+                          "best_ask": "0.56"
+                        }
+                      ],
+                      "timestamp": "1792741503000",
+                      "event_type": "price_change"
                     }
-                  ],
-                  "timestamp": "1792741503000",
-                  "event_type": "price_change"
-                }
-                """.formatted("0xcond_test", TEST_TOKEN_UP);
-        engine.onRawClobFrame(changedBboFrame, 1792741503000L);
-        assertThat(engine.getLatestQuote()).isNotSameAs(firstQuote);
-        assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.56);
-        assertThat(engine.getLatestQuote().timestampMs()).isEqualTo(1792741503000L);
+                    """.formatted("0xcond_test", TEST_TOKEN_UP);
+            engine.onRawClobFrame(changedBboFrame, 1792741503000L);
+            assertThat(engine.getLatestQuote()).isNotSameAs(firstQuote);
+            assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.56);
+            assertThat(engine.getLatestQuote().timestampMs()).isEqualTo(1792741503000L);
+        } finally {
+            clobAutoRespond.set(true);
+            engine.onStop(null);
+        }
     }
 
     @Test
@@ -930,49 +936,56 @@ class LiveTradingEngineTest {
 
     @Test
     void shouldSkipStaleQuotesAndContinueUpdatingClobBookWithoutBlockingDuringSlowHttpOrder() {
+        clobAutoRespond.set(false);
         LiveTradingEngine engine = createTestEngine(200L);
-        engine.discoverAndRotateMarket(1792741500L);
+        try {
+            engine.discoverAndRotateMarket(1792741500L);
 
-        // Advance oracle clock to 1792742000_000 ms
-        engine.onPolymarketCryptoPrice(1792742000_000L, "btcusd", "chainlink", 85100.0, 1792742000_000L);
+            // Advance oracle clock to 1792742000_000 ms
+            engine.onPolymarketCryptoPrice(1792742000_000L, "btcusd", "chainlink", 85100.0, 1792742000_000L);
 
-        // Feed an OrderBookQuote that is 500 ms older than the latest oracle timestamp (> maxQuoteAgeMs = 200 ms)
-        engine.onOrderBookQuote(new OrderBookQuote(
-                0.54,
-                0.55,
-                250.0,
-                300.0,
-                0.44,
-                0.45,
-                250.0,
-                300.0,
-                1792741999_500L
-        ));
+            // Feed an OrderBookQuote that is 500 ms older than the latest oracle timestamp (> maxQuoteAgeMs = 200 ms)
+            engine.onOrderBookQuote(new OrderBookQuote(
+                    0.54,
+                    0.55,
+                    250.0,
+                    300.0,
+                    0.44,
+                    0.45,
+                    250.0,
+                    300.0,
+                    1792741999_500L
+            ));
 
-        LiveTelemetryDto telemetryAfterStale = engine.getTelemetry();
-        assertThat(telemetryAfterStale.staleQuotesSkipped()).isEqualTo(1L);
-        assertThat(telemetryAfterStale.lastQuoteAgeMs()).isEqualTo(500L);
-        assertThat(telemetryAfterStale.maxQuoteAgeMsObserved()).isEqualTo(500L);
-        assertThat(telemetryAfterStale.threads()).hasSize(4);
+            LiveTelemetryDto telemetryAfterStale = engine.getTelemetry();
+            assertThat(telemetryAfterStale.staleQuotesSkipped()).isEqualTo(1L);
+            assertThat(telemetryAfterStale.lastQuoteAgeMs()).isEqualTo(500L);
+            assertThat(telemetryAfterStale.maxQuoteAgeMsObserved()).isEqualTo(500L);
+            assertThat(telemetryAfterStale.threads()).hasSize(4);
 
-        // Feed a fresh quote (age = 50 ms <= 200 ms) -> should not increment staleQuotesSkipped
-        engine.onOrderBookQuote(new OrderBookQuote(
-                0.55,
-                0.56,
-                250.0,
-                300.0,
-                0.43,
-                0.44,
-                250.0,
-                300.0,
-                1792741999_950L
-        ));
-        assertThat(engine.getTelemetry().staleQuotesSkipped()).isEqualTo(1L);
-        assertThat(engine.getTelemetry().lastQuoteAgeMs()).isEqualTo(50L);
+            // Feed a fresh quote (age = 50 ms <= 200 ms) -> should not increment staleQuotesSkipped
+            engine.onOrderBookQuote(new OrderBookQuote(
+                    0.55,
+                    0.56,
+                    250.0,
+                    300.0,
+                    0.43,
+                    0.44,
+                    250.0,
+                    300.0,
+                    1792741999_950L
+            ));
+            assertThat(engine.getTelemetry().staleQuotesSkipped()).isEqualTo(1L);
+            assertThat(engine.getTelemetry().lastQuoteAgeMs()).isEqualTo(50L);
+        } finally {
+            clobAutoRespond.set(true);
+            engine.onStop(null);
+        }
     }
 
     @Test
     void shouldPrefetchUpcomingMarketDuringLookaheadWindowAndRotateImmediatelyAtBoundary() {
+        clobAutoRespond.set(false);
         LiveTradingEngine engine = createTestEngine(200L);
         try {
             long market1StartSec = 1792741500L;
@@ -996,6 +1009,7 @@ class LiveTradingEngineTest {
             assertThat(engine.getActiveMarketInfo().slug()).isEqualTo("btc-updown-15m-1792742400");
             assertThat(engine.getPrefetchedNextMarketInfo()).isNull();
         } finally {
+            clobAutoRespond.set(true);
             engine.onStop(null);
         }
     }
@@ -1121,6 +1135,7 @@ class LiveTradingEngineTest {
             assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
             assertThat(engine.getPolyBoltMarketMessageCount()).isGreaterThanOrEqualTo(1L);
         } finally {
+            clobAutoRespond.set(true);
             engineLogger.removeHandler(testHandler);
             engine.onStop(null);
         }
@@ -1203,6 +1218,7 @@ class LiveTradingEngineTest {
                             && r.getMessage() != null
                             && r.getMessage().contains("code=1000"));
         } finally {
+            clobAutoRespond.set(true);
             engineLogger.removeHandler(testHandler);
             engine.onStop(null);
         }
