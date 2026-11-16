@@ -27,6 +27,7 @@ import java.util.stream.Stream;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 
@@ -35,7 +36,7 @@ import static org.hamcrest.Matchers.hasSize;
  * on startup to all mocked Binance, Kraken, Coinbase, and Polymarket streams, tracks the current
  * market plus 5 lookahead future markets (6 total), writes daily Binance, Kraken, Coinbase, and
  * PolyBolt ({@code price.crypto} and {@code price.crypto.twap}) files as well as per-market {@code .jsonl.zst}
- * files to disk, and reports live status.
+ * files to disk, reports live status including {@code readyForCutover}, and executes cutover REST endpoints.
  */
 @QuarkusTest
 @QuarkusTestResource(MockMarketStreamsTestResource.class)
@@ -69,6 +70,9 @@ class CollectorStatusResourceTest {
                         .statusCode(200)
                         .body("symbol", equalTo("BTCUSDT"))
                         .body("timeframe", equalTo("15m"))
+                        .body("writeMode", equalTo("ACTIVE"))
+                        .body("readyForCutover", equalTo(true))
+                        .body("standbyBufferedRecords", equalTo(0))
                         .body("binanceStreams.SPOT_AGG_TRADES", equalTo("CONNECTED"))
                         .body("binanceStreams.SPOT_BOOK_TICKER", equalTo("CONNECTED"))
                         .body("binanceStreams.FUTURES_AGG_TRADES", equalTo("CONNECTED"))
@@ -181,6 +185,23 @@ class CollectorStatusResourceTest {
         assertThat(marketLines).anyMatch(l -> l.contains("\"type\":\"market_discovered\""));
         assertThat(marketLines).anyMatch(l -> l.contains("\"type\":\"clob\"") && l.contains("\"event_type\":\"book\""));
         assertThat(marketLines).anyMatch(l -> l.contains("\"type\":\"clob\"") && l.contains("\"event_type\":\"last_trade_price\""));
+
+        // Verify cutover freeze and activate REST endpoints
+        long freezeTs = given()
+                .when().post("/api/collector/cutover/freeze")
+                .then()
+                .statusCode(200)
+                .body("writeMode", equalTo("FROZEN"))
+                .body("cutoverTimestampMs", greaterThan(0L))
+                .extract().path("cutoverTimestampMs");
+
+        given()
+                .queryParam("afterTimestampMs", freezeTs)
+                .when().post("/api/collector/cutover/activate")
+                .then()
+                .statusCode(200)
+                .body("writeMode", equalTo("ACTIVE"))
+                .body("activatedAfterTimestampMs", equalTo(freezeTs));
     }
 
     @Test

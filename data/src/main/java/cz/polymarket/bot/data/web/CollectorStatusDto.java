@@ -8,6 +8,9 @@ import java.util.Map;
  *
  * @param symbol                             configured trading symbol (e.g. BTCUSDT)
  * @param timeframe                          configured Polymarket market timeframe (e.g. 15m)
+ * @param writeMode                          current write mode ({@code "ACTIVE"}, {@code "STANDBY"}, or {@code "FROZEN"})
+ * @param readyForCutover                    whether all WebSocket streams are connected and receiving data
+ * @param standbyBufferedRecords             number of records currently held in the standby memory buffer
  * @param binanceStreams                     connection state of each of the 4 Binance ({@code aggTrades} and {@code bookTicker}) WebSocket streams
  * @param krakenUsdtUsdEnabled               whether listening and collecting of the Kraken {@code USDTUSD} stream is enabled
  * @param krakenStreams                      connection state of each active Kraken Spot trade WebSocket stream (e.g. {@code BTCUSD}, {@code USDTUSD})
@@ -25,6 +28,9 @@ import java.util.Map;
 public record CollectorStatusDto(
         String symbol,
         String timeframe,
+        String writeMode,
+        boolean readyForCutover,
+        long standbyBufferedRecords,
         Map<String, String> binanceStreams,
         boolean krakenUsdtUsdEnabled,
         Map<String, String> krakenStreams,

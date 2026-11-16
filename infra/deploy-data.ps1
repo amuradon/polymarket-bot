@@ -91,6 +91,7 @@ $GeneratedEntries = @(jar tf $GeneratedBytecodeJar)
 $RequiredBeanMarkers = @(
     "DataCollectorService_Bean.class",
     "DataCollectorService_Observer_onStart",
+    "CollectorWriteCoordinator_Bean.class",
     "CollectorStatusResource_Bean.class"
 )
 foreach ($Marker in $RequiredBeanMarkers) {
@@ -165,8 +166,8 @@ $Commands = @(
     "set -euxo pipefail",
     "export AWS_REGION=$Region",
     "sudo /usr/local/bin/deploy-polymarket-data.sh `"$S3ArtifactUri`"",
-    "sleep 3",
-    "sudo systemctl status polymarket-data --no-pager"
+    "sleep 2",
+    "if sudo systemctl is-active --quiet polymarket-data@blue; then sudo systemctl status polymarket-data@blue --no-pager; elif sudo systemctl is-active --quiet polymarket-data@green; then sudo systemctl status polymarket-data@green --no-pager; else sudo systemctl status polymarket-data --no-pager; fi"
 )
 
 $TempParamsFile = [System.IO.Path]::GetTempFileName()

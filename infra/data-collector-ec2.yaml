@@ -109,6 +109,14 @@ Resources:
                 mkdir -p /mnt/ebs/polymarket-data/collector
                 chown -R polymarket:polymarket /mnt/ebs/polymarket-data
                 chmod -R 2775 /mnt/ebs/polymarket-data
+                if [ ! -f /mnt/ebs/polymarket-data/.swapfile ]; then
+                  dd if=/dev/zero of=/mnt/ebs/polymarket-data/.swapfile bs=1M count=2048 status=none
+                  chmod 600 /mnt/ebs/polymarket-data/.swapfile
+                  mkswap /mnt/ebs/polymarket-data/.swapfile >/dev/null
+                fi
+                if ! swapon --show | grep -q "/mnt/ebs/polymarket-data/.swapfile"; then
+                  swapon /mnt/ebs/polymarket-data/.swapfile || true
+                fi
                 exit 0
               fi
 
@@ -170,6 +178,14 @@ Resources:
               mkdir -p /mnt/ebs/polymarket-data/collector
               chown -R polymarket:polymarket /mnt/ebs/polymarket-data
               chmod -R 2775 /mnt/ebs/polymarket-data
+              if [ ! -f /mnt/ebs/polymarket-data/.swapfile ]; then
+                dd if=/dev/zero of=/mnt/ebs/polymarket-data/.swapfile bs=1M count=2048 status=none
+                chmod 600 /mnt/ebs/polymarket-data/.swapfile
+                mkswap /mnt/ebs/polymarket-data/.swapfile >/dev/null
+              fi
+              if ! swapon --show | grep -q "/mnt/ebs/polymarket-data/.swapfile"; then
+                swapon /mnt/ebs/polymarket-data/.swapfile || true
+              fi
               EOF
               chmod +x /usr/local/bin/mount-polymarket-ebs.sh
               /usr/local/bin/mount-polymarket-ebs.sh || true
@@ -232,13 +248,17 @@ Resources:
               net.core.busy_poll = 50
               net.core.netdev_max_backlog = 30000
               net.ipv4.ip_unprivileged_port_start = 443
+              vm.swappiness = 10
               EOF
               sysctl --system || true
 
-              # Configure systemd service for Bare-OS 24/7 Market Data Collector execution
-              cat << 'EOF' > /etc/systemd/system/polymarket-data.service
+              # Configure Blue-Green systemd template service for Bare-OS 24/7 Market Data Collector execution
+              mkdir -p /etc/polymarket-data /opt/polymarket-data-blue /opt/polymarket-data-green
+              chown -R polymarket:polymarket /opt/polymarket-data-blue /opt/polymarket-data-green
+
+              cat << 'EOF' > /etc/systemd/system/polymarket-data@.service
               [Unit]
-              Description=Polymarket Bot Market Data Collector (Quarkus Bare-OS)
+              Description=Polymarket Bot Market Data Collector (Quarkus Bare-OS Slot %i)
               After=network-online.target
               Wants=network-online.target
 
@@ -247,7 +267,8 @@ Resources:
               User=polymarket
               Group=polymarket
               UMask=0002
-              WorkingDirectory=/opt/polymarket-data
+              WorkingDirectory=/opt/polymarket-data-%i
+              EnvironmentFile=/etc/polymarket-data/%i.env
               Environment="QUARKUS_PROFILE=prod"
               Environment="AWS_REGION=${AWS::Region}"
               Environment="POLYMARKET_COLLECTOR_DATA_DIR=/mnt/ebs/polymarket-data/collector"
@@ -263,14 +284,16 @@ Resources:
                 -XX:+AlwaysPreTouch \
                 -XX:+UseTransparentHugePages \
                 -XX:+UseThreadPriorities \
-                -Xms1g \
-                -Xmx1g \
+                -Xms512m \
+                -Xmx640m \
                 -XX:+DisableExplicitGC \
                 --enable-native-access=ALL-UNNAMED \
-                -Dquarkus.http.host=0.0.0.0 \
-                -Dquarkus.http.port=443 \
+                -Dquarkus.http.host=127.0.0.1 \
+                -Dquarkus.http.port=${!SLOT_HTTP_PORT} \
+                -Dpolymarket.collector.public-port=${!POLYMARKET_COLLECTOR_PUBLIC_PORT} \
+                -Dpolymarket.collector.initial-write-mode=${!POLYMARKET_COLLECTOR_INITIAL_WRITE_MODE} \
                 -Djava.util.logging.manager=org.jboss.logmanager.LogManager \
-                -jar /opt/polymarket-data/quarkus-run.jar
+                -jar /opt/polymarket-data-%i/quarkus-run.jar
               StandardOutput=append:/var/log/polymarket-data/data-collector.log
               StandardError=append:/var/log/polymarket-data/data-collector.log
               Restart=always
@@ -282,7 +305,7 @@ Resources:
               EOF
               systemctl daemon-reload
 
-              # Create atomic S3 release deployment script invoked via AWS SSM Run Command
+              # Create zero-loss Blue-Green S3 release deployment script invoked via AWS SSM Run Command
               cat << 'EOF' > /usr/local/bin/deploy-polymarket-data.sh
               #!/bin/bash
               set -euo pipefail
@@ -290,24 +313,118 @@ Resources:
               TMP_ARCHIVE="/tmp/polymarket-data-release.tar.gz"
               STAGING_DIR="/opt/polymarket-data.staging"
 
+              /usr/local/bin/mount-polymarket-ebs.sh
+              mkdir -p /etc/polymarket-data /opt/polymarket-data-blue /opt/polymarket-data-green
+
+              ACTIVE_SLOT="none"
+              ACTIVE_PORT=0
+              TARGET_SLOT="blue"
+              TARGET_PORT=8084
+
+              if systemctl is-active --quiet polymarket-data@blue; then
+                ACTIVE_SLOT="blue"
+                ACTIVE_PORT=8084
+                TARGET_SLOT="green"
+                TARGET_PORT=8085
+              elif systemctl is-active --quiet polymarket-data@green; then
+                ACTIVE_SLOT="green"
+                ACTIVE_PORT=8085
+                TARGET_SLOT="blue"
+                TARGET_PORT=8084
+              elif systemctl is-active --quiet polymarket-data; then
+                ACTIVE_SLOT="legacy"
+                ACTIVE_PORT=443
+                TARGET_SLOT="blue"
+                TARGET_PORT=8084
+              fi
+
+              echo "Active slot: ${!ACTIVE_SLOT} -> Target slot: ${!TARGET_SLOT} (control port ${!TARGET_PORT})"
+
               aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
               rm -rf "$STAGING_DIR"
               mkdir -p "$STAGING_DIR"
               tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
               rm -f "$TMP_ARCHIVE"
-              chown -R polymarket:polymarket "$STAGING_DIR"
 
-              /usr/local/bin/mount-polymarket-ebs.sh
-
-              systemctl stop polymarket-data || true
-              rm -rf /opt/polymarket-data/*
-              cp -a "$STAGING_DIR"/. /opt/polymarket-data/
+              systemctl stop "polymarket-data@${!TARGET_SLOT}" 2>/dev/null || true
+              TARGET_DIR="/opt/polymarket-data-${!TARGET_SLOT}"
+              rm -rf "${!TARGET_DIR:?}"/*
+              cp -a "$STAGING_DIR"/. "$TARGET_DIR"/
               rm -rf "$STAGING_DIR"
-              chown -R polymarket:polymarket /opt/polymarket-data
+              chown -R polymarket:polymarket "$TARGET_DIR"
+
+              if [ "$ACTIVE_SLOT" = "none" ]; then
+                cat << ENV_EOF > "/etc/polymarket-data/${!TARGET_SLOT}.env"
+              SLOT_HTTP_PORT=${!TARGET_PORT}
+              POLYMARKET_COLLECTOR_PUBLIC_PORT=443
+              POLYMARKET_COLLECTOR_INITIAL_WRITE_MODE=ACTIVE
+              ENV_EOF
+                systemctl daemon-reload
+                systemctl enable --now "polymarket-data@${!TARGET_SLOT}"
+              else
+                cat << ENV_EOF > "/etc/polymarket-data/${!TARGET_SLOT}.env"
+              SLOT_HTTP_PORT=${!TARGET_PORT}
+              POLYMARKET_COLLECTOR_PUBLIC_PORT=443
+              POLYMARKET_COLLECTOR_INITIAL_WRITE_MODE=STANDBY
+              ENV_EOF
+                systemctl daemon-reload
+                systemctl start "polymarket-data@${!TARGET_SLOT}"
+              fi
+
+              echo "Waiting for target slot '${!TARGET_SLOT}' on 127.0.0.1:${!TARGET_PORT} to report readyForCutover=true..."
+              READY="false"
+              for attempt in $(seq 1 35); do
+                if STATUS_JSON=$(curl -fsS --max-time 2 "http://127.0.0.1:${!TARGET_PORT}/api/collector/status" 2>/dev/null); then
+                  if echo "$STATUS_JSON" | jq -e '.readyForCutover == true' >/dev/null 2>&1; then
+                    READY="true"
+                    echo "Target slot '${!TARGET_SLOT}' is READY (attempt ${!attempt}): $STATUS_JSON"
+                    break
+                  fi
+                fi
+                sleep 1
+              done
+
+              if [ "$READY" != "true" ]; then
+                echo "ERROR: Target slot '${!TARGET_SLOT}' failed readiness verification within 35s! Aborting cutover; active slot '${!ACTIVE_SLOT}' remains untouched." >&2
+                systemctl stop "polymarket-data@${!TARGET_SLOT}" 2>/dev/null || true
+                systemctl disable "polymarket-data@${!TARGET_SLOT}" 2>/dev/null || true
+                tail -n 40 /var/log/polymarket-data/data-collector.log >&2 || true
+                exit 1
+              fi
+
+              if [ "$ACTIVE_SLOT" != "none" ]; then
+                if [ "$ACTIVE_SLOT" = "legacy" ]; then
+                  echo "Stopping legacy single-instance polymarket-data.service and capturing cutover timestamp..."
+                  systemctl stop polymarket-data
+                  CUTOVER_TS=$(date +%s%3N)
+                  systemctl disable polymarket-data 2>/dev/null || true
+                  rm -f /etc/systemd/system/polymarket-data.service
+                else
+                  echo "Freezing active slot '${!ACTIVE_SLOT}' on 127.0.0.1:${!ACTIVE_PORT}..."
+                  FREEZE_JSON=$(curl -fsS -X POST "http://127.0.0.1:${!ACTIVE_PORT}/api/collector/cutover/freeze")
+                  echo "Freeze response: $FREEZE_JSON"
+                  CUTOVER_TS=$(echo "$FREEZE_JSON" | jq -r '.cutoverTimestampMs')
+                fi
+
+                echo "Activating target slot '${!TARGET_SLOT}' afterTimestampMs=${!CUTOVER_TS}..."
+                ACTIVATE_JSON=$(curl -fsS -X POST "http://127.0.0.1:${!TARGET_PORT}/api/collector/cutover/activate?afterTimestampMs=${!CUTOVER_TS}")
+                echo "Activate response: $ACTIVATE_JSON"
+
+                cat << ENV_EOF > "/etc/polymarket-data/${!TARGET_SLOT}.env"
+              SLOT_HTTP_PORT=${!TARGET_PORT}
+              POLYMARKET_COLLECTOR_PUBLIC_PORT=443
+              POLYMARKET_COLLECTOR_INITIAL_WRITE_MODE=ACTIVE
+              ENV_EOF
+                systemctl enable "polymarket-data@${!TARGET_SLOT}"
+
+                if [ "$ACTIVE_SLOT" = "blue" ] || [ "$ACTIVE_SLOT" = "green" ]; then
+                  systemctl stop "polymarket-data@${!ACTIVE_SLOT}" || true
+                  systemctl disable "polymarket-data@${!ACTIVE_SLOT}" 2>/dev/null || true
+                fi
+              fi
 
               systemctl daemon-reload
-              systemctl enable --now polymarket-data
-              systemctl restart polymarket-data
+              echo "Blue-Green cutover to slot '${!TARGET_SLOT}' completed with zero data loss."
               EOF
               chmod +x /usr/local/bin/deploy-polymarket-data.sh
             - LogGroupName:

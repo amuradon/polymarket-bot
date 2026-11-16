@@ -108,7 +108,7 @@ if [ ! -f "$GENERATED_BYTECODE_JAR" ]; then
     exit 1
 fi
 GENERATED_ENTRIES="$(jar tf "$GENERATED_BYTECODE_JAR")"
-for MARKER in "DataCollectorService_Bean.class" "DataCollectorService_Observer_onStart" "CollectorStatusResource_Bean.class"; do
+for MARKER in "DataCollectorService_Bean.class" "DataCollectorService_Observer_onStart" "CollectorWriteCoordinator_Bean.class" "CollectorStatusResource_Bean.class"; do
     if ! grep -q "$MARKER" <<< "$GENERATED_ENTRIES"; then
         echo "Error: Verification failed: '${GENERATED_BYTECODE_JAR}' is missing CDI bean entry matching '${MARKER}'. Run './mvnw package -pl data -am -DskipTests' and re-run deploy-data.sh." >&2
         exit 1
@@ -167,8 +167,8 @@ cat << EOF > "${TEMP_PARAMS}"
     "set -euxo pipefail",
     "export AWS_REGION=${REGION}",
     "sudo /usr/local/bin/deploy-polymarket-data.sh \"${S3_ARTIFACT_URI}\"",
-    "sleep 3",
-    "sudo systemctl status polymarket-data --no-pager"
+    "sleep 2",
+    "if sudo systemctl is-active --quiet polymarket-data@blue; then sudo systemctl status polymarket-data@blue --no-pager; elif sudo systemctl is-active --quiet polymarket-data@green; then sudo systemctl status polymarket-data@green --no-pager; else sudo systemctl status polymarket-data --no-pager; fi"
   ]
 }
 EOF

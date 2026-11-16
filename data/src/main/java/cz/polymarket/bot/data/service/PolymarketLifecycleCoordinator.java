@@ -7,7 +7,7 @@ import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
+import cz.polymarket.bot.data.storage.CollectorWriteCoordinator;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -41,7 +41,7 @@ public class PolymarketLifecycleCoordinator {
 
     private final PolymarketGammaClient gammaClient;
     private final PolymarketClobClient clobClient;
-    private final PolymarketMarketStorageManager storageManager;
+    private final CollectorWriteCoordinator writeCoordinator;
     private final String symbol;
     private final String timeframe;
     private final int lookaheadCount;
@@ -55,18 +55,18 @@ public class PolymarketLifecycleCoordinator {
     /**
      * Constructs the Polymarket lifecycle coordinator.
      *
-     * @param gammaClient    Gamma REST client for initial market discovery
-     * @param clobClient     CLOB WebSocket client managing per-market streams
-     * @param storageManager per-market Zstd storage manager
-     * @param symbol         configured asset symbol (e.g. BTCUSDT)
-     * @param timeframe      configured Polymarket timeframe (e.g. 15m)
-     * @param lookaheadCount number of future markets to record ahead of the current market (default 5)
+     * @param gammaClient      Gamma REST client for initial market discovery
+     * @param clobClient       CLOB WebSocket client managing per-market streams
+     * @param writeCoordinator write coordinator routing events to active storage or standby buffer
+     * @param symbol           configured asset symbol (e.g. BTCUSDT)
+     * @param timeframe        configured Polymarket timeframe (e.g. 15m)
+     * @param lookaheadCount   number of future markets to record ahead of the current market (default 5)
      */
     @Inject
     public PolymarketLifecycleCoordinator(
             PolymarketGammaClient gammaClient,
             PolymarketClobClient clobClient,
-            PolymarketMarketStorageManager storageManager,
+            CollectorWriteCoordinator writeCoordinator,
             @ConfigProperty(name = "polymarket.collector.symbol", defaultValue = "BTCUSDT")
             String symbol,
             @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
@@ -75,7 +75,7 @@ public class PolymarketLifecycleCoordinator {
             int lookaheadCount) {
         this.gammaClient = gammaClient;
         this.clobClient = clobClient;
-        this.storageManager = storageManager;
+        this.writeCoordinator = writeCoordinator;
         this.symbol = symbol;
         this.timeframe = timeframe;
         this.lookaheadCount = Math.max(0, lookaheadCount);
@@ -93,11 +93,10 @@ public class PolymarketLifecycleCoordinator {
     }
 
     /**
-     * Stops all active CLOB WebSocket streams and closes all open market files.
+     * Stops all active CLOB WebSocket streams and clears tracked market state.
      */
     public void stop() {
         clobClient.stopAll();
-        storageManager.closeAll();
         trackedMarketsBySlug.clear();
         closedMarketsEndSecBySlug.clear();
     }
@@ -147,7 +146,7 @@ public class PolymarketLifecycleCoordinator {
                 trackedMarketsBySlug.remove(slug);
                 closedMarketsEndSecBySlug.put(slug, market.endSec());
                 clobClient.closeMarketStream(slug);
-                storageManager.closeMarketWriter(slug);
+                writeCoordinator.closePolymarketMarketWriter(slug);
                 Log.infof("Polymarket market %s reached %ds post-end safeguard timeout (endSec=%d, now=%d); closing stream and finalizing market archive.",
                         slug, MAX_POST_END_RETENTION_SECONDS, market.endSec(), nowEpochSec);
             } else if (nowEpochSec >= market.endSec() && connectionStates != null) {
@@ -156,7 +155,7 @@ public class PolymarketLifecycleCoordinator {
                     trackedMarketsBySlug.remove(slug);
                     closedMarketsEndSecBySlug.put(slug, market.endSec());
                     clobClient.closeMarketStream(slug);
-                    storageManager.closeMarketWriter(slug);
+                    writeCoordinator.closePolymarketMarketWriter(slug);
                     Log.infof("Polymarket market %s is %s after market end (endSec=%d, now=%d); closing stream without reconnect and finalizing market archive.",
                             slug, state, market.endSec(), nowEpochSec);
                 }
@@ -175,7 +174,7 @@ public class PolymarketLifecycleCoordinator {
         if (!isJsonPayload(rawJson) || !trackedMarketsBySlug.containsKey(slug)) {
             return;
         }
-        storageManager.recordMarketEvent(slug, recvTimestampMs, "clob", rawJson);
+        writeCoordinator.recordPolymarketEvent(slug, recvTimestampMs, "clob", rawJson);
     }
 
     /**
@@ -189,7 +188,7 @@ public class PolymarketLifecycleCoordinator {
         if (!isJsonPayloadBytes(rawPayloadBytes) || !trackedMarketsBySlug.containsKey(slug)) {
             return;
         }
-        storageManager.recordMarketEventBytes(slug, recvTimestampMs, "clob", rawPayloadBytes);
+        writeCoordinator.recordPolymarketEventBytes(slug, recvTimestampMs, "clob", rawPayloadBytes);
     }
 
     /**
@@ -204,7 +203,7 @@ public class PolymarketLifecycleCoordinator {
     private void registerNewMarket(PolymarketMarketInfo info, long recvTs) {
         String slug = info.slug();
         trackedMarketsBySlug.put(slug, info);
-        storageManager.recordMarketEvent(slug, recvTs, "market_discovered", info.rawJson());
+        writeCoordinator.recordPolymarketEvent(slug, recvTs, "market_discovered", info.rawJson());
         clobClient.openMarketStream(
                 slug,
                 info.clobTokenIds(),
@@ -250,7 +249,7 @@ public class PolymarketLifecycleCoordinator {
             closedMarketsEndSecBySlug.put(slug, removed.endSec());
         }
         clobClient.closeMarketStream(slug);
-        storageManager.closeMarketWriter(slug);
+        writeCoordinator.closePolymarketMarketWriter(slug);
         if (telemetry != null) {
             if (telemetry.lastCloseCode() == 1000) {
                 Log.infof("Polymarket market %s closed normally by server (closeCode=%d, reason=%s, totalFrames=%d); market archive finalized.",

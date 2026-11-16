@@ -138,7 +138,9 @@ java \
 ```bash
 ./mvnw quarkus:dev -pl data
 ```
-- Collector status & active stream diagnostics: `GET http://localhost:8084/api/collector/status`
+- Collector status, readiness & active stream diagnostics: `GET http://localhost:8084/api/collector/status`
+- Blue-Green atomic cutover freeze (active slot): `POST http://localhost:8084/api/collector/cutover/freeze`
+- Blue-Green atomic cutover activate (standby slot): `POST http://localhost:8084/api/collector/cutover/activate?afterTimestampMs={ts}`
 
 ---
 

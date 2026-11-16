@@ -94,7 +94,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 - **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format with zero WebSocket JSON parsing overhead.
 - **Binance, Kraken, Coinbase & PolyBolt Daily Files**: Writes the 4 Binance streams (`SPOT_AGG_TRADES`, `SPOT_BOOK_TICKER`, `FUTURES_AGG_TRADES`, `FUTURES_BOOK_TICKER`), the Kraken Spot `trade` streams (`<SYMBOL>` and optionally `USDTUSD` controlled by `polymarket.collector.kraken.usdtusd-enabled`), the Coinbase Spot `matches` trade stream (`<SYMBOL>`), and the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
 - **Polymarket Per-Market Lifecycle Files**: Records the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
-- **Status Endpoint**: Exposes `/api/collector/status` for monitoring active streams and storage health.
+- **Status & Blue-Green Cutover Endpoints**: Exposes `/api/collector/status` for monitoring active streams, `writeMode` (`ACTIVE`, `STANDBY`, `FROZEN`), and `readyForCutover`, plus `/api/collector/cutover/freeze` and `/api/collector/cutover/activate` for zero-loss, zero-duplicate In-Host Blue-Green deployment cutovers.
 
 ### `trading`
 - **Shared Trading Runtime**: Shared runtime configuration and Quarkus platform extensions consumed by `paper` and `live` applications.

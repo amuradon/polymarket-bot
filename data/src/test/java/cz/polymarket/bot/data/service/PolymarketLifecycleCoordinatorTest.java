@@ -8,6 +8,11 @@ import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
+import cz.polymarket.bot.data.storage.CollectorWriteCoordinator;
+import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
+import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
+import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
+import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -84,11 +89,11 @@ class PolymarketLifecycleCoordinatorTest {
             when(gammaClient.fetchMarketBySlug(eq(slug), eq(durationSec))).thenReturn(Optional.of(info));
         }
 
-        PolymarketMarketStorageManager storageManager = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        CollectorWriteCoordinator writeCoordinator = createActiveWriteCoordinator(tempDir);
         PolymarketLifecycleCoordinator coordinator = new PolymarketLifecycleCoordinator(
                 gammaClient,
                 clobClient,
-                storageManager,
+                writeCoordinator,
                 "BTCUSDT",
                 "15m",
                 5
@@ -218,11 +223,11 @@ class PolymarketLifecycleCoordinatorTest {
             when(gammaClient.fetchMarketBySlug(eq(slug), eq(durationSec))).thenReturn(Optional.of(info));
         }
 
-        PolymarketMarketStorageManager storageManager = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        CollectorWriteCoordinator writeCoordinator = createActiveWriteCoordinator(tempDir);
         PolymarketLifecycleCoordinator coordinator = new PolymarketLifecycleCoordinator(
                 gammaClient,
                 clobClient,
-                storageManager,
+                writeCoordinator,
                 "BTCUSDT",
                 "15m",
                 5
@@ -289,5 +294,18 @@ class PolymarketLifecycleCoordinatorTest {
         assertThat(coordinator.getTrackedMarketSlugs()).contains(slug7);
 
         coordinator.stop();
+    }
+
+    private static CollectorWriteCoordinator createActiveWriteCoordinator(Path dir) {
+        String dirStr = dir.toString();
+        return new CollectorWriteCoordinator(
+                new DailyBinanceStorageManager(dirStr, "BTCUSDT"),
+                new DailyKrakenStorageManager(dirStr, "BTCUSDT"),
+                new DailyCoinbaseStorageManager(dirStr, "BTCUSDT"),
+                new DailyPolyBoltStorageManager(dirStr, "BTCUSDT"),
+                new PolymarketMarketStorageManager(dirStr, "BTCUSDT", "15m"),
+                "ACTIVE",
+                30_000L
+        );
     }
 }
