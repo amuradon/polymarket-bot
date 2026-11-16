@@ -1,0 +1,120 @@
+# Architecture Guide for AI Agents & Developers
+
+This document defines the architectural boundaries, module hierarchy, and design rules for the **Polymarket Bot** project. All AI agents and developers **MUST** strictly adhere to these rules when modifying or adding code.
+
+---
+
+## 1. Module Hierarchy & Dependencies
+
+The project is structured as a Maven Multi-Module project with 7 distinct submodules:
+
+```mermaid
+flowchart TD
+    subgraph Core["Core Domain & Strategy Layer"]
+        common["common<br/>(Domain, Calculators, Strategy API)"]
+    end
+
+    subgraph ConnectivityLayer["Connectivity Layer"]
+        connector["connector<br/>(Binance & Polymarket WS/REST Connectors, Market Discovery)"]
+    end
+
+    subgraph TradingLayer["Trading Layer"]
+        trading["trading<br/>(Shared Trading Runtime Layer)"]
+    end
+
+    subgraph Applications["Standalone Executable Applications"]
+        data["data<br/>(Market Data Collector Quarkus App)"]
+        live["live<br/>(Live Trading Quarkus App)"]
+        paper["paper<br/>(Paper Trading Quarkus App)"]
+        backtest["backtest<br/>(Backtest Engine Quarkus App)"]
+    end
+
+    connector --> data
+    connector --> trading
+    common --> trading
+    common --> backtest
+    trading --> live
+    trading --> paper
+    connector --> live
+    connector --> paper
+```
+
+### Dependency Matrix & Isolation Rules
+
+| Module | Packaging | Depends On | Allowed Dependencies | Prohibited Dependencies |
+| :--- | :--- | :--- | :--- | :--- |
+| **`common`** | `jar` (library) | *None* | Pure domain, math calculators, strategy API, Java standard library | `connector`, `trading`, `data`, `live`, `paper`, `backtest`, heavy frameworks |
+| **`connector`** | `jar` (library) | *None* | Quarkus Arc, Vert.x, Jackson, Java standard library (`HttpClient`) | `common`, `trading`, `data`, `live`, `paper`, `backtest` |
+| **`data`** | `jar` (app) | `connector` | `connector`, `zstd-jni`, Quarkus Scheduler/REST | **`common`**, `trading`, `live`, `paper`, `backtest` |
+| **`trading`** | `jar` (library) | `common`, `connector` | `common`, `connector`, Quarkus platform extensions (REST, Qute, WebSockets, Vert.x) | `data`, `backtest`, `live`, `paper` |
+| **`live`** | `jar` (app) | `trading`, `connector` | `trading`, `connector` (transitive: `common`) | `data`, `backtest`, `paper` |
+| **`paper`** | `jar` (app) | `trading`, `connector` | `trading`, `connector` (transitive: `common`) | `data`, `backtest`, `live` |
+| **`backtest`**| `jar` (app) | `common` | `common`, historical data parsers, DuckDB, testing engines | `connector`, `trading`, `data`, `live`, `paper` |
+
+---
+
+## 2. Invariant Rules (NON-NEGOTIABLE)
+
+### Rule 1: Zero Backtest Leakage into Production & Zero Strategy Leakage into Data Collector
+- The production live trading system (`live`) and paper trading system (`paper`) **MUST NEVER** include backtesting dependencies, historical simulation scripts, or offline data ingestion tools.
+- The market data collector (`data`) and shared `connector` module **MUST NEVER** depend (directly or transitively) on `common` or `trading`. The data collector records raw market streams with minimal overhead and does not load strategies, indicators, or mathematical calculators.
+- Historical data loaders (Parquet, DuckDB, bulk CSV replays) belong exclusively in `backtest`.
+
+### Rule 2: Zero Discrepancy between Backtest, Paper, and Live
+Strategies, indicators, mathematical formulas, and order execution interfaces are defined once in `common`:
+- A strategy implements `TradingStrategy` from `common`.
+- The strategy interacts with the market solely via `StrategyContext` and `ExecutionRouter` from `common`.
+- **Backtest**: `ExecutionRouter` is implemented as an in-memory simulated matching engine.
+- **Paper Trading**: `ExecutionRouter` is implemented as a virtual simulator running against live Polymarket order books.
+- **Live Trading**: `ExecutionRouter` is implemented as a signed EIP-712 order gateway executing on the real Polymarket CLOB.
+- **Result**: The strategy bytecode is 100% identical in backtest, paper, and live.
+
+### Rule 3: Jandex Indexing for Shared Quarkus Libraries
+Because `common`, `connector`, and `trading` are library modules consumed by the runnable Quarkus applications (`data`, `live`, `paper`, `backtest`), all beans and endpoints in `common`, `connector`, and `trading` must be indexed via the `jandex-maven-plugin` and include `META-INF/beans.xml`.
+
+---
+
+## 3. Submodule Responsibilities
+
+### `common`
+- **Domain Models**: Immutable records and compact structures for timeframes, candles, order book quotes, and trade records.
+- **Calculators & Math**: Quantitative calculators for rolling calculated Spot & 60s TWAP (`CalculatedSpotTwapEngine`), VWAP, realized volatility, and performance metrics.
+- **Strategy & Execution Contracts**: Core strategy interfaces, execution routing contracts, strategy registry, and shared trading strategies that execute identically across backtest, paper, and live modes.
+
+### `connector`
+- **Resilient WebSocket Core**: Reconnecting WebSocket stream abstractions, connection state management, and raw/parsed listener contracts.
+- **Binance Connectors**: Connectors for Binance Spot and USD-M Futures `aggTrades` and `bookTicker` streams (`SPOT_AGG_TRADES`, `SPOT_BOOK_TICKER`, `FUTURES_AGG_TRADES`, `FUTURES_BOOK_TICKER`).
+- **Kraken Connectors**: Kraken Spot v2 WebSocket stream connector (`wss://ws.kraken.com/v2`) for `trade` channel updates (`USDTUSD` and configured symbol, e.g., `BTCUSD`, `ETHUSD`, `SOLUSD`) with dedicated event-loop I/O reader and zero-decode frame filtering.
+- **Coinbase Connectors**: Coinbase Exchange Spot WebSocket stream connector (`wss://ws-feed.exchange.coinbase.com`) for `matches` trade streams (`BTC-USD`, `ETH-USD`, `SOL-USD`) with dedicated event-loop I/O reader and zero-decode frame filtering.
+- **Polymarket Connectors**: Clients for Gamma market discovery and resolution polling, PolyBolt v2 (`wss://ws-live-v2.polymarket.com/ws`) for `price.crypto.twap` (60s TWAP) and `price.crypto`, and per-market CLOB order book and trade WebSocket streams.
+- **Shared Client Configuration**: Shared HTTP client, JSON serialization, and exchange/ticker metadata.
+
+### `data`
+- Standalone runnable Quarkus application (`quarkus.http.port=8084`) for low-latency raw stream recording in AWS `eu-west`.
+- **Storage**: Writes raw WebSocket JSON payloads paired with local receipt timestamps (`ts`) directly to EBS in **JSONL + Zstandard Streaming (`.jsonl.zst`)** format with zero WebSocket JSON parsing overhead.
+- **Binance, Kraken, Coinbase & PolyBolt Daily Files**: Writes the 4 Binance streams (`SPOT_AGG_TRADES`, `SPOT_BOOK_TICKER`, `FUTURES_AGG_TRADES`, `FUTURES_BOOK_TICKER`), the Kraken Spot `trade` streams (`<SYMBOL>` and optionally `USDTUSD` controlled by `polymarket.collector.kraken.usdtusd-enabled`), the Coinbase Spot `matches` trade stream (`<SYMBOL>`), and the Polymarket PolyBolt `price.crypto` and `price.crypto.twap` (60s) streams into separate UTC daily files.
+- **Polymarket Per-Market Lifecycle Files**: Records the current market plus `lookahead-count` (default `5`) future markets (Gamma discovery, CLOB order book/trade events, and resolution), disconnecting each market's stream, closing its file, and opening the next future market stream once resolution is recorded.
+- **Status & Blue-Green Cutover Endpoints**: Exposes `/api/collector/status` for monitoring active streams, `writeMode` (`ACTIVE`, `STANDBY`, `FROZEN`), and `readyForCutover`, plus `/api/collector/cutover/freeze` and `/api/collector/cutover/activate` for zero-loss, zero-duplicate In-Host Blue-Green deployment cutovers.
+
+### `trading`
+- **Shared Trading Runtime**: Shared runtime configuration, Quarkus platform extensions, and zero-allocation multi-exchange spot stream processing (`CalculatedSpotStreamProcessor`) bridging Binance Spot (`aggTrades`), Kraken Spot (`USDTUSD` + `<SYMBOL>` `trade` updates), and Coinbase Spot (`matches`) WebSocket frames into `CalculatedSpotTwapEngine` and `TradingStrategy` for both `paper` and `live` applications.
+
+### `live`
+- Standalone runnable Quarkus application for live real-money execution.
+- Configured with `quarkus.http.port=8080`, `polymarket.trading.mode=live`.
+- Streams Polymarket CLOB, PolyBolt (`price.crypto` and `price.crypto.twap`), Binance Spot, Kraken Spot (`USDTUSD` + `<SYMBOL>`), and Coinbase Spot WebSocket feeds into `CalculatedSpotTwapEngine` and `UtterParameciumStrategy`, with direct EIP-712 signing and CLOB execution.
+
+### `paper`
+- Standalone runnable Quarkus application for real-time virtual trading.
+- Configured with `quarkus.http.port=8082`, `polymarket.trading.mode=paper`.
+- Streams real market data (including Binance, Kraken, and Coinbase spot feeds via `CalculatedSpotTwapEngine` into `UtterParameciumStrategy`) and routes orders to a paper execution simulator.
+
+### `backtest`
+- Standalone runnable Quarkus application for backtesting strategies against historical datasets.
+- Configured with `quarkus.http.port=8083`, `polymarket.trading.mode=backtest`.
+- Exposes consolidated REST endpoints (`/api/status`, `/api/backtest/run`) for starting asynchronous simulations and querying results.
+
+---
+
+## 4. Low-Latency Engineering Principles
+For detailed performance guidelines on AWS Ireland (`eu-west-1`) deployment, memory layout, GC elimination, and networking, see [`VISION.md`](VISION.md).
