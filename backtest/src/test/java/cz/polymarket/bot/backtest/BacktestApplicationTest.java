@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -177,5 +180,14 @@ class BacktestApplicationTest {
         int exitCode = batchApp.run();
 
         assertThat(exitCode).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Backtest application.properties should configure Enable-Native-Access manifest attribute for DuckDB JNI")
+    void shouldConfigureNativeAccessManifestAttributeForBacktestJar() throws Exception {
+        List<String> lines = Files.readAllLines(Path.of("src/main/resources/application.properties"), StandardCharsets.UTF_8);
+
+        assertThat(lines)
+                .contains("quarkus.package.jar.manifest.attributes.\"Enable-Native-Access\"=ALL-UNNAMED");
     }
 }

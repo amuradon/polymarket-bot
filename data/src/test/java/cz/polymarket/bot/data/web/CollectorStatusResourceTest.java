@@ -183,6 +183,16 @@ class CollectorStatusResourceTest {
         assertThat(marketLines).anyMatch(l -> l.contains("\"type\":\"clob\"") && l.contains("\"event_type\":\"last_trade_price\""));
     }
 
+    @Test
+    void shouldConfigureRecognizedSecretsManagerAwsRegionAndNativeAccessManifestAttribute() throws Exception {
+        List<String> lines = Files.readAllLines(Path.of("src/main/resources/application.properties"), StandardCharsets.UTF_8);
+
+        assertThat(lines)
+                .contains("%prod.quarkus.secretsmanager.aws.region=eu-west-1")
+                .contains("quarkus.package.jar.manifest.attributes.\"Enable-Native-Access\"=ALL-UNNAMED")
+                .noneMatch(line -> line.startsWith("%prod.quarkus.secretsmanager.region="));
+    }
+
     private static List<String> readZstLines(Path zstFile) throws Exception {
         List<String> lines = new ArrayList<>();
         try (ZstdInputStream zis = new ZstdInputStream(Files.newInputStream(zstFile));

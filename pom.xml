@@ -37,6 +37,7 @@
         <assertj.version>3.27.3</assertj.version>
         <awaitility.version>4.2.2</awaitility.version>
         <mockito.version>5.15.2</mockito.version>
+        <argLine/>
     </properties>
 
     <dependencyManagement>
@@ -131,6 +132,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${surefire-plugin.version}</version>
                     <configuration>
+                        <argLine>@{argLine} --enable-native-access=ALL-UNNAMED -XX:+EnableDynamicAgentLoading -javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar -Xshare:off</argLine>
                         <systemPropertyVariables>
                             <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                             <maven.home>${maven.home}</maven.home>
