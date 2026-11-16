@@ -40,7 +40,7 @@ Options:
                                 (Default: /data/polymarket/collector or ./collector)
   -d, --date <YYYY-MM-DD>       Optional target UTC date filter.
   -s, --stream <pattern>        Optional substring to filter by stream type or symbol
-                                (e.g. 'aggTrades', 'forceOrder', 'deribit', 'price_crypto', 'btc-updown').
+                                (e.g. 'aggTrades', 'bookTicker', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
   -f, --filter <pattern>        Filename search pattern (Default: *.jsonl.zst).
   -n, --dry-run                 Displays all files that would be converted without modifying disk.
   -k, --keep-original           Retain original .jsonl.zst files after conversion instead of deleting.
@@ -177,14 +177,6 @@ get_stream_type() {
         echo "binance-futures-aggtrades"
     elif [[ "$path_lower" =~ /binance/futures/.*/bookticker/ ]] || [[ "$path_lower" =~ futures.*bookticker ]]; then
         echo "binance-futures-bookticker"
-    elif [[ "$path_lower" =~ forceorder ]]; then
-        echo "binance-futures-forceorder"
-    elif [[ "$path_lower" =~ depthdiff ]]; then
-        echo "binance-futures-depthdiff"
-    elif [[ "$path_lower" =~ depthpartial ]]; then
-        echo "binance-futures-depthpartial"
-    elif [[ "$path_lower" =~ /deribit/ ]] || [[ "$path_lower" =~ trades\.btc-perpetual ]]; then
-        echo "deribit-trades"
     elif [[ "$path_lower" =~ price_crypto_twap ]]; then
         echo "polymarket-price-twap"
     elif [[ "$path_lower" =~ price_crypto ]]; then
@@ -426,64 +418,6 @@ FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, form
 ORDER BY ts ASC, update_id ASC
 EOF
             ;;
-        "binance-futures-forceorder")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    payload->'o'->>'s' AS symbol,
-    payload->'o'->>'S' AS side,
-    payload->'o'->>'o' AS order_type,
-    payload->'o'->>'f' AS time_in_force,
-    CAST(payload->'o'->>'q' AS DOUBLE) AS original_quantity,
-    CAST(payload->'o'->>'p' AS DOUBLE) AS price,
-    CAST(payload->'o'->>'ap' AS DOUBLE) AS average_price,
-    payload->'o'->>'X' AS order_status,
-    CAST(payload->'o'->>'l' AS DOUBLE) AS last_filled_quantity,
-    CAST(payload->'o'->>'z' AS DOUBLE) AS accumulated_quantity,
-    CAST(payload->'o'->>'T' AS UBIGINT) AS trade_time
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
-EOF
-            ;;
-        "binance-futures-depthdiff"|"binance-futures-depthpartial")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'T' AS UBIGINT) AS transaction_time,
-    payload->>'s' AS symbol,
-    CAST(payload->>'U' AS UBIGINT) AS first_update_id,
-    CAST(payload->>'u' AS UBIGINT) AS final_update_id,
-    CAST(payload->>'pu' AS UBIGINT) AS prev_final_update_id,
-    list_transform(CAST(payload->'b' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS bids,
-    list_transform(CAST(payload->'a' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS asks
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-EOF
-            ;;
-        "deribit-trades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(t->>'timestamp' AS UBIGINT) AS trade_timestamp,
-    t->>'instrument_name' AS instrument_name,
-    t->>'trade_id' AS trade_id,
-    CAST(t->>'trade_seq' AS BIGINT) AS trade_seq,
-    t->>'direction' AS direction,
-    CAST(t->>'price' AS DOUBLE) AS price,
-    CAST(t->>'amount' AS DOUBLE) AS amount,
-    CAST(t->>'contracts' AS DOUBLE) AS contracts,
-    CAST(t->>'mark_price' AS DOUBLE) AS mark_price,
-    CAST(t->>'index_price' AS DOUBLE) AS index_price,
-    CAST(t->>'tick_direction' AS INT) AS tick_direction,
-    CAST(t->>'starbase_timestamp' AS UBIGINT) AS starbase_timestamp
-FROM (
-    SELECT ts, UNNEST(CAST(payload->'params'->'data' AS JSON[])) AS t
-    FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-)
-ORDER BY ts ASC
-EOF
-            ;;
         "polymarket-price-crypto")
             cat <<EOF
 WITH raw_data AS (
@@ -713,12 +647,7 @@ while IFS=$'\t' read -r src_path src_size; do
 
     effective_threads=$THREADS
     effective_row_group_size=50000
-    if [ "$stream_type" = "binance-futures-depthdiff" ] || [ "$stream_type" = "binance-futures-depthpartial" ]; then
-        if [ "$effective_threads" -gt 2 ]; then
-            effective_threads=2
-        fi
-        effective_row_group_size=25000
-    elif [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ] || [ "$stream_type" = "binance-spot-bookticker" ] || [ "$stream_type" = "binance-futures-bookticker" ]; then
+    if [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ] || [ "$stream_type" = "binance-spot-bookticker" ] || [ "$stream_type" = "binance-futures-bookticker" ]; then
         effective_row_group_size=100000
     fi
 

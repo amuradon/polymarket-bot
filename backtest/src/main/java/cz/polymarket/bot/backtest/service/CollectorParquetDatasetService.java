@@ -89,9 +89,6 @@ public class CollectorParquetDatasetService {
             return "BTC";
         }
         String upper = symbol.trim().toUpperCase(Locale.ROOT);
-        if (upper.endsWith("-PERPETUAL")) {
-            return upper.substring(0, upper.length() - "-PERPETUAL".length());
-        }
         if (upper.endsWith("USDT") && upper.length() > 4) {
             return upper.substring(0, upper.length() - 4);
         }
@@ -224,58 +221,6 @@ public class CollectorParquetDatasetService {
         String pair = extractBaseAsset(symbol) + "USDT";
         return collectorRootDir.resolve("binance").resolve("futures").resolve(pair)
                 .resolve("aggTrades").resolve(pair + "-aggTrades-" + dateStr + ".parquet");
-    }
-
-    /**
-     * Resolves the daily Binance Futures {@code depthPartial} Parquet file for the given symbol and UTC date.
-     *
-     * @param symbol trading symbol
-     * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return Parquet file path
-     */
-    public Path getBinanceFuturesDepthPartialFile(String symbol, String dateStr) {
-        String pair = extractBaseAsset(symbol) + "USDT";
-        return collectorRootDir.resolve("binance").resolve("futures").resolve(pair)
-                .resolve("depthPartial").resolve(pair + "-depthPartial-" + dateStr + ".parquet");
-    }
-
-    /**
-     * Resolves the daily Binance Futures {@code depthDiff} Parquet file for the given symbol and UTC date.
-     *
-     * @param symbol trading symbol
-     * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return Parquet file path
-     */
-    public Path getBinanceFuturesDepthDiffFile(String symbol, String dateStr) {
-        String pair = extractBaseAsset(symbol) + "USDT";
-        return collectorRootDir.resolve("binance").resolve("futures").resolve(pair)
-                .resolve("depthDiff").resolve(pair + "-depthDiff-" + dateStr + ".parquet");
-    }
-
-    /**
-     * Resolves the daily Binance Futures {@code forceOrder} Parquet file for the given symbol and UTC date.
-     *
-     * @param symbol trading symbol
-     * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return Parquet file path
-     */
-    public Path getBinanceFuturesForceOrderFile(String symbol, String dateStr) {
-        String pair = extractBaseAsset(symbol) + "USDT";
-        return collectorRootDir.resolve("binance").resolve("futures").resolve(pair)
-                .resolve("forceOrder").resolve(pair + "-forceOrder-" + dateStr + ".parquet");
-    }
-
-    /**
-     * Resolves the daily Deribit Futures {@code trades} Parquet file for the given symbol and UTC date.
-     *
-     * @param symbol trading symbol
-     * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return Parquet file path
-     */
-    public Path getDeribitFuturesTradesFile(String symbol, String dateStr) {
-        String instrument = extractBaseAsset(symbol) + "-PERPETUAL";
-        return collectorRootDir.resolve("deribit").resolve("futures").resolve(instrument)
-                .resolve("trades").resolve(instrument + "-trades-" + dateStr + ".parquet");
     }
 
     /**

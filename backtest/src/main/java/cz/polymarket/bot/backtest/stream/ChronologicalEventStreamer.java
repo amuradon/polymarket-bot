@@ -264,7 +264,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
     /**
      * Loads all shared daily stream events ({@code polymarket/price_crypto}, {@code polymarket/price_crypto_twap_60s},
-     * and any strategy-requested external Binance/Deribit streams) for a single UTC day into a sorted,
+     * and any strategy-requested external Binance streams) for a single UTC day into a sorted,
      * immutable array shared read-only across all parallel 15-minute market workers of that day.
      *
      * @param datasetService collector Parquet dataset service
@@ -287,7 +287,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
 
         record DailyLoaderTask(Path file, BiConsumer<Statement, List<BacktestEvent>> loader) {}
-        List<DailyLoaderTask> tasks = new ArrayList<>(8);
+        List<DailyLoaderTask> tasks = new ArrayList<>(4);
 
         Path priceFile = datasetService.getPolymarketCryptoPriceFile(symbol, dateStr);
         if (priceFile != null && Files.exists(priceFile)) {
@@ -309,30 +309,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             Path f = datasetService.getBinanceFuturesAggTradesFile(symbol, dateStr);
             if (f != null && Files.exists(f)) {
                 tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesTrades(stmt, f, out)));
-            }
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_PARTIAL)) {
-            Path f = datasetService.getBinanceFuturesDepthPartialFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesDepth(stmt, f, out)));
-            }
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_DEPTH_DIFF)) {
-            Path f = datasetService.getBinanceFuturesDepthDiffFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesDepth(stmt, f, out)));
-            }
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_FORCE_ORDER)) {
-            Path f = datasetService.getBinanceFuturesForceOrderFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesForceOrders(stmt, f, out)));
-            }
-        }
-        if (extStreams.contains(ExternalStreamType.DERIBIT_FUTURES_TRADES)) {
-            Path f = datasetService.getDeribitFuturesTradesFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyDeribitTrades(stmt, f, out)));
             }
         }
 
@@ -1221,84 +1197,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             }
         } catch (SQLException e) {
             Log.warnf("Could not load Binance Futures aggTrades file %s: %s", file, e.getMessage());
-        }
-    }
-
-    private static void loadDailyBinanceFuturesDepth(Statement stmt, Path file, List<BacktestEvent> out) {
-        if (file == null || !Files.exists(file)) {
-            return;
-        }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT ts, COALESCE(final_update_id, 0), bids[1].price, asks[1].price, " +
-                "COALESCE(list_sum([x.quantity FOR x IN bids]), 0.0), " +
-                "COALESCE(list_sum([x.quantity FOR x IN asks]), 0.0) " +
-                "FROM read_parquet('" + norm + "') WHERE len(bids) > 0 AND len(asks) > 0";
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                long ts = rs.getLong(1);
-                long seq = rs.getLong(2);
-                double bestBid = rs.getDouble(3);
-                double bestAsk = rs.getDouble(4);
-                double depthBids = rs.getDouble(5);
-                double depthAsks = rs.getDouble(6);
-                double total = depthBids + depthAsks;
-                double obi = total > 0.0 ? ((depthBids - depthAsks) / total) : 0.0;
-                out.add(new BacktestEvent.BinanceFuturesOrderBookEvent(
-                        ts, seq, bestBid, bestAsk, depthBids, depthAsks, obi
-                ));
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load Binance Futures depth file %s: %s", file, e.getMessage());
-        }
-    }
-
-    private static void loadDailyBinanceFuturesForceOrders(Statement stmt, Path file, List<BacktestEvent> out) {
-        if (file == null || !Files.exists(file)) {
-            return;
-        }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT ts, side, COALESCE(price, 0.0), COALESCE(average_price, 0.0), COALESCE(accumulated_quantity, original_quantity, 0.0) " +
-                "FROM read_parquet('" + norm + "')";
-        long seq = 0L;
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                out.add(new BacktestEvent.BinanceFuturesForceOrderEvent(
-                        rs.getLong(1),
-                        ++seq,
-                        rs.getString(2),
-                        rs.getDouble(3),
-                        rs.getDouble(4),
-                        rs.getDouble(5)
-                ));
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load Binance Futures forceOrder file %s: %s", file, e.getMessage());
-        }
-    }
-
-    private static void loadDailyDeribitTrades(Statement stmt, Path file, List<BacktestEvent> out) {
-        if (file == null || !Files.exists(file)) {
-            return;
-        }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT ts, COALESCE(trade_seq, 0), instrument_name, direction, price, COALESCE(amount, 0.0), " +
-                "COALESCE(mark_price, 0.0), COALESCE(index_price, 0.0) " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                out.add(new BacktestEvent.DeribitFuturesTradeEvent(
-                        rs.getLong(1),
-                        rs.getLong(2),
-                        rs.getString(3),
-                        rs.getString(4),
-                        rs.getDouble(5),
-                        rs.getDouble(6),
-                        rs.getDouble(7),
-                        rs.getDouble(8)
-                ));
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load Deribit trades file %s: %s", file, e.getMessage());
         }
     }
 

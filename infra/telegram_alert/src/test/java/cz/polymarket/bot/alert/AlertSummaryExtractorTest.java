@@ -77,7 +77,7 @@ class AlertSummaryExtractorTest {
     @Test
     @DisplayName("Should classify general warning as warning badge")
     void shouldClassifyGeneralWarning() {
-        String msg = "2026-11-05 10:00:00 WARN  [cz.polymarket.bot.TwapEngine] Stale price detected; falling back to last good mark";
+        String msg = "2026-11-05 10:00:00 WARN  [cz.polymarket.bot.connector.WebSocketStreamClient] Stale price detected; falling back to last good mark";
         AlertSummary summary = extractor.extract(msg);
 
         assertThat(summary.badge()).isEqualTo("[WARNING: APPLICATION WARNING]");

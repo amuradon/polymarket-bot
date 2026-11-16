@@ -242,8 +242,6 @@ public class BacktestEngine {
         IndicatorType[] requiredIndicators = reqIndicatorsSet.toArray(new IndicatorType[0]);
         boolean hasIndicators = requiredIndicators.length > 0;
         boolean needBasis = reqIndicatorsSet.contains(IndicatorType.BASIS);
-        boolean needObi = reqIndicatorsSet.contains(IndicatorType.ORDER_BOOK_IMBALANCE);
-        boolean needMicroPrice = reqIndicatorsSet.contains(IndicatorType.MICRO_PRICE);
         boolean needCandleHistory = reqIndicatorsSet.contains(IndicatorType.VOLATILITY_4H)
                 || reqIndicatorsSet.contains(IndicatorType.VWAP_ZSCORE);
 
@@ -251,7 +249,7 @@ public class BacktestEngine {
                 ? strategy.getRequiredExternalStreams()
                 : Set.of();
 
-        // Group markets by UTC day so shared daily streams (PolyBolt, Binance, Deribit) are loaded strictly once per day
+        // Group markets by UTC day so shared daily streams (PolyBolt, Binance) are loaded strictly once per day
         Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
         for (CollectorMarketMetadata market : markets) {
             String dayKey = market.dateStr() != null ? market.dateStr() : "";
@@ -319,8 +317,6 @@ public class BacktestEngine {
                         requiredIndicators,
                         hasIndicators,
                         needBasis,
-                        needObi,
-                        needMicroPrice,
                         resolvedLatencyFactor,
                         sym
                 );
@@ -340,8 +336,6 @@ public class BacktestEngine {
                             requiredIndicators,
                             hasIndicators,
                             needBasis,
-                            needObi,
-                            needMicroPrice,
                             resolvedLatencyFactor,
                             sym
                     ), workerPool);
@@ -440,8 +434,6 @@ public class BacktestEngine {
             IndicatorType[] requiredIndicators,
             boolean hasIndicators,
             boolean needBasis,
-            boolean needObi,
-            boolean needMicroPrice,
             double resolvedLatencyFactor,
             String symbol) {
 
@@ -568,23 +560,6 @@ public class BacktestEngine {
                             }
                             activeStrategy.onBinanceFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
                         }
-                        case BacktestEvent.BinanceFuturesOrderBookEvent e -> {
-                            indicatorEngine.onFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
-                            if (needObi) {
-                                activeStrategy.onIndicatorUpdate(IndicatorType.ORDER_BOOK_IMBALANCE,
-                                        indicatorEngine.getIndicatorValue(IndicatorType.ORDER_BOOK_IMBALANCE), evTs);
-                            }
-                            if (needMicroPrice) {
-                                activeStrategy.onIndicatorUpdate(IndicatorType.MICRO_PRICE,
-                                        indicatorEngine.getIndicatorValue(IndicatorType.MICRO_PRICE), evTs);
-                            }
-                            activeStrategy.onBinanceFuturesOrderBook(evTs, e.bestBid(), e.bestAsk(), e.depthBids(), e.depthAsks(), e.obi());
-                        }
-                        case BacktestEvent.BinanceFuturesForceOrderEvent e ->
-                                activeStrategy.onBinanceFuturesForceOrder(evTs, e.side(), e.price(), e.averagePrice(), e.quantity());
-                        case BacktestEvent.DeribitFuturesTradeEvent e ->
-                                activeStrategy.onDeribitFuturesTrade(
-                                        evTs, e.instrumentName(), e.direction(), e.price(), e.amount(), e.markPrice(), e.indexPrice());
                         case BacktestEvent.TwapUpdateEvent e ->
                                 activeStrategy.onTwapUpdate(e.update());
                         case BacktestEvent.PendingOrderExecutionEvent e -> {

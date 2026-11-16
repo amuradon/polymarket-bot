@@ -22,9 +22,7 @@ class DynamicIndicatorEngineTest {
                 IndicatorType.TWAP,
                 IndicatorType.VWAP,
                 IndicatorType.CVD,
-                IndicatorType.BASIS,
-                IndicatorType.ORDER_BOOK_IMBALANCE,
-                IndicatorType.MICRO_PRICE
+                IndicatorType.BASIS
         ));
 
         engine.resetActiveCandle();
@@ -48,13 +46,6 @@ class DynamicIndicatorEngineTest {
         // Futures Trade @ 60250 -> Basis vs Spot 60200: (60250 - 60200)/60200 * 10000 ~= 8.3 bps
         engine.onFuturesTrade(1000250L, 60250.0, 1.0, false);
         assertThat(engine.getIndicatorValue(IndicatorType.BASIS)).isCloseTo(8.3, within(0.2));
-
-        // Order Book: bestBid 60240 (qty 10), bestAsk 60260 (qty 5)
-        // OBI: (10 - 5) / (10 + 5) = 5 / 15 = 0.333
-        // MicroPrice: (5 * 60240 + 10 * 60260) / 15 = 60253.33
-        engine.onFuturesOrderBook(1000300L, 60240.0, 60260.0, 10.0, 5.0, 0.333);
-        assertThat(engine.getIndicatorValue(IndicatorType.ORDER_BOOK_IMBALANCE)).isCloseTo(0.333, within(0.001));
-        assertThat(engine.getIndicatorValue(IndicatorType.MICRO_PRICE)).isCloseTo(60253.33, within(0.1));
     }
 
     @Test

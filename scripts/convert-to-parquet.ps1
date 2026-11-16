@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Recursively scans the collector data directory (default 'D:\Crypto\data\Polymarket\collector')
-    for all .jsonl.zst files (Binance Spot/Futures, Deribit Futures, Polymarket CLOB, and PolyBolt streams),
+    for all .jsonl.zst files (Binance Spot/Futures, Kraken Spot, Coinbase Spot, Polymarket CLOB, and PolyBolt streams),
     classifies the stream type, applies a high-performance, schema-optimized DuckDB SQL transformation,
     orders records by top-level receipt timestamp (`ts` ASC), writes compressed Parquet files,
     verifies file integrity and row counts, and upon successful verification removes the source .jsonl.zst archive.
@@ -20,7 +20,7 @@
     Optional target UTC date in YYYY-MM-DD format (e.g. 2026-10-15) to convert only files belonging to that date.
 
 .PARAMETER Stream
-    Optional substring to filter by stream type or symbol (e.g. 'aggTrades', 'forceOrder', 'deribit', 'price_crypto', 'btc-updown').
+    Optional substring to filter by stream type or symbol (e.g. 'aggTrades', 'bookTicker', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
 
 .PARAMETER Filter
     Filename search pattern. Defaults to '*.jsonl.zst'.
@@ -45,10 +45,10 @@
     DuckDB max memory limit (e.g. '5GB', '4GB'). Defaults to '5GB'.
 
 .PARAMETER Threads
-    Number of worker threads. Defaults to min(ProcessorCount, 4). Automatically capped to 2 for heavy depth diff streams.
+    Number of worker threads. Defaults to min(ProcessorCount, 4).
 
 .PARAMETER RowGroupSize
-    Maximum number of rows per Parquet row group. Defaults to 50000 (100000 for Polymarket CLOB markets, capped at 25000 for heavy depth diff streams).
+    Maximum number of rows per Parquet row group. Defaults to 50000 (100000 for Polymarket CLOB, Kraken, Coinbase, and Binance bookTicker streams).
 
 .EXAMPLE
     .\scripts\convert-to-parquet.ps1
@@ -150,18 +150,6 @@ function Get-StreamType {
     }
     if ($normalized -like "*/binance/futures/*/bookticker/*" -or $normalized -like "*futures*bookticker*") {
         return "binance-futures-bookticker"
-    }
-    if ($normalized -like "*forceorder*") {
-        return "binance-futures-forceorder"
-    }
-    if ($normalized -like "*depthdiff*") {
-        return "binance-futures-depthdiff"
-    }
-    if ($normalized -like "*depthpartial*") {
-        return "binance-futures-depthpartial"
-    }
-    if ($normalized -like "*/deribit/*" -or $normalized -like "*trades.btc-perpetual*") {
-        return "deribit-trades"
     }
     if ($normalized -like "*price_crypto_twap*") {
         return "polymarket-price-twap"
@@ -407,64 +395,6 @@ FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}
 ORDER BY ts ASC, update_id ASC
 "@
         }
-        "binance-futures-forceorder" {
-            return @"
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    payload->'o'->>'s' AS symbol,
-    payload->'o'->>'S' AS side,
-    payload->'o'->>'o' AS order_type,
-    payload->'o'->>'f' AS time_in_force,
-    CAST(payload->'o'->>'q' AS DOUBLE) AS original_quantity,
-    CAST(payload->'o'->>'p' AS DOUBLE) AS price,
-    CAST(payload->'o'->>'ap' AS DOUBLE) AS average_price,
-    payload->'o'->>'X' AS order_status,
-    CAST(payload->'o'->>'l' AS DOUBLE) AS last_filled_quantity,
-    CAST(payload->'o'->>'z' AS DOUBLE) AS accumulated_quantity,
-    CAST(payload->'o'->>'T' AS UBIGINT) AS trade_time
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
-"@
-        }
-        { $_ -in "binance-futures-depthdiff", "binance-futures-depthpartial" } {
-            return @"
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'T' AS UBIGINT) AS transaction_time,
-    payload->>'s' AS symbol,
-    CAST(payload->>'U' AS UBIGINT) AS first_update_id,
-    CAST(payload->>'u' AS UBIGINT) AS final_update_id,
-    CAST(payload->>'pu' AS UBIGINT) AS prev_final_update_id,
-    list_transform(CAST(payload->'b' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS bids,
-    list_transform(CAST(payload->'a' AS DOUBLE[][]), lambda x: {'price': x[1], 'quantity': x[2]}) AS asks
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-"@
-        }
-        "deribit-trades" {
-            return @"
-SELECT 
-    ts,
-    CAST(t->>'timestamp' AS UBIGINT) AS trade_timestamp,
-    t->>'instrument_name' AS instrument_name,
-    t->>'trade_id' AS trade_id,
-    CAST(t->>'trade_seq' AS BIGINT) AS trade_seq,
-    t->>'direction' AS direction,
-    CAST(t->>'price' AS DOUBLE) AS price,
-    CAST(t->>'amount' AS DOUBLE) AS amount,
-    CAST(t->>'contracts' AS DOUBLE) AS contracts,
-    CAST(t->>'mark_price' AS DOUBLE) AS mark_price,
-    CAST(t->>'index_price' AS DOUBLE) AS index_price,
-    CAST(t->>'tick_direction' AS INT) AS tick_direction,
-    CAST(t->>'starbase_timestamp' AS UBIGINT) AS starbase_timestamp
-FROM (
-    SELECT ts, UNNEST(CAST(payload->'params'->'data' AS JSON[])) AS t
-    FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-)
-ORDER BY ts ASC
-"@
-        }
         "polymarket-price-crypto" {
             return @"
 WITH raw_data AS (
@@ -679,10 +609,7 @@ try {
 
             $effectiveThreads = $Threads
             $effectiveRowGroupSize = $RowGroupSize
-            if ($streamType -in "binance-futures-depthdiff", "binance-futures-depthpartial") {
-                $effectiveThreads = [Math]::Min($Threads, 2)
-                $effectiveRowGroupSize = [Math]::Min($RowGroupSize, 25000)
-            } elseif (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades", "binance-spot-bookticker", "binance-futures-bookticker") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+            if (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades", "binance-spot-bookticker", "binance-futures-bookticker") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
                 $effectiveRowGroupSize = 100000
             }
 

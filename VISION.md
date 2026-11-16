@@ -71,5 +71,5 @@ The trading system competes on latency against global market makers:
 
 When implementing new features, agents must design for modular extensibility:
 - **New Instruments**: Adding a new token (e.g. `ETH`, `SOL`) should require only configuration and registering feed adapters, without rewriting calculation or UI logic.
-- **New Timeframes**: Support for 1h, 4h, or 1d candles must build upon the existing `Timeframe` domain enum and `TwapEngine` abstractions.
+- **New Timeframes**: Support for 1h, 4h, or 1d candles must build upon the existing `Timeframe` domain enum and `CalculatedSpotTwapEngine` abstractions.
 - **New Strategies**: Must implement the standard `TradingStrategy` interface from `common`.

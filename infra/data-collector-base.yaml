@@ -16,11 +16,6 @@ Parameters:
     Default: polymarket-sniper/clob-credentials
     Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2 and PolyBolt API credentials.
 
-  DeribitSecretId:
-    Type: String
-    Default: polymarket-sniper/deribit-credentials
-    Description: AWS Secrets Manager secret ID storing Deribit v2 API client_id and client_secret credentials.
-
   ExistingEbsVolumeId:
     Type: String
     Default: vol-028ed5d093f87c4f8
@@ -119,7 +114,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: Security group restricting inbound HTTPS to authorized management IP and permitting all outbound traffic for exchange and Polymarket WebSocket streams.
-        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound traffic for Binance (443/9443), Deribit (443), Polymarket (443), S3, SSM, CloudWatch, and Secrets Manager.
+        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound traffic for Binance (443/9443), Kraken (443), Coinbase (443), Polymarket (443), S3, SSM, CloudWatch, and Secrets Manager.
     Properties:
       GroupDescription: Security group for Polymarket Data Collector EC2 instance with restricted inbound HTTPS
       VpcId: !Ref VpcId
@@ -132,14 +127,14 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
-          Description: Allow outbound traffic for Binance (443/9443), Deribit (443), Polymarket (443), S3, SSM, CloudWatch Logs, and Secrets Manager
+          Description: Allow outbound traffic for Binance (443/9443), Kraken (443), Coinbase (443), Polymarket (443), S3, SSM, CloudWatch Logs, and Secrets Manager
 
   DataCollectorIamRole:
     Type: AWS::IAM::Role
     Metadata:
       com.aws.cloudformation.Context:
         why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, download release archives from S3, attach the persistent EBS volume, and read credentials from Secrets Manager.
-        must: Scope Secrets Manager GetSecretValue permission strictly to PolymarketSecretId and DeribitSecretId prefixes in eu-west-1.
+        must: Scope Secrets Manager GetSecretValue permission strictly to PolymarketSecretId prefix in eu-west-1.
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -170,13 +165,12 @@ Resources:
                 Action:
                   - secretsmanager:ListSecrets
                 Resource: '*'
-              - Sid: ReadPolymarketAndDeribitCredentialsSecrets
+              - Sid: ReadPolymarketCredentialsSecret
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PolymarketSecretId}*"
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DeribitSecretId}*"
               - Sid: WriteServiceAndHostLogsToCloudWatch
                 Effect: Allow
                 Action:

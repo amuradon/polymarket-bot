@@ -19,9 +19,9 @@ The project is structured as a Maven Multi-Module project with 7 submodules:
 | Submodule | Type | Description | Default Port |
 | :--- | :--- | :--- | :--- |
 | **`common`** | Library (`jar`) | Shared domain records, math calculators, in-memory price cache, and strategy execution contracts. | N/A |
-| **`connector`** | Library (`jar`) | Shared Binance, Deribit, and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
-| **`trading`** | Library (`jar`) | Exchange price tracker, `TwapEngine`, Qute templates, web console (`/btc-usd`), and WebSocket endpoints. | N/A |
-| **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance, Deribit, and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
+| **`connector`** | Library (`jar`) | Shared Binance, Kraken, Coinbase, and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
+| **`trading`** | Library (`jar`) | Shared exchange historical clients and payload parsers for `paper` and `live`. | N/A |
+| **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance, Kraken, Coinbase, and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
 | **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
 | **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |
 | **`backtest`** | Application (`jar`) | Standalone runnable Quarkus application for backtesting strategies on historical datasets. | `8083` |
@@ -66,13 +66,13 @@ The project is structured as a Maven Multi-Module project with 7 submodules:
 ```bash
 ./mvnw quarkus:dev -pl live
 ```
-Navigate to `http://localhost:8080/btc-usd`.
+Navigate to `http://localhost:8080/`.
 
 #### 2. Paper Trading Application (`paper` - Port 8082)
 ```bash
 ./mvnw quarkus:dev -pl paper
 ```
-Navigate to `http://localhost:8082/btc-usd`.
+Navigate to `http://localhost:8082/`.
 
 #### 3. Backtest Engine Application (`backtest` - Port 8083)
 

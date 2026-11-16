@@ -282,7 +282,7 @@ class BacktestEngineTest {
     }
 
     @Test
-    @DisplayName("Should skip all Binance and Deribit external files when strategy requires no external streams")
+    @DisplayName("Should skip all external exchange files when strategy requires no external streams")
     void shouldSkipExternalFilesForPolymarketOnlyStrategy(@TempDir Path tempDir) {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);

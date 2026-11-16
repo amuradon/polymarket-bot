@@ -33,8 +33,6 @@ public class DynamicIndicatorEngine {
     private final boolean needCvd;
     private final boolean needBasis;
     private final boolean needVol4h;
-    private final boolean needObi;
-    private final boolean needMicroPrice;
 
     private final RealizedVolatilityCalculator volCalculator = new RealizedVolatilityCalculator();
     private final VwapCalculator vwapCalculator = new VwapCalculator();
@@ -93,8 +91,6 @@ public class DynamicIndicatorEngine {
         this.needCvd = this.requiredIndicators.contains(IndicatorType.CVD);
         this.needBasis = this.requiredIndicators.contains(IndicatorType.BASIS);
         this.needVol4h = this.requiredIndicators.contains(IndicatorType.VOLATILITY_4H);
-        this.needObi = this.requiredIndicators.contains(IndicatorType.ORDER_BOOK_IMBALANCE);
-        this.needMicroPrice = this.requiredIndicators.contains(IndicatorType.MICRO_PRICE);
         reset();
     }
 
@@ -298,30 +294,6 @@ public class DynamicIndicatorEngine {
         if (needBasis && currentSpotPrice > 0.0) {
             currentValues[IndicatorType.BASIS.ordinal()] =
                     ((price - currentSpotPrice) / currentSpotPrice) * 10000.0;
-        }
-    }
-
-    /**
-     * Updates order book imbalance (OBI) and depth-weighted micro price from futures book depth.
-     *
-     * @param timestampMs event receipt timestamp in milliseconds UTC
-     * @param bestBid best bid price
-     * @param bestAsk best ask price
-     * @param depthBids total depth of top bids
-     * @param depthAsks total depth of top asks
-     * @param obi order book imbalance ratio
-     */
-    public void onFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {
-        if (needObi) {
-            currentValues[IndicatorType.ORDER_BOOK_IMBALANCE.ordinal()] = obi;
-        }
-
-        if (needMicroPrice) {
-            double totalDepth = depthBids + depthAsks;
-            double currentMicroPrice = totalDepth > 0.0
-                    ? (depthAsks * bestBid + depthBids * bestAsk) / totalDepth
-                    : (bestBid + bestAsk) / 2.0;
-            currentValues[IndicatorType.MICRO_PRICE.ordinal()] = currentMicroPrice;
         }
     }
 

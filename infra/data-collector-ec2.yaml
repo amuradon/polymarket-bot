@@ -42,11 +42,6 @@ Parameters:
     Default: polymarket-sniper/clob-credentials
     Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2 and PolyBolt API credentials.
 
-  DeribitSecretId:
-    Type: String
-    Default: polymarket-sniper/deribit-credentials
-    Description: AWS Secrets Manager secret ID storing Deribit v2 API credentials.
-
 Resources:
   DataCollectorInstance:
     Type: AWS::EC2::Instance
@@ -257,7 +252,6 @@ Resources:
               Environment="AWS_REGION=${AWS::Region}"
               Environment="POLYMARKET_COLLECTOR_DATA_DIR=/mnt/ebs/polymarket-data/collector"
               Environment="POLYMARKET_CREDENTIALS_SECRET_ID=${PolymarketSecretId}"
-              Environment="DERIBIT_CREDENTIALS_SECRET_ID=${DeribitSecretId}"
               AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
               CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
               Nice=-20

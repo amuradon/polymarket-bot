@@ -33,15 +33,5 @@ public enum IndicatorType {
     /**
      * 4-hour annualized / realized volatility used for market regime filtering.
      */
-    VOLATILITY_4H,
-
-    /**
-     * Order Book Imbalance ratio between bid and ask depth in the top book levels.
-     */
-    ORDER_BOOK_IMBALANCE,
-
-    /**
-     * Depth-weighted micro price reflecting fair near-term equilibrium price.
-     */
-    MICRO_PRICE
+    VOLATILITY_4H
 }

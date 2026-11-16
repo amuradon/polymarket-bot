@@ -31,7 +31,7 @@ public interface TradingStrategy {
     }
 
     /**
-     * Declares the set of external (Binance, Deribit) market data streams required by this strategy.
+     * Declares the set of external exchange market data streams required by this strategy.
      * <p>
      * If a strategy returns an empty set, the backtesting engine skips loading all external
      * Parquet files and skips computing indicators derived from external streams, streaming
@@ -201,54 +201,6 @@ public interface TradingStrategy {
      * @param isBuyerMaker true if maker was a buyer (aggressive sell), false if aggressive buy
      */
     default void onBinanceFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {}
-
-    /**
-     * Optional callback triggered when Binance Futures order book depth is updated.
-     *
-     * @param timestampMs update receipt timestamp in milliseconds UTC
-     * @param bestBid best bid price
-     * @param bestAsk best ask price
-     * @param depthBids total depth of top bid levels
-     * @param depthAsks total depth of top ask levels
-     * @param obi order book imbalance (bids - asks) / (bids + asks)
-     */
-    default void onBinanceFuturesOrderBook(long timestampMs, double bestBid, double bestAsk, double depthBids, double depthAsks, double obi) {}
-
-    /**
-     * Optional callback triggered when a liquidation force-order occurs on Binance Futures.
-     *
-     * @param timestampMs event receipt timestamp in milliseconds UTC
-     * @param side liquidation order side ({@code "BUY"} or {@code "SELL"})
-     * @param price limit price of the force order
-     * @param averagePrice average fill price of the force order
-     * @param quantity total liquidated quantity
-     */
-    default void onBinanceFuturesForceOrder(
-            long timestampMs,
-            String side,
-            double price,
-            double averagePrice,
-            double quantity) {}
-
-    /**
-     * Optional callback triggered when a perpetual futures trade occurs on Deribit.
-     *
-     * @param timestampMs event receipt timestamp in milliseconds UTC
-     * @param instrumentName Deribit instrument name (e.g. {@code "BTC-PERPETUAL"})
-     * @param direction trade direction ({@code "buy"} or {@code "sell"})
-     * @param price trade execution price
-     * @param amount trade amount in USD/contracts
-     * @param markPrice current Deribit mark price
-     * @param indexPrice current Deribit index price
-     */
-    default void onDeribitFuturesTrade(
-            long timestampMs,
-            String instrumentName,
-            String direction,
-            double price,
-            double amount,
-            double markPrice,
-            double indexPrice) {}
 
     /**
      * Optional callback triggered when a technical indicator value is updated.

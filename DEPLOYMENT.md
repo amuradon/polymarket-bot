@@ -138,7 +138,7 @@ First, execute Maven release to build the release artifacts (including `.\live\t
 ## 3. Market Data Collector Application Deployment (`data`)
 
 ### Step 3.1: Deploy Base Infrastructure Stack (`infra/data-collector-base.yaml`)
-Provisions the private encrypted S3 artifact bucket (`DataCollectorArtifactBucket`), CloudWatch Logs group (`/polymarket-bot/polymarket-bot-data-base/data-collector`), IAM role with SSM/S3/SecretsManager/EBS access (`polymarket-sniper/clob-credentials` and `polymarket-sniper/deribit-credentials`), security group allowing inbound port 443 strictly from `178.17.13.13/32`, and references the existing persistent 50 GB `gp3` EBS volume (`ExistingEbsVolumeId="vol-028ed5d093f87c4f8"`, or creates a new volume if left empty).
+Provisions the private encrypted S3 artifact bucket (`DataCollectorArtifactBucket`), CloudWatch Logs group (`/polymarket-bot/polymarket-bot-data-base/data-collector`), IAM role with SSM/S3/SecretsManager/EBS access (`polymarket-sniper/clob-credentials`), security group allowing inbound port 443 strictly from `178.17.13.13/32`, and references the existing persistent 50 GB `gp3` EBS volume (`ExistingEbsVolumeId="vol-028ed5d093f87c4f8"`, or creates a new volume if left empty).
 
 #### Windows 11 (PowerShell):
 ```powershell
