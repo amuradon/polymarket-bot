@@ -110,17 +110,17 @@ class BacktestApplicationTest {
     void shouldRunBacktestWithCustomParametersInBatchMode() throws Exception {
         BacktestEngine mockEngine = Mockito.mock(BacktestEngine.class);
         BacktestResult expectedResult = new BacktestResult(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 Instant.now(),
                 10,
                 PerformanceMetrics.empty(25000.0),
                 List.of(),
-                "D:/Custom/Out/backtest_TWAPArbitrageStrategy_20261111_180000.json"
+                "D:/Custom/Out/backtest_UtterParameciumStrategy_20261111_180000.json"
         );
 
         when(mockEngine.runBacktest(
-                eq("TWAPArbitrageStrategy"),
+                eq("UtterParameciumStrategy"),
                 eq("BTCUSDT"),
                 eq("2026-10-15"),
                 eq("2026-10-20"),
@@ -132,7 +132,7 @@ class BacktestApplicationTest {
         BacktestApplication batchApp = new BacktestApplication(
                 mockEngine,
                 true,
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 "2026-10-15",
                 Optional.of("2026-10-20"),
@@ -145,7 +145,7 @@ class BacktestApplicationTest {
 
         assertThat(exitCode).isZero();
         verify(mockEngine).runBacktest(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 "2026-10-15",
                 "2026-10-20",

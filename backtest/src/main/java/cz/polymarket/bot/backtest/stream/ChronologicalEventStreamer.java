@@ -5,14 +5,10 @@ import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.domain.MarketCandle;
-import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TwapPoint;
-import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
 
-import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -515,8 +511,8 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         long tEndMs = tEnd * 1000L;
         TradeDirection actualOutcome = metadata.actualOutcome() != null ? metadata.actualOutcome() : TradeDirection.UP;
 
-        scheduleMandatoryLifecycleEvents(metadata, tStart, tEnd, tStartMs, tEndMs, actualOutcome);
-        prepareDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata, tStart, tEnd);
+        scheduleMandatoryLifecycleEvents(tStart, tEnd, tStartMs, tEndMs, actualOutcome);
+        prepareDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata);
         openPolymarketClobStream(metadata.marketParquetFile(), tStartMs, tEndMs, clobLookbackMs);
         if (datasetService != null && metadata.dateStr() != null && !metadata.dateStr().isBlank()) {
             openCalculatedSpotTwapStream(datasetService, symbol, metadata.dateStr(), tStartMs, tEndMs);
@@ -524,7 +520,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     private void scheduleMandatoryLifecycleEvents(
-            CollectorMarketMetadata metadata,
             long tStart,
             long tEnd,
             long tStartMs,
@@ -538,31 +533,10 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         ));
 
         scheduleEvent(new BacktestEvent.CandleLifecycleEvent(
-                (tStart + 60L) * 1000L,
-                BacktestEvent.CandleLifecycleType.TWAP_60S_SAMPLE,
-                tStart, tEnd, actualOutcome, null
-        ));
-
-        scheduleEvent(new BacktestEvent.CandleLifecycleEvent(
                 tEndMs,
                 BacktestEvent.CandleLifecycleType.CANDLE_CLOSE,
                 tStart, tEnd, actualOutcome, null
         ));
-
-        if (!Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0) {
-            BigDecimal openBd = BigDecimal.valueOf(metadata.twapOpen());
-            scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                    tStartMs,
-                    new TwapUpdate(
-                            Timeframe.FIFTEEN_MINUTES,
-                            tStart,
-                            tEnd,
-                            openBd,
-                            new TwapPoint(tStart, openBd, openBd),
-                            true
-                    )
-            ));
-        }
     }
 
     private void openCalculatedSpotTwapStream(
@@ -757,9 +731,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             BacktestEvent[] events,
             long tStartMs,
             long tEndMs,
-            CollectorMarketMetadata metadata,
-            long tStart,
-            long tEnd) {
+            CollectorMarketMetadata metadata) {
 
         if (events == null || events.length == 0) {
             this.activeDailyEvents = EMPTY_EVENTS;
@@ -779,10 +751,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
         boolean hasOpeningTwapSample = false;
         String observedCryptoSymbol = null;
-        double lastObservedPrice = Double.NaN;
-        double twapOpen = metadata.twapOpen();
-        long t60Ms = (tStart + 60L) * 1000L;
-        boolean emitted60sTwapUpdate = false;
 
         for (int i = startIdx; i < endIdx; i++) {
             BacktestEvent ev = events[i];
@@ -796,56 +764,16 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 if (effTs >= tStartMs && effTs <= tStartMs + BOUNDARY_TWAP_OFFSET_MS) {
                     hasOpeningTwapSample = true;
                 }
-                if (Double.isNaN(twapOpen) || twapOpen <= 0.0) {
-                    twapOpen = twapEv.twapPrice();
-                }
-                lastObservedPrice = twapEv.twapPrice();
             } else if (ev instanceof BacktestEvent.PolymarketCryptoPriceEvent priceEv) {
                 if (observedCryptoSymbol == null && priceEv.symbol() != null && !priceEv.symbol().isBlank()) {
                     observedCryptoSymbol = priceEv.symbol();
                 }
-                lastObservedPrice = priceEv.price();
-            } else if (ev instanceof BacktestEvent.BinanceSpotTradeEvent spotEv) {
-                lastObservedPrice = spotEv.price();
-            }
-
-            if (!emitted60sTwapUpdate && ts >= t60Ms && !Double.isNaN(twapOpen) && twapOpen > 0.0 && !Double.isNaN(lastObservedPrice)) {
-                emitted60sTwapUpdate = true;
-                BigDecimal openBd = BigDecimal.valueOf(twapOpen);
-                BigDecimal spotBd = BigDecimal.valueOf(lastObservedPrice);
-                scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                        ts,
-                        new TwapUpdate(
-                                Timeframe.FIFTEEN_MINUTES,
-                                tStart,
-                                tEnd,
-                                openBd,
-                                new TwapPoint(ts / 1000L, spotBd, spotBd),
-                                false
-                        )
-                ));
             }
         }
 
         if (!hasOpeningTwapSample && !Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0) {
             String sym = observedCryptoSymbol != null ? observedCryptoSymbol : resolveCryptoSymbol(metadata);
             scheduleBoundaryTwapEvent(tStartMs, metadata.twapOpen(), sym);
-        }
-
-        if (!emitted60sTwapUpdate && !Double.isNaN(twapOpen) && twapOpen > 0.0 && !Double.isNaN(lastObservedPrice)) {
-            BigDecimal openBd = BigDecimal.valueOf(twapOpen);
-            BigDecimal spotBd = BigDecimal.valueOf(lastObservedPrice);
-            scheduleEvent(new BacktestEvent.TwapUpdateEvent(
-                    t60Ms,
-                    new TwapUpdate(
-                            Timeframe.FIFTEEN_MINUTES,
-                            tStart,
-                            tEnd,
-                            openBd,
-                            new TwapPoint(tStart + 60L, spotBd, spotBd),
-                            false
-                    )
-            ));
         }
     }
 

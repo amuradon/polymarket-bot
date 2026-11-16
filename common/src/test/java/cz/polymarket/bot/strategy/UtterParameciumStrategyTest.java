@@ -1,10 +1,6 @@
 package cz.polymarket.bot.strategy;
 
-import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.domain.OrderBookQuote;
-import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TwapPoint;
-import cz.polymarket.bot.domain.TwapUpdate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -50,16 +46,10 @@ class UtterParameciumStrategyTest {
             }
         };
 
-        HourlyPriceCache cache = new HourlyPriceCache(3600L);
         testContext = new StrategyContext() {
             @Override
             public ExecutionRouter getExecutionRouter() {
                 return router;
-            }
-
-            @Override
-            public HourlyPriceCache getPriceCache() {
-                return cache;
             }
 
             @Override
@@ -108,16 +98,8 @@ class UtterParameciumStrategyTest {
     }
 
     @Test
-    @DisplayName("Should ignore TwapUpdate and skip market with WARN when explicit 60s TWAP target price is missing")
-    void shouldIgnoreTwapUpdateAndSkipMarketWhenTargetPriceIsMissing() {
-        strategy.onTwapUpdate(new TwapUpdate(
-                Timeframe.FIFTEEN_MINUTES,
-                CANDLE_START_SEC,
-                CANDLE_END_SEC,
-                BigDecimal.valueOf(90_000.00),
-                new TwapPoint(CANDLE_START_SEC, BigDecimal.valueOf(90_000.00), BigDecimal.valueOf(90_000.00)),
-                true
-        ));
+    @DisplayName("Should skip market with WARN when explicit 60s TWAP target price is missing")
+    void shouldSkipMarketWhenTargetPriceIsMissing() {
         assertThat(strategy.getTargetPriceCents()).isZero();
 
         long tau30Ms = CANDLE_END_MS - 30_000L;

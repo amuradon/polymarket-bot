@@ -6,19 +6,15 @@ import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
-import cz.polymarket.bot.calculator.KellyPositionSizer;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.IndicatorType;
-import cz.polymarket.bot.strategy.NextCandleProbabilityModel;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
-import cz.polymarket.bot.strategy.TWAPArbitrageStrategy;
-import cz.polymarket.bot.strategy.TWAPArbitrageStrategyConfig;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
@@ -141,11 +137,6 @@ class BacktestEngineTest {
         PerformanceMetricsCalculator metricsCalculator = new PerformanceMetricsCalculator();
         BacktestJsonExporter jsonExporter = new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export").toString());
 
-        TWAPArbitrageStrategyConfig config = TWAPArbitrageStrategyConfig.defaultIteration20();
-        KellyPositionSizer positionSizer = new KellyPositionSizer(10000.0, 0.25, 50.0, 300.0);
-        NextCandleProbabilityModel probabilityModel = new NextCandleProbabilityModel(positionSizer);
-        TWAPArbitrageStrategy twapStrategy = new TWAPArbitrageStrategy(probabilityModel, config);
-
         class PolymarketOnlyBatchStrategy implements TradingStrategy {
             private StrategyContext ctx;
             private boolean orderedInCandle = false;
@@ -225,7 +216,6 @@ class BacktestEngineTest {
         UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
 
         StrategyRegistry strategyRegistry = new StrategyRegistry(Map.of(
-                twapStrategy.getName(), twapStrategy,
                 polymarketOnlyStrategy.getName(), polymarketOnlyStrategy,
                 utterStrategy.getName(), utterStrategy
         ));
@@ -258,7 +248,7 @@ class BacktestEngineTest {
     @DisplayName("Should run backtest over collector Parquet archives with time-varying latency and latencyFactor")
     void shouldRunBacktestOverCollectorParquetArchives(@TempDir Path tempDir) {
         BacktestResult result = backtestEngine.runBacktest(
-                "TWAPArbitrageStrategy",
+                "PolymarketOnlyStrategy",
                 "BTCUSDT",
                 "2026-08-01",
                 "2026-08-01",
@@ -268,7 +258,7 @@ class BacktestEngineTest {
         );
 
         assertThat(result).isNotNull();
-        assertThat(result.strategyName()).isEqualTo("TWAPArbitrageStrategy");
+        assertThat(result.strategyName()).isEqualTo("PolymarketOnlyStrategy");
         assertThat(result.totalMarkets()).isEqualTo(3);
 
         assertThat(result.trades()).isNotEmpty();
@@ -562,7 +552,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should throw IllegalArgumentException when no market rows available")
     void shouldThrowWhenNoMarketRowsAvailable() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest("TWAPArbitrageStrategy", "UNKNOWN_SYMBOL", null, null, 10000.0, null, null))
+        assertThatThrownBy(() -> backtestEngine.runBacktest("UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, 10000.0, null, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
     }

@@ -47,7 +47,7 @@ class BacktestJobManagerTest {
     @DisplayName("Should submit job, track execution asynchronously, and reach COMPLETED status")
     void shouldSubmitJobAndComplete() {
         BacktestRunRequest request = new BacktestRunRequest(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 "2026-08-01",
                 "2026-08-05",
@@ -57,7 +57,7 @@ class BacktestJobManagerTest {
         );
 
         BacktestResult mockResult = new BacktestResult(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 Instant.now(),
                 100,
@@ -67,7 +67,7 @@ class BacktestJobManagerTest {
         );
 
         when(backtestEngine.runBacktest(
-                eq("TWAPArbitrageStrategy"),
+                eq("UtterParameciumStrategy"),
                 eq("BTCUSDT"),
                 eq("2026-08-01"),
                 eq("2026-08-05"),
@@ -97,7 +97,7 @@ class BacktestJobManagerTest {
     @DisplayName("Should mark job as FAILED when BacktestEngine throws exception")
     void shouldHandleJobFailure() {
         BacktestRunRequest request = new BacktestRunRequest(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 "2026-08-01",
                 "2026-08-05",

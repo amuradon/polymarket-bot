@@ -2,7 +2,6 @@ package cz.polymarket.bot.live.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
@@ -302,11 +301,9 @@ class LiveTradingEngineTest {
         PolymarketStreamParser streamParser = new PolymarketStreamParser(objectMapper, "BTCUSDT");
         UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
         StrategyRegistry strategyRegistry = new StrategyRegistry(Map.of(strategy.getName(), strategy));
-        HourlyPriceCache priceCache = new HourlyPriceCache(3600L);
 
         LiveTradingEngine engine = new LiveTradingEngine(
                 strategyRegistry,
-                priceCache,
                 secretsResolver,
                 clobRestClient,
                 gammaClient,
@@ -625,7 +622,6 @@ class LiveTradingEngineTest {
             LiveTradingEngine engine = new LiveTradingEngine(
                     new StrategyRegistry(Map.of("UtterParameciumStrategy",
                             new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1()))),
-                    new HourlyPriceCache(3600L),
                     emptyResolver,
                     new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, emptyResolver),
                     new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
@@ -750,7 +746,6 @@ class LiveTradingEngineTest {
         UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
         LiveTradingEngine engine = new LiveTradingEngine(
                 new StrategyRegistry(Map.of(strategy.getName(), strategy)),
-                new HourlyPriceCache(3600L),
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
@@ -1124,7 +1119,6 @@ class LiveTradingEngineTest {
         UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
         LiveTradingEngine engine = new LiveTradingEngine(
                 new StrategyRegistry(Map.of(strategy.getName(), strategy)),
-                new HourlyPriceCache(3600L),
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),

@@ -1,6 +1,5 @@
 package cz.polymarket.bot.strategy;
 
-import cz.polymarket.bot.domain.TwapUpdate;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -27,16 +26,13 @@ class StrategyRegistryTest {
         public void init(StrategyContext context) {}
 
         @Override
-        public void onTwapUpdate(TwapUpdate update) {}
-
-        @Override
         public void onExecutionReport(ExecutionReport report) {}
     }
 
     @Test
     @DisplayName("Should retrieve strategy by exact or case-insensitive name")
     void shouldFindStrategyByName() {
-        TradingStrategy s1 = new DummyStrategy("TWAPArbitrageStrategy");
+        TradingStrategy s1 = new DummyStrategy("CustomMomentumStrategy");
         TradingStrategy s2 = new DummyStrategy("UtterParameciumStrategy");
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(
@@ -44,13 +40,13 @@ class StrategyRegistryTest {
                 s2.getName(), s2
         ));
 
-        assertThat(registry.getStrategy("TWAPArbitrageStrategy")).isSameAs(s1);
-        assertThat(registry.getStrategy("twaparbitragestrategy")).isSameAs(s1);
+        assertThat(registry.getStrategy("CustomMomentumStrategy")).isSameAs(s1);
+        assertThat(registry.getStrategy("custommomentumstrategy")).isSameAs(s1);
         assertThat(registry.getStrategy("UtterParameciumStrategy")).isSameAs(s2);
         assertThat(registry.getStrategy("utter_paramecium")).isSameAs(s2);
         assertThat(registry.getStrategy("utter-paramecium")).isSameAs(s2);
         assertThat(registry.getStrategy("UtterParamecium")).isSameAs(s2);
-        assertThat(registry.getAvailableStrategies()).containsExactlyInAnyOrder("TWAPArbitrageStrategy", "UtterParameciumStrategy");
+        assertThat(registry.getAvailableStrategies()).containsExactlyInAnyOrder("CustomMomentumStrategy", "UtterParameciumStrategy");
     }
 
     @Test

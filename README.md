@@ -18,9 +18,9 @@ The project is structured as a Maven Multi-Module project with 7 submodules:
 
 | Submodule | Type | Description | Default Port |
 | :--- | :--- | :--- | :--- |
-| **`common`** | Library (`jar`) | Shared domain records, math calculators, in-memory price cache, and strategy execution contracts. | N/A |
+| **`common`** | Library (`jar`) | Shared domain records, math calculators, and strategy execution contracts. | N/A |
 | **`connector`** | Library (`jar`) | Shared Binance, Kraken, Coinbase, and Polymarket WebSocket/REST connectors and market discovery (zero dependency on `common`). | N/A |
-| **`trading`** | Library (`jar`) | Shared exchange historical clients and payload parsers for `paper` and `live`. | N/A |
+| **`trading`** | Library (`jar`) | Shared trading runtime layer for `paper` and `live`. | N/A |
 | **`data`** | Application (`jar`) | Standalone runnable Quarkus application for recording raw Binance, Kraken, Coinbase, and Polymarket streams in JSONL + Zstandard streaming format. | `8084` |
 | **`live`** | Application (`jar`) | Standalone runnable Quarkus application for live trading execution on Polymarket. | `8080` |
 | **`paper`** | Application (`jar`) | Standalone runnable Quarkus application for paper trading simulation with real-time market data. | `8082` |
@@ -84,7 +84,7 @@ The `backtest` module supports two execution modes controlled by the native Quar
 | Property | Default Value | Description |
 | :--- | :--- | :--- |
 | `polymarket.backtest.batchMode` | `false` | `true` = run backtest on startup and exit; `false` = start REST server |
-| `polymarket.backtest.strategy` | `UtterParameciumStrategy` | Trading strategy name (`UtterParameciumStrategy`, `TWAPArbitrageStrategy`, etc.) |
+| `polymarket.backtest.strategy` | `UtterParameciumStrategy` | Trading strategy name (e.g. `UtterParameciumStrategy`) |
 | `polymarket.backtest.initial-capital` | `10000.0` | Initial starting capital in USD (`$10000`) |
 | `polymarket.backtest.from` | `2026-10-12` | Inclusive start date (`yyyy-MM-dd`) |
 | `polymarket.backtest.to` | Current UTC date | Inclusive end date (`yyyy-MM-dd`); defaults to today when omitted |
@@ -107,7 +107,7 @@ Run with custom strategy, capital, date range, and output directory:
 # Windows (PowerShell):
 java `
   "-Dpolymarket.backtest.batchMode=true" `
-  "-Dpolymarket.backtest.strategy=TWAPArbitrageStrategy" `
+  "-Dpolymarket.backtest.strategy=UtterParameciumStrategy" `
   "-Dpolymarket.backtest.initial-capital=25000.0" `
   "-Dpolymarket.backtest.from=2026-10-15" `
   "-Dpolymarket.backtest.to=2026-11-10" `
@@ -117,7 +117,7 @@ java `
 # Linux / macOS (Bash):
 java \
   -Dpolymarket.backtest.batchMode=true \
-  -Dpolymarket.backtest.strategy=TWAPArbitrageStrategy \
+  -Dpolymarket.backtest.strategy=UtterParameciumStrategy \
   -Dpolymarket.backtest.initial-capital=25000.0 \
   -Dpolymarket.backtest.from=2026-10-15 \
   -Dpolymarket.backtest.to=2026-11-10 \

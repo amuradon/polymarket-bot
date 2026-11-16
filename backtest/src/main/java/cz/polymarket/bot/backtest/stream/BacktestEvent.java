@@ -1,7 +1,6 @@
 package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.domain.MarketCandle;
-import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 
@@ -230,23 +229,7 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     }
 
     /**
-     * Aggregate TWAP reference price update event.
-     *
-     * @param timestampMs event timestamp in milliseconds UTC
-     * @param update latest aggregate TWAP sample update
-     */
-    record TwapUpdateEvent(
-            long timestampMs,
-            TwapUpdate update
-    ) implements BacktestEvent {
-        @Override
-        public int priority() {
-            return 25;
-        }
-    }
-
-    /**
-     * Lifecycle milestones marking candle open, 60s sampling, and settlement close.
+     * Lifecycle milestones marking candle open and settlement close.
      *
      * @param timestampMs milestone timestamp in milliseconds UTC
      * @param type lifecycle event stage
@@ -275,8 +258,6 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     enum CandleLifecycleType {
         /** Candle interval opening milestone */
         CANDLE_START,
-        /** 60-second TWAP reference sampling milestone */
-        TWAP_60S_SAMPLE,
         /** Candle settlement and resolution closing milestone */
         CANDLE_CLOSE
     }

@@ -1,10 +1,8 @@
 package cz.polymarket.bot.strategy;
 
-import cz.polymarket.bot.cache.HourlyPriceCache;
-
 /**
  * Execution context provided to a TradingStrategy instance during execution.
- * Provides access to price cache and execution routing.
+ * Provides access to indicators and execution routing.
  */
 public interface StrategyContext {
 
@@ -14,13 +12,6 @@ public interface StrategyContext {
      * @return the execution router
      */
     ExecutionRouter getExecutionRouter();
-
-    /**
-     * Returns the shared rolling price cache.
-     *
-     * @return the hourly price cache
-     */
-    HourlyPriceCache getPriceCache();
 
     /**
      * Returns the current real-time or cached value of the requested indicator.

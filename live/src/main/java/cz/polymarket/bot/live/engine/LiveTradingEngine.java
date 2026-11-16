@@ -1,6 +1,5 @@
 package cz.polymarket.bot.live.engine;
 
-import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
@@ -21,8 +20,6 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
-import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.domain.TwapUpdate;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.SystemTelemetrySnapshot;
@@ -83,7 +80,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private static final long STALE_QUOTE_WARN_INTERVAL_MS = 1_000L;
     private static final long MARKET_PREFETCH_LOOKAHEAD_SEC = 60L;
 
-    private final HourlyPriceCache priceCache;
     private final PolymarketSecretsResolver secretsResolver;
     private final PolymarketClobRestClient clobRestClient;
     private final PolymarketGammaClient gammaClient;
@@ -167,7 +163,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      * Constructs the Live Trading Engine.
      *
      * @param strategyRegistry  registry of available trading strategies
-     * @param priceCache        sliding window price cache
      * @param secretsResolver   AWS Secrets Manager / environment credentials resolver
      * @param clobRestClient    Polymarket CLOB REST client (L2 HMAC + EIP-712 order gateway)
      * @param gammaClient       Polymarket Gamma REST client ({@code GET /markets/slug/{slug}})
@@ -185,7 +180,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     @Inject
     public LiveTradingEngine(
             StrategyRegistry strategyRegistry,
-            HourlyPriceCache priceCache,
             PolymarketSecretsResolver secretsResolver,
             PolymarketClobRestClient clobRestClient,
             PolymarketGammaClient gammaClient,
@@ -207,9 +201,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             long maxQuoteAgeMs) {
         if (strategyRegistry == null) {
             throw new IllegalArgumentException("strategyRegistry cannot be null");
-        }
-        if (priceCache == null) {
-            throw new IllegalArgumentException("priceCache cannot be null");
         }
         if (secretsResolver == null) {
             throw new IllegalArgumentException("secretsResolver cannot be null");
@@ -233,7 +224,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             throw new IllegalArgumentException("telemetryMonitor cannot be null");
         }
 
-        this.priceCache = priceCache;
         this.secretsResolver = secretsResolver;
         this.clobRestClient = clobRestClient;
         this.gammaClient = gammaClient;
@@ -978,11 +968,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     @Override
-    public HourlyPriceCache getPriceCache() {
-        return priceCache;
-    }
-
-    @Override
     public void submitOrder(OrderCommand command) {
         if (command == null) {
             return;
@@ -1365,24 +1350,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
         Log.infof("Closed live position: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, currentBalance);
-    }
-
-    /**
-     * Forwards a {@link TwapUpdate} to the active strategy when multi-exchange TWAP updates are used.
-     *
-     * @param update TWAP update
-     */
-    public void onTwapUpdate(TwapUpdate update) {
-        if (update == null) {
-            return;
-        }
-        Timeframe strategyTf = activeStrategy.getTimeframe();
-        if (update.timeframe() != null && strategyTf != null && update.timeframe() != strategyTf) {
-            return;
-        }
-        synchronized (strategyLock) {
-            activeStrategy.onTwapUpdate(update);
-        }
     }
 
     /**

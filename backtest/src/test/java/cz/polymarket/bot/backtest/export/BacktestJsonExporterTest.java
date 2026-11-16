@@ -56,7 +56,7 @@ class BacktestJsonExporterTest {
         );
 
         BacktestResult result = new BacktestResult(
-                "TWAPArbitrageStrategy",
+                "UtterParameciumStrategy",
                 "BTCUSDT",
                 Instant.parse("2026-10-03T10:00:00Z"),
                 5100,
@@ -70,11 +70,11 @@ class BacktestJsonExporterTest {
         assertThat(exportedFile).isNotNull();
         assertThat(Files.exists(exportedFile)).isTrue();
         assertThat(exportedFile.getFileName().toString())
-                .startsWith("backtest_TWAPArbitrageStrategy_")
+                .startsWith("backtest_UtterParameciumStrategy_")
                 .endsWith(".json");
 
         String content = Files.readString(exportedFile);
-        assertThat(content).contains("TWAPArbitrageStrategy");
+        assertThat(content).contains("UtterParameciumStrategy");
         assertThat(content).contains("88.9");
         assertThat(content).contains("Resolution (TWAP 60s)");
 

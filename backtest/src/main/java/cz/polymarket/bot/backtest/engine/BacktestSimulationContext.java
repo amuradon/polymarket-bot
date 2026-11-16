@@ -3,7 +3,6 @@ package cz.polymarket.bot.backtest.engine;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
-import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionRouter;
 import cz.polymarket.bot.strategy.IndicatorType;
@@ -22,7 +21,6 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
 
     private final SimulatedMatchingEngine matchingEngine;
     private final DynamicIndicatorEngine indicatorEngine;
-    private HourlyPriceCache priceCache;
 
     private long currentTimestampMs;
     private double lastReferencePrice;
@@ -74,17 +72,6 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     @Override
     public ExecutionRouter getExecutionRouter() {
         return this;
-    }
-
-    /**
-     * Returns the shared rolling price cache, lazily initialized on first access.
-     */
-    @Override
-    public HourlyPriceCache getPriceCache() {
-        if (priceCache == null) {
-            priceCache = new HourlyPriceCache(3600L);
-        }
-        return priceCache;
     }
 
     /**

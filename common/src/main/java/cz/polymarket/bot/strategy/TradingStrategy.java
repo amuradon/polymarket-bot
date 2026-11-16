@@ -2,7 +2,6 @@ package cz.polymarket.bot.strategy;
 
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
-import cz.polymarket.bot.domain.TwapUpdate;
 
 import java.util.Set;
 
@@ -91,13 +90,6 @@ public interface TradingStrategy {
      * @param context the execution context providing market data and order placement capabilities
      */
     void init(StrategyContext context);
-
-    /**
-     * Optional callback triggered when a new aggregate TWAP / reference price update arrives.
-     *
-     * @param update the latest TWAP update
-     */
-    default void onTwapUpdate(TwapUpdate update) {}
 
     /**
      * Optional callback triggered when a real-time crypto spot/oracle price update arrives

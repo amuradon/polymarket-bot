@@ -330,7 +330,7 @@ public class BacktestResource {
             @Schema(description = "Initial lifecycle status of the job", examples = "QUEUED")
             String status,
 
-            @Schema(description = "Trading strategy to evaluate", examples = "TWAPArbitrageStrategy")
+            @Schema(description = "Trading strategy to evaluate", examples = "UtterParameciumStrategy")
             String strategyName,
 
             @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
@@ -365,18 +365,18 @@ public class BacktestResource {
             @Schema(description = "Lifecycle status: QUEUED, IN_PROGRESS, COMPLETED, or FAILED", examples = "COMPLETED")
             String status,
 
-            @Schema(description = "Strategy evaluated", examples = "TWAPArbitrageStrategy")
+            @Schema(description = "Strategy evaluated", examples = "UtterParameciumStrategy")
             String strategyName,
 
             @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
             String symbol,
 
             @Schema(description = "File system path to the exported JSON results file when completed",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_UtterParameciumStrategy_20261003_114500.json")
             String resultFilePath,
 
             @Schema(description = "File system path to the exported JSON results file (alias)",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_TWAPArbitrageStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_UtterParameciumStrategy_20261003_114500.json")
             String jsonFilePath,
 
             @Schema(description = "Error description if execution failed", examples = "No market rows available")

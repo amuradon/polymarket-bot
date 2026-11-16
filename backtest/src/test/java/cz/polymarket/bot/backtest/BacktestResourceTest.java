@@ -78,7 +78,7 @@ class BacktestResourceTest {
         given()
                 .contentType(ContentType.JSON)
                 .body(Map.of(
-                        "strategyName", "TWAPArbitrageStrategy",
+                        "strategyName", "UtterParameciumStrategy",
                         "startDate", "2026-08-10",
                         "endDate", "2026-08-01"
                 ))
@@ -95,7 +95,7 @@ class BacktestResourceTest {
         given()
                 .contentType(ContentType.JSON)
                 .body(Map.of(
-                        "strategyName", "TWAPArbitrageStrategy",
+                        "strategyName", "UtterParameciumStrategy",
                         "latencyFactor", -1.0
                 ))
                 .when().post("/api/backtest/run")
@@ -146,7 +146,7 @@ class BacktestResourceTest {
         String jobId = given()
                 .contentType(ContentType.JSON)
                 .body(Map.of(
-                        "strategyName", "TWAPArbitrageStrategy",
+                        "strategyName", "UtterParameciumStrategy",
                         "symbol", "BTCUSDT",
                         "startDate", "2026-08-01",
                         "endDate", "2026-08-01",
@@ -158,7 +158,7 @@ class BacktestResourceTest {
                 .contentType(ContentType.JSON)
                 .body("jobId", notNullValue())
                 .body("status", org.hamcrest.Matchers.anyOf(equalTo("QUEUED"), equalTo("IN_PROGRESS"), equalTo("COMPLETED")))
-                .body("strategyName", equalTo("TWAPArbitrageStrategy"))
+                .body("strategyName", equalTo("UtterParameciumStrategy"))
                 .body("symbol", equalTo("BTCUSDT"))
                 .extract().path("jobId");
 
@@ -182,7 +182,7 @@ class BacktestResourceTest {
                 .contentType(ContentType.JSON)
                 .body("jobId", equalTo(jobId))
                 .body("status", equalTo("COMPLETED"))
-                .body("strategyName", equalTo("TWAPArbitrageStrategy"))
+                .body("strategyName", equalTo("UtterParameciumStrategy"))
                 .body("symbol", equalTo("BTCUSDT"))
                 .body("totalMarkets", equalTo(1))
                 .body("resultFilePath", notNullValue())

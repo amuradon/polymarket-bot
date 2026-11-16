@@ -23,7 +23,7 @@ class PaperDashboardResourceTest {
                 .statusCode(200)
                 .contentType(ContentType.HTML)
                 .body(containsString("Polymarket Bot :: Paper Trading"))
-                .body(containsString("TWAPArbitrageStrategy"))
+                .body(containsString("UtterParameciumStrategy"))
                 .body(containsString("Initial Capital"))
                 .body(containsString("Current Balance"))
                 .body(containsString("Execution History"));
@@ -67,7 +67,7 @@ class PaperDashboardResourceTest {
                 .then()
                 .statusCode(200)
                 .contentType(ContentType.JSON)
-                .body("strategyName", equalTo("TWAPArbitrageStrategy"))
+                .body("strategyName", equalTo("UtterParameciumStrategy"))
                 .body("status", equalTo("RUNNING"))
                 .body("orderLatencyMs", equalTo(50))
                 .body("initialCapital", notNullValue())

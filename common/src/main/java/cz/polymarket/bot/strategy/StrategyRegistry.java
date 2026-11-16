@@ -80,7 +80,7 @@ public class StrategyRegistry {
     /**
      * Resolves a trading strategy by its case-insensitive or normalized name.
      *
-     * @param name name of the strategy to find (e.g. "TWAPArbitrageStrategy" or "utter_paramecium")
+     * @param name name of the strategy to find (e.g. "UtterParameciumStrategy" or "utter_paramecium")
      * @return matching TradingStrategy instance
      * @throws IllegalArgumentException if name is blank or strategy is not registered
      */

@@ -560,8 +560,6 @@ public class BacktestEngine {
                             }
                             activeStrategy.onBinanceFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
                         }
-                        case BacktestEvent.TwapUpdateEvent e ->
-                                activeStrategy.onTwapUpdate(e.update());
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);
                             if (report != null) {

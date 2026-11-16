@@ -20,7 +20,7 @@ This document defines the strict, non-negotiable workflow and development protoc
 ### 3.2 Clean Code & Minimize Duplication (DRY)
 - **Minimize Duplication**: Actively eliminate duplicate logic across the entire codebase. Shared domain models, calculators, mathematical formulas, and interfaces belong strictly in `common`.
 - **SOLID Principles**: Keep classes, records, and methods small, focused, and adhering to the Single Responsibility Principle (SRP).
-- **Domain-Accurate Naming**: Use explicit, unambiguous names reflecting financial, market microstructure, and prediction market concepts (e.g. `MarketCandle`, `TwapPoint`, `Timeframe`, `OrderBookQuote`).
+- **Domain-Accurate Naming**: Use explicit, unambiguous names reflecting financial, market microstructure, and prediction market concepts (e.g. `MarketCandle`, `TradeRecord`, `Timeframe`, `OrderBookQuote`).
 
 ### 3.3 Zero Dead or Unused Code & Overloads
 - **Complete Cleanup**: After completing modifications, audit the codebase to ensure no dead, orphaned, or unreferenced code remains.

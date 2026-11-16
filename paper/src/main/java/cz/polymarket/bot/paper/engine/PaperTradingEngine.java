@@ -1,12 +1,8 @@
 package cz.polymarket.bot.paper.engine;
 
-import cz.polymarket.bot.cache.HourlyPriceCache;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
-import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TradeRecord;
-import cz.polymarket.bot.domain.TwapUpdate;
-import cz.polymarket.bot.exchange.BinanceHistoricalClient;
 import cz.polymarket.bot.paper.storage.PaperTradeRepository;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
@@ -15,10 +11,8 @@ import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
-import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import io.quarkus.logging.Log;
@@ -42,11 +36,9 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
     private final StrategyRegistry strategyRegistry;
     private final PaperTradeRepository repository;
-    private final HourlyPriceCache priceCache;
     private final String strategyName;
     private final long orderLatencyMs;
     private final Vertx vertx;
-    private final BinanceHistoricalClient binanceHistoricalClient;
 
     private final TradingStrategy activeStrategy;
     private final AtomicReference<PaperPosition> activePosition = new AtomicReference<>();
@@ -65,11 +57,9 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     public PaperTradingEngine(
             StrategyRegistry strategyRegistry,
             PaperTradeRepository repository,
-            HourlyPriceCache priceCache,
-            @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "TWAPArbitrageStrategy") String strategyName,
+            @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "UtterParameciumStrategy") String strategyName,
             @ConfigProperty(name = "polymarket.paper.order-latency-ms", defaultValue = "50") long orderLatencyMs,
-            Vertx vertx,
-            BinanceHistoricalClient binanceHistoricalClient) {
+            Vertx vertx) {
         if (strategyRegistry == null) {
             throw new IllegalArgumentException("strategyRegistry cannot be null");
         }
@@ -82,11 +72,9 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
 
         this.strategyRegistry = strategyRegistry;
         this.repository = repository;
-        this.priceCache = priceCache != null ? priceCache : new HourlyPriceCache(3600L);
         this.strategyName = strategyName;
         this.orderLatencyMs = Math.max(0, orderLatencyMs);
         this.vertx = vertx;
-        this.binanceHistoricalClient = binanceHistoricalClient;
 
         this.activeStrategy = this.strategyRegistry.getStrategy(this.strategyName);
         this.activeStrategy.init(this);
@@ -94,56 +82,9 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 this.activeStrategy.getName(), this.orderLatencyMs);
     }
 
-    private boolean shouldSeedHistoricalCandles() {
-        return activeStrategy.getRequiredExternalStreams() != null
-                && !activeStrategy.getRequiredExternalStreams().isEmpty();
-    }
-
-    void onStart(@Observes StartupEvent ev) {
-        if (!shouldSeedHistoricalCandles()) {
-            Log.infof("Active strategy '%s' does not require external exchange streams; skipping Binance historical seeding",
-                    activeStrategy.getName());
-            return;
-        }
-
-        if (binanceHistoricalClient != null && vertx != null) {
-            vertx.executeBlocking(() -> {
-                seedInitialCandles();
-                return null;
-            });
-        } else if (binanceHistoricalClient != null) {
-            seedInitialCandles();
-        }
-    }
-
-    void seedInitialCandles() {
-        try {
-            List<MarketCandle> candles = binanceHistoricalClient.fetch15mKlines(24);
-            if (candles != null && !candles.isEmpty()) {
-                long nowSec = Instant.now().getEpochSecond();
-                int count = 0;
-                for (MarketCandle c : candles) {
-                    if (c.intervalEndSec() <= nowSec) {
-                        activeStrategy.onMarketCandleCompleted(c);
-                        count++;
-                    }
-                }
-                Log.infof("Seeded %d historical 15m candles into active strategy '%s'",
-                        count, activeStrategy.getName());
-            }
-        } catch (Exception e) {
-            Log.warnf("Failed to seed initial candles from Binance: %s", e.getMessage());
-        }
-    }
-
     @Override
     public ExecutionRouter getExecutionRouter() {
         return this;
-    }
-
-    @Override
-    public HourlyPriceCache getPriceCache() {
-        return priceCache;
     }
 
     @Override
@@ -396,83 +337,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         activePosition.set(openPositions.isEmpty() ? null : openPositions.getLast());
         Log.infof("Closed paper trade: %s @ %.4f -> Net PnL: $%.2f (%s), Balance: $%.2f",
                 pos.side(), exitPrice, netPnl, exitReason, newBalance);
-    }
-
-    public synchronized void onTwapUpdate(TwapUpdate update) {
-        if (update == null) {
-            return;
-        }
-
-        // Only process updates matching active strategy timeframe (e.g. 15m)
-        Timeframe strategyTf = activeStrategy.getTimeframe();
-        if (update.timeframe() != null && strategyTf != null && update.timeframe() != strategyTf) {
-            return;
-        }
-
-        long start = update.candleStart();
-        long currentActiveStart = activeCandleStart.get();
-        if (currentActiveStart > 0L && start < currentActiveStart) {
-            return;
-        }
-        if (start != currentActiveStart) {
-            if (currentActiveStart > 0 && (currentSpotPrice > 0 || twapOpenPrice > 0)) {
-                double finalTwap = (update.point() != null && update.point().twap() != null)
-                        ? update.point().twap().doubleValue()
-                        : currentSpotPrice;
-                TradeDirection outcome = (finalTwap >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
-                resolveCandle(outcome, currentSpotPrice > 0 ? currentSpotPrice : finalTwap);
-            }
-
-            activeCandleStart.set(start);
-            activeCandleEnd.set(update.candleEnd());
-            twapOpenPrice = update.openPrice().doubleValue();
-        }
-
-        if (update.point() != null) {
-            currentTimestampSec = update.point().time();
-            if (update.point().medianPrice() != null) {
-                currentSpotPrice = update.point().medianPrice().doubleValue();
-                if (candleHigh == 0.0 || currentSpotPrice > candleHigh) {
-                    candleHigh = currentSpotPrice;
-                }
-                if (candleLow == 0.0 || currentSpotPrice < candleLow) {
-                    candleLow = currentSpotPrice;
-                }
-            }
-        }
-
-        activeStrategy.onTwapUpdate(update);
-
-        // Synthesize realistic OrderBookQuote from current spot and twap open if quote feed is missing
-        if (twapOpenPrice > 0 && currentSpotPrice > 0) {
-            long candleStart = activeCandleStart.get();
-            long elapsedSec = (candleStart > 0 && currentTimestampSec >= candleStart)
-                    ? (currentTimestampSec - candleStart)
-                    : 0;
-
-            double delta = currentSpotPrice - twapOpenPrice;
-            double tau = Math.clamp(elapsedSec / 900.0, 0.0, 1.0);
-            double k = 0.05 + 0.35 * Math.pow(tau, 1.5);
-            double pMidUp = Math.clamp(0.50 + k * (delta / 100.0), 0.05, 0.95);
-            double pMidDown = 1.0 - pMidUp;
-
-            double spreadHalf = 0.01;
-            double bestAskUp = Math.min(0.99, pMidUp + spreadHalf);
-            double bestBidUp = Math.max(0.01, pMidUp - spreadHalf);
-            double bestAskDown = Math.min(0.99, pMidDown + spreadHalf);
-            double bestBidDown = Math.max(0.01, pMidDown - spreadHalf);
-
-            OrderBookQuote synthQuote = new OrderBookQuote(
-                    bestAskUp,
-                    bestBidUp,
-                    bestAskDown,
-                    bestBidDown,
-                    5000.0, 5000.0,
-                    bestAskUp, bestAskDown,
-                    currentTimestampSec > 0 ? (currentTimestampSec * 1000L) : System.currentTimeMillis()
-            );
-            onOrderBookQuote(synthQuote);
-        }
     }
 
     /**

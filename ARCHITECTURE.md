@@ -11,7 +11,7 @@ The project is structured as a Maven Multi-Module project with 7 distinct submod
 ```mermaid
 flowchart TD
     subgraph Core["Core Domain & Strategy Layer"]
-        common["common<br/>(Domain, Calculators, Cache, Strategy API)"]
+        common["common<br/>(Domain, Calculators, Strategy API)"]
     end
 
     subgraph ConnectivityLayer["Connectivity Layer"]
@@ -19,7 +19,7 @@ flowchart TD
     end
 
     subgraph TradingLayer["Trading Layer"]
-        trading["trading<br/>(Shared Exchange Clients & Payload Parsers)"]
+        trading["trading<br/>(Shared Trading Runtime Layer)"]
     end
 
     subgraph Applications["Standalone Executable Applications"]
@@ -43,7 +43,7 @@ flowchart TD
 
 | Module | Packaging | Depends On | Allowed Dependencies | Prohibited Dependencies |
 | :--- | :--- | :--- | :--- | :--- |
-| **`common`** | `jar` (library) | *None* | Pure domain, math calculators, cache, strategy API, Java standard library | `connector`, `trading`, `data`, `live`, `paper`, `backtest`, heavy frameworks |
+| **`common`** | `jar` (library) | *None* | Pure domain, math calculators, strategy API, Java standard library | `connector`, `trading`, `data`, `live`, `paper`, `backtest`, heavy frameworks |
 | **`connector`** | `jar` (library) | *None* | Quarkus Arc, Vert.x, Jackson, Java standard library (`HttpClient`) | `common`, `trading`, `data`, `live`, `paper`, `backtest` |
 | **`data`** | `jar` (app) | `connector` | `connector`, `zstd-jni`, Quarkus Scheduler/REST | **`common`**, `trading`, `live`, `paper`, `backtest` |
 | **`trading`** | `jar` (library) | `common`, `connector` | `common`, `connector`, Quarkus platform extensions (REST, Qute, WebSockets, Vert.x) | `data`, `backtest`, `live`, `paper` |
@@ -78,8 +78,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 
 ### `common`
 - **Domain Models**: Immutable records and compact structures for timeframes, candles, order book quotes, and trade records.
-- **Calculators & Math**: Quantitative calculators for rolling calculated Spot & 60s TWAP (`CalculatedSpotTwapEngine`), VWAP, realized volatility, position sizing, and performance metrics.
-- **In-Memory Cache**: Sliding 3600-second window price caching for low-latency lookups.
+- **Calculators & Math**: Quantitative calculators for rolling calculated Spot & 60s TWAP (`CalculatedSpotTwapEngine`), VWAP, realized volatility, and performance metrics.
 - **Strategy & Execution Contracts**: Core strategy interfaces, execution routing contracts, strategy registry, and shared trading strategies that execute identically across backtest, paper, and live modes.
 
 ### `connector`
@@ -98,7 +97,7 @@ Because `common`, `connector`, and `trading` are library modules consumed by the
 - **Status Endpoint**: Exposes `/api/collector/status` for monitoring active streams and storage health.
 
 ### `trading`
-- **Exchange Clients & Parsers**: Historical candle REST clients (`BinanceHistoricalClient`) and payload parsers (`ExchangePayloadParser`) shared across `paper` and `live` applications.
+- **Shared Trading Runtime**: Shared runtime configuration and Quarkus platform extensions consumed by `paper` and `live` applications.
 
 ### `live`
 - Standalone runnable Quarkus application for live real-money execution.
