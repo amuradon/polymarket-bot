@@ -393,4 +393,69 @@ class PolymarketClobClientTest {
         assertThat(fp1).isNotEqualTo(fp3);
         assertThat(fp2).isNotEqualTo(fp3);
     }
+
+    @Test
+    void shouldFilterUniqueFramesInPlaceWithoutConcurrentBatchMutationWhenPrimaryAndBackupDrainSimultaneously() throws Exception {
+        List<ServerWebSocket> activeServerSockets = new CopyOnWriteArrayList<>();
+        AtomicInteger subscribedSocketCount = new AtomicInteger(0);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    activeServerSockets.add(ws);
+                    ws.textMessageHandler(msg -> {
+                        if (msg.contains("token_up_1")) {
+                            int count = subscribedSocketCount.incrementAndGet();
+                            if (count == 2) {
+                                ServerWebSocket s0 = activeServerSockets.get(0);
+                                ServerWebSocket s1 = activeServerSockets.get(1);
+                                for (int i = 0; i < 20; i++) {
+                                    String frame = "{\"event_type\":\"price_change\",\"seq\":" + i + "}";
+                                    s0.writeTextMessage(frame);
+                                    s1.writeTextMessage(frame);
+                                }
+                            }
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                "ws://localhost:" + port + "/ws/market",
+                3000L,
+                0L
+        );
+
+        String slug = "btc-updown-15m-1794849300";
+        List<String> deliveredPayloads = new CopyOnWriteArrayList<>();
+        List<Throwable> callbackErrors = new CopyOnWriteArrayList<>();
+
+        client.openMarketStreamBatch(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                batch -> {
+                    try {
+                        int n = batch.size();
+                        for (int i = 0; i < n; i++) {
+                            if (i == 0 && n > 1) {
+                                Thread.sleep(2L);
+                            }
+                            deliveredPayloads.add(batch.get(i).rawText());
+                        }
+                    } catch (Throwable t) {
+                        callbackErrors.add(t);
+                    }
+                },
+                null
+        );
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(callbackErrors).isEmpty();
+                    assertThat(deliveredPayloads).hasSize(20);
+                });
+
+        client.stopAll();
+    }
 }

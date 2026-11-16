@@ -1304,6 +1304,66 @@ class LiveTradingEngineTest {
         }
     }
 
+    @Test
+    void shouldIgnoreScheduledMarketRolloverAndKeepaliveBeforeLiveStreamsAreStarted() {
+        PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
+                Optional.of(TEST_PRIVATE_KEY),
+                Optional.of("api-key-live"),
+                Optional.of("passphrase-live"),
+                Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                Optional.of(TEST_MAKER_ADDRESS),
+                Optional.of(TEST_EOA_ADDRESS)
+        );
+        HttpClient httpClient = HttpClient.newHttpClient();
+        String baseHttpUrl = "http://localhost:" + port;
+        UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        LiveTradingEngine engine = new LiveTradingEngine(
+                new StrategyRegistry(Map.of(strategy.getName(), strategy)),
+                secretsResolver,
+                new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
+                new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
+                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                        Optional.of("api-key-live"),
+                        Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                        Optional.of("passphrase-live"),
+                        1000L, 10000L),
+                binanceConnector,
+                krakenConnector,
+                coinbaseConnector,
+                new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                spotStreamProcessor,
+                new SystemNetworkTelemetryMonitor(),
+                "UtterParameciumStrategy",
+                "BTCUSDT",
+                "15m",
+                true,
+                "FAK",
+                250L
+        );
+
+        try {
+            // Simulate @Scheduled methods firing while onStart is still fetching credentials/balance
+            engine.scheduledMarketRollover();
+            engine.scheduledKeepalive();
+
+            // Must NOT open CLOB streams prematurely with null clobBookWorkerThread
+            assertThat(engine.getActiveMarketInfo()).isNull();
+            assertThat(clobSockets).isEmpty();
+
+            // Once onStart completes, workers are started and CLOB market stream is bound to clob-book-worker
+            engine.onStart(null);
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(engine.getActiveMarketInfo()).isNotNull();
+                        assertThat(clobSockets).hasSizeGreaterThanOrEqualTo(2);
+                    });
+        } finally {
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(long maxQuoteAgeMs) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),

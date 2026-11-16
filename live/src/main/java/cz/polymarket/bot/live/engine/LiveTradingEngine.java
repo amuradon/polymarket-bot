@@ -350,26 +350,34 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     public synchronized void startLiveStreams(long nowEpochSec) {
         Log.infof("Starting 4-core live pipeline and WebSocket streams for symbol=%s, timeframe=%s...", symbol, timeframe);
         if (workersRunning.compareAndSet(false, true)) {
-            this.clobBookWorkerThread = Thread.ofPlatform()
+            Thread bookThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MAX_PRIORITY)
                     .name("clob-book-worker")
-                    .start(this::clobBookWorkerLoop);
-            this.strategyCalculatorThread = Thread.ofPlatform()
+                    .unstarted(this::clobBookWorkerLoop);
+            Thread stratThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MAX_PRIORITY)
                     .name("strategy-calculator-worker")
-                    .start(this::strategyCalculatorLoop);
-            this.orderExecutionWorkerThread = Thread.ofPlatform()
+                    .unstarted(this::strategyCalculatorLoop);
+            Thread execThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MAX_PRIORITY)
                     .name("order-execution-io-worker")
-                    .start(this::orderExecutionWorkerLoop);
-            this.telemetryMaintenanceThread = Thread.ofPlatform()
+                    .unstarted(this::orderExecutionWorkerLoop);
+            Thread maintThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MIN_PRIORITY)
                     .name("telemetry-maintenance-worker")
-                    .start(this::telemetryMaintenanceLoop);
+                    .unstarted(this::telemetryMaintenanceLoop);
+            this.clobBookWorkerThread = bookThread;
+            this.strategyCalculatorThread = stratThread;
+            this.orderExecutionWorkerThread = execThread;
+            this.telemetryMaintenanceThread = maintThread;
+            bookThread.start();
+            stratThread.start();
+            execThread.start();
+            maintThread.start();
         }
 
         polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
@@ -742,7 +750,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     @Scheduled(every = "${polymarket.live.discovery-interval:5s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledMarketRollover() {
-        if (!streamsEnabled) {
+        if (!streamsEnabled || !workersRunning.get() || this.clobBookWorkerThread == null) {
             return;
         }
         discoverAndRotateMarket(Instant.now().getEpochSecond());
@@ -753,7 +761,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     @Scheduled(every = "${polymarket.live.keepalive-interval:15s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledKeepalive() {
-        if (!streamsEnabled) {
+        if (!streamsEnabled || !workersRunning.get() || this.clobBookWorkerThread == null) {
             return;
         }
         clobRestClient.pingKeepalive();

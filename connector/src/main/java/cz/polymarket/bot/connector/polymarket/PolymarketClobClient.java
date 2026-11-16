@@ -328,13 +328,14 @@ public class PolymarketClobClient {
         if (delegate == null || batch == null || batch.isEmpty()) {
             return;
         }
-        List<TimestampedFrame> uniqueBatch = deduplicator.filterUnique(batch);
-        int duplicatesSkipped = batch.size() - uniqueBatch.size();
-        if (duplicatesSkipped > 0 && sourceStream != null) {
-            sourceStream.addCoalescedFrames(duplicatesSkipped);
-        }
-        if (!uniqueBatch.isEmpty()) {
-            delegate.onMessageBatch(uniqueBatch);
+        synchronized (deduplicator) {
+            int duplicatesSkipped = deduplicator.filterUniqueInPlace(batch);
+            if (duplicatesSkipped > 0 && sourceStream != null) {
+                sourceStream.addCoalescedFrames(duplicatesSkipped);
+            }
+            if (!batch.isEmpty()) {
+                delegate.onMessageBatch(batch);
+            }
         }
     }
 
@@ -689,18 +690,24 @@ public class PolymarketClobClient {
 
         private final long[] cache = new long[SET_COUNT * WAYS_PER_SET];
         private final byte[] wayCursors = new byte[SET_COUNT];
-        private final List<TimestampedFrame> uniqueScratch = new ArrayList<>(64);
 
-        synchronized List<TimestampedFrame> filterUnique(List<TimestampedFrame> batch) {
-            uniqueScratch.clear();
-            for (int i = 0, n = batch.size(); i < n; i++) {
+        synchronized int filterUniqueInPlace(List<TimestampedFrame> batch) {
+            int n = batch.size();
+            int writeIdx = 0;
+            for (int i = 0; i < n; i++) {
                 TimestampedFrame frame = batch.get(i);
                 long fp = computeFingerprint(frame.rawUtf8Bytes());
                 if (fp == 0L || !isDuplicateAndRecord(fp)) {
-                    uniqueScratch.add(frame);
+                    if (writeIdx != i) {
+                        batch.set(writeIdx, frame);
+                    }
+                    writeIdx++;
                 }
             }
-            return uniqueScratch;
+            if (writeIdx < n) {
+                batch.subList(writeIdx, n).clear();
+            }
+            return n - writeIdx;
         }
 
         private boolean isDuplicateAndRecord(long fp) {
