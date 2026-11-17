@@ -149,3 +149,9 @@ python download_coinbase_trades.py --symbol BTCUSD --from 2026-11-10 --to 2026-1
 # Stažení obchodů s vlastním kořenovým adresářem
 python download_coinbase_trades.py --symbol BTCUSD --from 2026-11-04 --to 2026-11-09 --dir D:\Crypto\data\Polymarket\collector\coinbase\spot
 ```
+
+## 6. Stažení z Binance spot/futures
+```
+python download_binance_spot_aggtrades.py -Symbol BTCUSDT -From 2026-11-15 -To 2026-11-16
+python download_binance_futures_aggtrades.py -Symbol BTCUSDT -From 2026-11-15 -To 2026-11-16
+```
