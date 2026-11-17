@@ -24,7 +24,7 @@ Automated low-latency algorithmic trading platform for **Polymarket binary predi
 ## 2. Submodule Internals & Stream Contracts
 
 ### `common` (Pure Domain & Strategy Library)
-- **Domain Models**: Compact, allocation-friendly immutable structures for `Timeframe`, candles, order book quotes, and trade records.
+- **Domain Models**: Compact, allocation-friendly immutable structures for `Timeframe`, order book quotes, and trade records.
 - **Quantitative Calculators**: Rolling calculated Spot & 60s TWAP (`CalculatedSpotTwapEngine` replicating Polymarket settlement rules) and performance metrics.
 - **Strategy & Execution Contracts**: `TradingStrategy`, `StrategyContext`, `ExecutionRouter`, strategy registry, and shared strategy implementations (e.g. `UtterParameciumStrategy`).
 

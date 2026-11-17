@@ -1,6 +1,5 @@
 package cz.polymarket.bot.backtest.stream;
 
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 
@@ -236,15 +235,13 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
      * @param tStart candle start timestamp in epoch seconds
      * @param tEnd candle end timestamp in epoch seconds
      * @param actualOutcome settled binary outcome direction
-     * @param completedCandle domain market candle available upon close
      */
     record CandleLifecycleEvent(
             long timestampMs,
             CandleLifecycleType type,
             long tStart,
             long tEnd,
-            TradeDirection actualOutcome,
-            MarketCandle completedCandle
+            TradeDirection actualOutcome
     ) implements BacktestEvent {
         @Override
         public int priority() {

@@ -27,7 +27,6 @@ import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
@@ -1418,30 +1417,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             double high = candleHigh > 0.0 ? Math.max(candleHigh, Math.max(open, finalPrice)) : Math.max(open, finalPrice);
             double low = candleLow > 0.0 ? Math.min(candleLow, Math.min(open, finalPrice)) : Math.min(open, finalPrice);
 
-            double priceDelta = finalPrice - open;
-            double approxVolumeBtc = Math.max(50.0, Math.abs(priceDelta) * 2.0);
-            double approxVolumeUsd = approxVolumeBtc * finalPrice;
-            double approxDeltaBtc = Math.clamp(priceDelta / 10.0, -10.0, 10.0);
-
-            MarketCandle candle = new MarketCandle(
-                    start,
-                    end,
-                    open,
-                    high,
-                    low,
-                    finalPrice,
-                    approxVolumeBtc,
-                    approxVolumeUsd,
-                    approxDeltaBtc,
-                    open,
-                    high,
-                    low,
-                    finalPrice,
-                    approxVolumeBtc,
-                    approxVolumeUsd,
-                    approxDeltaBtc
-            );
-            activeStrategy.onMarketCandleCompleted(candle);
             Log.infof("Resolved market candle [%d, %d]: outcome=%s, open=%.2f, close=%.2f, high=%.2f, low=%.2f, settledPositions=%d, balance=$%.2f",
                     start, end, actualOutcome, open, finalPrice, high, low, settledPositions, currentBalance);
 

@@ -469,13 +469,13 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         scheduleEvent(new BacktestEvent.CandleLifecycleEvent(
                 tStartMs,
                 BacktestEvent.CandleLifecycleType.CANDLE_START,
-                tStart, tEnd, actualOutcome, null
+                tStart, tEnd, actualOutcome
         ));
 
         scheduleEvent(new BacktestEvent.CandleLifecycleEvent(
                 tEndMs,
                 BacktestEvent.CandleLifecycleType.CANDLE_CLOSE,
-                tStart, tEnd, actualOutcome, null
+                tStart, tEnd, actualOutcome
         ));
     }
 

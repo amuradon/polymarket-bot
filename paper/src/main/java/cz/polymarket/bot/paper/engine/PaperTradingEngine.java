@@ -6,7 +6,6 @@ import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.paper.storage.PaperTradeRepository;
@@ -65,8 +64,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicLong activeCandleEnd = new AtomicLong(0);
     private volatile double twapOpenPrice = 0.0;
     private volatile double currentSpotPrice = 0.0;
-    private volatile double candleHigh = 0.0;
-    private volatile double candleLow = 0.0;
     private volatile long currentTimestampSec = 0;
     private volatile OrderBookQuote latestQuote = null;
 
@@ -379,40 +376,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
             openPositions.clear();
             activePosition.set(null);
         }
-
-        long start = activeCandleStart.get() > 0 ? activeCandleStart.get() : (currentTimestampSec > 0 ? currentTimestampSec - 900 : 1700000000L);
-        long end = activeCandleEnd.get() > start ? activeCandleEnd.get() : (start + 900);
-        double open = twapOpenPrice > 0 ? twapOpenPrice : finalPrice;
-        double high = candleHigh > 0 ? Math.max(candleHigh, Math.max(open, finalPrice)) : Math.max(open, finalPrice);
-        double low = candleLow > 0 ? Math.min(candleLow, Math.min(open, finalPrice)) : Math.min(open, finalPrice);
-
-        double priceDelta = finalPrice - open;
-        double approxVolumeBtc = Math.max(50.0, Math.abs(priceDelta) * 2.0);
-        double approxVolumeUsd = approxVolumeBtc * finalPrice;
-        double approxDeltaBtc = Math.clamp(priceDelta / 10.0, -10.0, 10.0);
-
-        MarketCandle candle = new MarketCandle(
-                start,
-                end,
-                open,
-                high,
-                low,
-                finalPrice,
-                approxVolumeBtc,
-                approxVolumeUsd,
-                approxDeltaBtc,
-                open,
-                high,
-                low,
-                finalPrice,
-                approxVolumeBtc,
-                approxVolumeUsd,
-                approxDeltaBtc
-        );
-        activeStrategy.onMarketCandleCompleted(candle);
-
-        candleHigh = 0.0;
-        candleLow = 0.0;
     }
 
     private void completeTrade(PaperPosition pos, double exitPrice, double exitFee, String exitReason) {
@@ -510,12 +473,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         }
         currentTimestampSec = timestampMs / 1000L;
         currentSpotPrice = price;
-        if (candleHigh == 0.0 || price > candleHigh) {
-            candleHigh = price;
-        }
-        if (candleLow == 0.0 || price < candleLow) {
-            candleLow = price;
-        }
         if (activeCandleStart.get() == 0) {
             long durationSec = activeStrategy.getTimeframe() != null
                     ? activeStrategy.getTimeframe().getDurationSeconds()
@@ -613,8 +570,6 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
         activeCandleEnd.set(0);
         twapOpenPrice = 0.0;
         currentSpotPrice = 0.0;
-        candleHigh = 0.0;
-        candleLow = 0.0;
         currentTimestampSec = 0;
         latestQuote = null;
         Log.info("Reset PaperTradingEngine internal state");

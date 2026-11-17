@@ -10,7 +10,6 @@ import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionReport;
@@ -540,8 +539,8 @@ public class BacktestEngine {
                                 notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
                             }
                         }
-                        case BacktestEvent.BinanceFuturesTradeEvent e ->
-                                indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
+                        case BacktestEvent.BinanceFuturesTradeEvent e -> {
+                        }
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);
                             if (report != null) {
@@ -557,13 +556,6 @@ public class BacktestEngine {
 
                                 if (context.hasActiveTrade()) {
                                     marketTrades = context.finalizeTrades(market, actualOutcome, 0.0);
-                                }
-
-                                MarketCandle completedCandle = (e.completedCandle() != null)
-                                        ? e.completedCandle()
-                                        : indicatorEngine.buildCompletedCandle(market.tStart(), market.tEnd());
-                                if (completedCandle != null) {
-                                    activeStrategy.onMarketCandleCompleted(completedCandle);
                                 }
 
                                 double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;

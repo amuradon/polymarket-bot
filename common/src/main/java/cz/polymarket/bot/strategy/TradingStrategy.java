@@ -1,6 +1,5 @@
 package cz.polymarket.bot.strategy;
 
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 
 import java.util.Set;
@@ -152,13 +151,6 @@ public interface TradingStrategy {
      * @param report the execution report
      */
     void onExecutionReport(ExecutionReport report);
-
-    /**
-     * Optional callback triggered when a market candle completes.
-     *
-     * @param candle the completed market candle
-     */
-    default void onMarketCandleCompleted(MarketCandle candle) {}
 
     /**
      * Optional callback triggered when an order book quote arrives.

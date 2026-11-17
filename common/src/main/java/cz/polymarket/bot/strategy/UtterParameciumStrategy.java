@@ -1,6 +1,5 @@
 package cz.polymarket.bot.strategy;
 
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import io.quarkus.logging.Log;
@@ -628,11 +627,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
             orderInFlight = false;
             pendingClientOrderId = null;
         }
-    }
-
-    @Override
-    public void onMarketCandleCompleted(MarketCandle candle) {
-        // Real-time 1s PolyBolt price.crypto differences drive volatility estimation directly
     }
 
     @Override
