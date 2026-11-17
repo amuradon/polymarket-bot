@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Connects to the Data Collector EC2 instance (via SSH/SSM tunnel), discovers all daily stream files (Binance Spot & Futures
-    aggTrades and bookTicker, Kraken Spot trades including USDTUSD, Coinbase Spot trades, Polymarket PolyBolt) and per-market
+    bookTicker, Polymarket PolyBolt) and per-market
     Polymarket CLOB files for the specified UTC date (YYYY-MM-DD), streams them via tar directly into the local destination
     directory without creating intermediate archives on EC2, verifies every file's byte size locally, and upon 100% verification
     deletes the downloaded files from the remote EBS volume.
@@ -15,7 +15,7 @@
     Target UTC date in YYYY-MM-DD format (e.g. 2026-10-12, 2026-10-15). Optional when using -CleanAlreadyDownloaded.
 
 .PARAMETER Stream
-    Optional substring to filter by stream type, exchange, or symbol (e.g. 'bookTicker', 'aggTrades', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
+    Optional substring to filter by stream type, exchange, or symbol (e.g. 'bookTicker', 'price_crypto', 'btc-updown').
 
 .PARAMETER DestinationDir
     Local root directory for collector data. Defaults to 'D:\Crypto\data\Polymarket\collector'.

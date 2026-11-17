@@ -40,7 +40,7 @@ Options:
                                 (Default: /data/polymarket/collector or ./collector)
   -d, --date <YYYY-MM-DD>       Optional target UTC date filter.
   -s, --stream <pattern>        Optional substring to filter by stream type or symbol
-                                (e.g. 'aggTrades', 'bookTicker', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
+                                (e.g. 'bookTicker', 'price_crypto', 'btc-updown').
   -f, --filter <pattern>        Filename search pattern (Default: *.jsonl.zst).
   -n, --dry-run                 Displays all files that would be converted without modifying disk.
   -k, --keep-original           Retain original .jsonl.zst files after conversion instead of deleting.
@@ -165,16 +165,8 @@ TARGET_DIR_RESOLVED=$(cd "$TARGET_DIR" && pwd)
 get_stream_type() {
     local path_lower
     path_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-    if [[ "$path_lower" =~ /binance/spot/.*/aggtrades/ ]] || [[ "$path_lower" =~ spot.*aggtrades ]]; then
-        echo "binance-spot-aggtrades"
-    elif [[ "$path_lower" =~ /binance/spot/.*/bookticker/ ]] || [[ "$path_lower" =~ spot.*bookticker ]]; then
+    if [[ "$path_lower" =~ /binance/spot/.*/bookticker/ ]] || [[ "$path_lower" =~ spot.*bookticker ]]; then
         echo "binance-spot-bookticker"
-    elif [[ "$path_lower" =~ /kraken/spot/.*/trades/ ]] || [[ "$path_lower" =~ kraken.*trades ]]; then
-        echo "kraken-spot-trades"
-    elif [[ "$path_lower" =~ /coinbase/spot/.*/trades/ ]] || [[ "$path_lower" =~ coinbase.*trades ]]; then
-        echo "coinbase-spot-trades"
-    elif [[ "$path_lower" =~ /binance/futures/.*/aggtrades/ ]] || [[ "$path_lower" =~ futures.*aggtrades ]]; then
-        echo "binance-futures-aggtrades"
     elif [[ "$path_lower" =~ /binance/futures/.*/bookticker/ ]] || [[ "$path_lower" =~ futures.*bookticker ]]; then
         echo "binance-futures-bookticker"
     elif [[ "$path_lower" =~ price_crypto_twap ]]; then
@@ -317,24 +309,6 @@ get_convert_query() {
     local input_path="$2"
 
     case "$stream_type" in
-        "binance-spot-aggtrades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'a' AS BIGINT) AS aggregate_trade_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'p' AS DOUBLE) AS price,
-    CAST(payload->>'q' AS DOUBLE) AS quantity,
-    CAST(payload->>'f' AS BIGINT) AS first_trade_id,
-    CAST(payload->>'l' AS BIGINT) AS last_trade_id,
-    CAST(payload->>'T' AS UBIGINT) AS trade_time,
-    CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker,
-    CAST(payload->>'M' AS BOOLEAN) AS is_best_match
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
-EOF
-            ;;
         "binance-spot-bookticker")
             cat <<EOF
 SELECT 
@@ -347,59 +321,6 @@ SELECT
     CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
 FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC, update_id ASC
-EOF
-            ;;
-        "kraken-spot-trades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(epoch_ns(TRY_CAST(t->>'timestamp' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
-    t->>'symbol' AS symbol,
-    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
-    t->>'side' AS side,
-    t->>'ord_type' AS ord_type,
-    CAST(t->>'price' AS DOUBLE) AS price,
-    CAST(t->>'qty' AS DOUBLE) AS qty,
-    t->>'timestamp' AS timestamp
-FROM (
-    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
-    FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-    WHERE payload->>'channel' = 'trade' AND payload->>'type' = 'update'
-)
-ORDER BY ts ASC, trade_id ASC
-EOF
-            ;;
-        "coinbase-spot-trades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(epoch_ns(TRY_CAST(payload->>'time' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
-    payload->>'product_id' AS symbol,
-    CAST(payload->>'trade_id' AS BIGINT) AS trade_id,
-    payload->>'side' AS side,
-    CAST(payload->>'price' AS DOUBLE) AS price,
-    CAST(payload->>'size' AS DOUBLE) AS qty,
-    payload->>'time' AS timestamp
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-WHERE payload->>'type' = 'match'
-ORDER BY ts ASC, trade_id ASC
-EOF
-            ;;
-        "binance-futures-aggtrades")
-            cat <<EOF
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'a' AS BIGINT) AS aggregate_trade_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'p' AS DOUBLE) AS price,
-    CAST(payload->>'q' AS DOUBLE) AS quantity,
-    CAST(payload->>'f' AS BIGINT) AS first_trade_id,
-    CAST(payload->>'l' AS BIGINT) AS last_trade_id,
-    CAST(payload->>'T' AS UBIGINT) AS trade_time,
-    CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker
-FROM read_json('$input_path', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
 EOF
             ;;
         "binance-futures-bookticker")
@@ -647,7 +568,7 @@ while IFS=$'\t' read -r src_path src_size; do
 
     effective_threads=$THREADS
     effective_row_group_size=50000
-    if [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "kraken-spot-trades" ] || [ "$stream_type" = "coinbase-spot-trades" ] || [ "$stream_type" = "binance-spot-bookticker" ] || [ "$stream_type" = "binance-futures-bookticker" ]; then
+    if [ "$stream_type" = "polymarket-clob-market" ] || [ "$stream_type" = "binance-spot-bookticker" ] || [ "$stream_type" = "binance-futures-bookticker" ]; then
         effective_row_group_size=100000
     fi
 

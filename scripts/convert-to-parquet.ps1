@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Recursively scans the collector data directory (default 'D:\Crypto\data\Polymarket\collector')
-    for all .jsonl.zst files (Binance Spot/Futures, Kraken Spot, Coinbase Spot, Polymarket CLOB, and PolyBolt streams),
+    for all .jsonl.zst files (Binance Spot/Futures bookTicker, Polymarket CLOB, and PolyBolt streams),
     classifies the stream type, applies a high-performance, schema-optimized DuckDB SQL transformation,
     orders records by top-level receipt timestamp (`ts` ASC), writes compressed Parquet files,
     verifies file integrity and row counts, and upon successful verification removes the source .jsonl.zst archive.
@@ -20,7 +20,7 @@
     Optional target UTC date in YYYY-MM-DD format (e.g. 2026-10-15) to convert only files belonging to that date.
 
 .PARAMETER Stream
-    Optional substring to filter by stream type or symbol (e.g. 'aggTrades', 'bookTicker', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
+    Optional substring to filter by stream type or symbol (e.g. 'bookTicker', 'price_crypto', 'btc-updown').
 
 .PARAMETER Filter
     Filename search pattern. Defaults to '*.jsonl.zst'.
@@ -133,20 +133,8 @@ $resolvedTargetDir = (Resolve-Path -LiteralPath $TargetDir).Path
 function Get-StreamType {
     param([string]$FilePath)
     $normalized = $FilePath.Replace('\', '/').ToLowerInvariant()
-    if ($normalized -like "*/binance/spot/*/aggtrades/*" -or $normalized -like "*spot*aggtrades*") {
-        return "binance-spot-aggtrades"
-    }
     if ($normalized -like "*/binance/spot/*/bookticker/*" -or $normalized -like "*spot*bookticker*") {
         return "binance-spot-bookticker"
-    }
-    if ($normalized -like "*/kraken/spot/*/trades/*" -or $normalized -like "*kraken*trades*") {
-        return "kraken-spot-trades"
-    }
-    if ($normalized -like "*/coinbase/spot/*/trades/*" -or $normalized -like "*coinbase*trades*") {
-        return "coinbase-spot-trades"
-    }
-    if ($normalized -like "*/binance/futures/*/aggtrades/*" -or $normalized -like "*futures*aggtrades*") {
-        return "binance-futures-aggtrades"
     }
     if ($normalized -like "*/binance/futures/*/bookticker/*" -or $normalized -like "*futures*bookticker*") {
         return "binance-futures-bookticker"
@@ -294,24 +282,6 @@ function Get-ConvertQuery {
     )
 
     switch ($StreamType) {
-        "binance-spot-aggtrades" {
-            return @"
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'a' AS BIGINT) AS aggregate_trade_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'p' AS DOUBLE) AS price,
-    CAST(payload->>'q' AS DOUBLE) AS quantity,
-    CAST(payload->>'f' AS BIGINT) AS first_trade_id,
-    CAST(payload->>'l' AS BIGINT) AS last_trade_id,
-    CAST(payload->>'T' AS UBIGINT) AS trade_time,
-    CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker,
-    CAST(payload->>'M' AS BOOLEAN) AS is_best_match
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
-"@
-        }
         "binance-spot-bookticker" {
             return @"
 SELECT 
@@ -324,59 +294,6 @@ SELECT
     CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
 FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
 ORDER BY ts ASC, update_id ASC
-"@
-        }
-        "kraken-spot-trades" {
-            return @"
-SELECT 
-    ts,
-    CAST(epoch_ns(TRY_CAST(t->>'timestamp' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
-    t->>'symbol' AS symbol,
-    CAST(t->>'trade_id' AS BIGINT) AS trade_id,
-    t->>'side' AS side,
-    t->>'ord_type' AS ord_type,
-    CAST(t->>'price' AS DOUBLE) AS price,
-    CAST(t->>'qty' AS DOUBLE) AS qty,
-    t->>'timestamp' AS timestamp
-FROM (
-    SELECT ts, UNNEST(CAST(payload->'data' AS JSON[])) AS t
-    FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-    WHERE payload->>'channel' = 'trade' AND payload->>'type' = 'update'
-)
-ORDER BY ts ASC, trade_id ASC
-"@
-        }
-        "coinbase-spot-trades" {
-            return @"
-SELECT 
-    ts,
-    CAST(epoch_ns(TRY_CAST(payload->>'time' AS TIMESTAMPTZ)) // 1000000 AS UBIGINT) AS trade_timestamp,
-    payload->>'product_id' AS symbol,
-    CAST(payload->>'trade_id' AS BIGINT) AS trade_id,
-    payload->>'side' AS side,
-    CAST(payload->>'price' AS DOUBLE) AS price,
-    CAST(payload->>'size' AS DOUBLE) AS qty,
-    payload->>'time' AS timestamp
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-WHERE payload->>'type' = 'match'
-ORDER BY ts ASC, trade_id ASC
-"@
-        }
-        "binance-futures-aggtrades" {
-            return @"
-SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'a' AS BIGINT) AS aggregate_trade_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'p' AS DOUBLE) AS price,
-    CAST(payload->>'q' AS DOUBLE) AS quantity,
-    CAST(payload->>'f' AS BIGINT) AS first_trade_id,
-    CAST(payload->>'l' AS BIGINT) AS last_trade_id,
-    CAST(payload->>'T' AS UBIGINT) AS trade_time,
-    CAST(payload->>'m' AS BOOLEAN) AS is_buyer_maker
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC
 "@
         }
         "binance-futures-bookticker" {
@@ -609,7 +526,7 @@ try {
 
             $effectiveThreads = $Threads
             $effectiveRowGroupSize = $RowGroupSize
-            if (($streamType -in "polymarket-clob-market", "kraken-spot-trades", "coinbase-spot-trades", "binance-spot-bookticker", "binance-futures-bookticker") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
+            if (($streamType -in "polymarket-clob-market", "binance-spot-bookticker", "binance-futures-bookticker") -and (-not $PSBoundParameters.ContainsKey('RowGroupSize'))) {
                 $effectiveRowGroupSize = 100000
             }
 

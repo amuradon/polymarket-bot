@@ -40,7 +40,7 @@ Usage:
 Modes:
   -d, --date <YYYY-MM-DD>       Target UTC date (e.g. 2026-10-15).
   -s, --stream <pattern>        Optional substring filter by stream, exchange, or symbol
-                                (e.g. 'bookTicker', 'aggTrades', 'kraken', 'coinbase', 'price_crypto', 'btc-updown').
+                                (e.g. 'bookTicker', 'price_crypto', 'btc-updown').
   -c, --clean-already-downloaded
                                 Scan local files in destination-dir, compare against EC2 files,
                                 and delete verified matching files on EC2.
