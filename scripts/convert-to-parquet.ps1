@@ -285,31 +285,29 @@ function Get-ConvertQuery {
         "binance-spot-bookticker" {
             return @"
 SELECT 
-    ts,
-    CAST(payload->>'u' AS UBIGINT) AS update_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
-    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
-    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
-    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC, update_id ASC
+    CAST(json->>'u' AS UBIGINT) AS update_id,
+    json->>'s' AS symbol,
+    CAST(json->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(json->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(json->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(json->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json_objects('$InputPathEscaped', format='newline_delimited', maximum_object_size=67108864)
+ORDER BY update_id ASC
 "@
         }
         "binance-futures-bookticker" {
             return @"
 SELECT 
-    ts,
-    CAST(payload->>'E' AS UBIGINT) AS event_time,
-    CAST(payload->>'T' AS UBIGINT) AS transaction_time,
-    CAST(payload->>'u' AS UBIGINT) AS update_id,
-    payload->>'s' AS symbol,
-    CAST(payload->>'b' AS DOUBLE) AS best_bid_price,
-    CAST(payload->>'B' AS DOUBLE) AS best_bid_qty,
-    CAST(payload->>'a' AS DOUBLE) AS best_ask_price,
-    CAST(payload->>'A' AS DOUBLE) AS best_ask_qty
-FROM read_json('$InputPathEscaped', columns={'ts': 'UBIGINT', 'payload': 'JSON'}, format='newline_delimited', maximum_object_size=67108864)
-ORDER BY ts ASC, update_id ASC
+    CAST(json->>'E' AS UBIGINT) AS event_time,
+    CAST(json->>'T' AS UBIGINT) AS transaction_time,
+    CAST(json->>'u' AS UBIGINT) AS update_id,
+    json->>'s' AS symbol,
+    CAST(json->>'b' AS DOUBLE) AS best_bid_price,
+    CAST(json->>'B' AS DOUBLE) AS best_bid_qty,
+    CAST(json->>'a' AS DOUBLE) AS best_ask_price,
+    CAST(json->>'A' AS DOUBLE) AS best_ask_qty
+FROM read_json_objects('$InputPathEscaped', format='newline_delimited', maximum_object_size=67108864)
+ORDER BY event_time ASC, update_id ASC
 "@
         }
         "polymarket-price-crypto" {

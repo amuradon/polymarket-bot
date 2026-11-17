@@ -80,7 +80,7 @@ public class DailyBinanceStorageManager {
         synchronized (streamLocks.get(streamType)) {
             try {
                 ZstdJsonlWriter writer = getOrRotateWriter(streamType, utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                writer.writeRawJsonLine(rawJson);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write Binance %s event to daily Zstd file", streamType);
@@ -105,7 +105,7 @@ public class DailyBinanceStorageManager {
         synchronized (streamLocks.get(streamType)) {
             try {
                 ZstdJsonlWriter writer = getOrRotateWriter(streamType, utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                writer.writeRawJsonLine(rawPayloadBytes);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write Binance %s byte event to daily Zstd file", streamType);

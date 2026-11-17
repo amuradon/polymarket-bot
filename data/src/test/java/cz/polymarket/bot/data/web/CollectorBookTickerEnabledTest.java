@@ -108,7 +108,7 @@ class CollectorBookTickerEnabledTest {
         }
         assertThat(spotBookTickerFiles).hasSize(1);
         assertThat(readZstLines(spotBookTickerFiles.get(0)))
-                .anyMatch(l -> l.startsWith("{\"ts\":") && l.contains("\"u\":400900217") && l.contains("\"b\":\"78450.00\""));
+                .anyMatch(l -> !l.contains("\"ts\":") && l.contains("\"u\":400900217") && l.contains("\"b\":\"78450.00\""));
 
         Path futuresBookTickerDir = root.resolve("binance/futures/BTCUSDT/bookTicker");
         List<Path> futuresBookTickerFiles;
@@ -117,7 +117,7 @@ class CollectorBookTickerEnabledTest {
         }
         assertThat(futuresBookTickerFiles).hasSize(1);
         assertThat(readZstLines(futuresBookTickerFiles.get(0)))
-                .anyMatch(l -> l.startsWith("{\"ts\":") && l.contains("\"e\":\"bookTicker\"") && l.contains("\"u\":400900218"));
+                .anyMatch(l -> !l.contains("\"ts\":") && l.contains("\"e\":\"bookTicker\"") && l.contains("\"u\":400900218"));
     }
 
     private static List<String> readZstLines(Path zstFile) throws Exception {

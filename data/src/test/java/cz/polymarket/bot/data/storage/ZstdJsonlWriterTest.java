@@ -28,25 +28,29 @@ class ZstdJsonlWriterTest {
         Path file = tempDir.resolve("test-stream.jsonl.zst");
 
         try (ZstdJsonlWriter writer = new ZstdJsonlWriter(file)) {
-            writer.writeBinanceEvent(1789041600123L, "{\"e\":\"aggTrade\",\"p\":\"78000.50\"}");
+            writer.writeTimestampedPayload(1789041600123L, "{\"channel\":\"price.crypto\",\"value\":78000.50}");
             writer.writePolymarketEvent(1789041600456L, "twap_60s", "{\"value\":78001.25}");
+            writer.writeRawJsonLine("{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"78450.00\"}");
             writer.flush();
-            assertThat(writer.getRecordsWritten()).isEqualTo(2L);
+            assertThat(writer.getRecordsWritten()).isEqualTo(3L);
         }
 
         // Simulate restart appending a new Zstandard frame to the same file
         try (ZstdJsonlWriter writer2 = new ZstdJsonlWriter(file)) {
             writer2.writePolymarketEvent(1789041601789L, "trade", "{\"price\":\"0.54\",\"size\":\"100\"}");
-            writer2.writeBinanceEvent(1789041602000L, "  {\"e\":\"aggTrade\",\"p\":\"78010.00\"}\n ".getBytes(StandardCharsets.UTF_8));
+            writer2.writeTimestampedPayload(1789041602000L, "  {\"channel\":\"price.crypto\",\"value\":78010.00}\n ".getBytes(StandardCharsets.UTF_8));
+            writer2.writeRawJsonLine("  {\"u\":400900218,\"s\":\"BTCUSDT\",\"b\":\"78451.00\"}\r\n ".getBytes(StandardCharsets.UTF_8));
             writer2.writePolymarketEvent(1789041604000L, "clob", " [{\"event_type\":\"book\"}] \r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         List<String> lines = readAllZstdLines(file);
         assertThat(lines).containsExactly(
-                "{\"ts\":1789041600123,\"payload\":{\"e\":\"aggTrade\",\"p\":\"78000.50\"}}",
+                "{\"ts\":1789041600123,\"payload\":{\"channel\":\"price.crypto\",\"value\":78000.50}}",
                 "{\"ts\":1789041600456,\"type\":\"twap_60s\",\"payload\":{\"value\":78001.25}}",
+                "{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"78450.00\"}",
                 "{\"ts\":1789041601789,\"type\":\"trade\",\"payload\":{\"price\":\"0.54\",\"size\":\"100\"}}",
-                "{\"ts\":1789041602000,\"payload\":{\"e\":\"aggTrade\",\"p\":\"78010.00\"}}",
+                "{\"ts\":1789041602000,\"payload\":{\"channel\":\"price.crypto\",\"value\":78010.00}}",
+                "{\"u\":400900218,\"s\":\"BTCUSDT\",\"b\":\"78451.00\"}",
                 "{\"ts\":1789041604000,\"type\":\"clob\",\"payload\":[{\"event_type\":\"book\"}]}"
         );
     }

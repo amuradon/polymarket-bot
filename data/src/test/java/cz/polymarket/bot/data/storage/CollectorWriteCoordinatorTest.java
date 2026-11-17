@@ -175,11 +175,11 @@ class CollectorWriteCoordinatorTest {
         );
         green.closeAll();
 
-        // 6. Verify Blue's Binance bookTicker file was flushed and closed cleanly at freeze
+        // 6. Verify Blue's Binance bookTicker file was flushed and closed cleanly at freeze without ts wrapper
         DailyBinanceStorageManager helperBinance = new DailyBinanceStorageManager(tempDir.toString(), "BTCUSDT");
         Path binanceFile = helperBinance.resolveDailyFilePath(BinanceStreamType.SPOT_BOOK_TICKER, BASE_UTC_DATE);
         assertThat(readZstLines(binanceFile)).containsExactly(
-                "{\"ts\":" + (BASE_TS_MS + 100L) + ",\"payload\":{\"u\":101}}"
+                "{\"u\":101}"
         );
 
         // 7. Verify concatenated Zstandard frames in PolyBolt price_crypto file contain exact sequence 1, 2, 3, 4 without duplicates

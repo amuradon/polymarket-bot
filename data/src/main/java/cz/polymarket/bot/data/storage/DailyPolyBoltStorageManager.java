@@ -67,7 +67,7 @@ public class DailyPolyBoltStorageManager {
         synchronized (cryptoLock) {
             try {
                 ZstdJsonlWriter writer = getOrRotateCryptoWriter(utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                writer.writeTimestampedPayload(recvTimestampMs, rawJson);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write PolyBolt price.crypto event to daily Zstd file");
@@ -90,7 +90,7 @@ public class DailyPolyBoltStorageManager {
         synchronized (cryptoLock) {
             try {
                 ZstdJsonlWriter writer = getOrRotateCryptoWriter(utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                writer.writeTimestampedPayload(recvTimestampMs, rawPayloadBytes);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write PolyBolt price.crypto byte event to daily Zstd file");
@@ -112,7 +112,7 @@ public class DailyPolyBoltStorageManager {
         synchronized (twapLock) {
             try {
                 ZstdJsonlWriter writer = getOrRotateTwapWriter(utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawJson);
+                writer.writeTimestampedPayload(recvTimestampMs, rawJson);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write PolyBolt price.crypto.twap event to daily Zstd file");
@@ -135,7 +135,7 @@ public class DailyPolyBoltStorageManager {
         synchronized (twapLock) {
             try {
                 ZstdJsonlWriter writer = getOrRotateTwapWriter(utcDate);
-                writer.writeBinanceEvent(recvTimestampMs, rawPayloadBytes);
+                writer.writeTimestampedPayload(recvTimestampMs, rawPayloadBytes);
                 totalRecordsWritten.incrementAndGet();
             } catch (IOException e) {
                 Log.errorf(e, "Failed to write PolyBolt price.crypto.twap byte event to daily Zstd file");

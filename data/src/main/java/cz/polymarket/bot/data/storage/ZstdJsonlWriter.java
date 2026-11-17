@@ -26,6 +26,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     private static final byte[] INFIX_TYPE = ",\"type\":\"".getBytes(StandardCharsets.UTF_8);
     private static final byte[] INFIX_TYPE_PAYLOAD = "\",\"payload\":".getBytes(StandardCharsets.UTF_8);
     private static final byte[] SUFFIX_LINE = "}\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte NEWLINE = '\n';
 
     private final Path filePath;
     private final OutputStream underlyingOut;
@@ -58,18 +59,18 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
     }
 
     /**
-     * Writes a raw Binance WebSocket JSON payload with its local receipt timestamp as a single JSONL line:
+     * Writes a raw WebSocket JSON payload with its local receipt timestamp as a single JSONL line:
      * {@code {"ts":<recvTimestampMs>,"payload":<rawPayloadJson>}}
      *
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      * @param rawPayloadJson  unmodified raw JSON payload from the WebSocket
      * @throws IOException if writing to the underlying stream fails
      */
-    public synchronized void writeBinanceEvent(long recvTimestampMs, String rawPayloadJson) throws IOException {
+    public synchronized void writeTimestampedPayload(long recvTimestampMs, String rawPayloadJson) throws IOException {
         if (closed || rawPayloadJson == null || rawPayloadJson.isBlank()) {
             return;
         }
-        writeBinanceEvent(recvTimestampMs, rawPayloadJson.getBytes(StandardCharsets.UTF_8));
+        writeTimestampedPayload(recvTimestampMs, rawPayloadJson.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -81,7 +82,7 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
      * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
      * @throws IOException if writing to the underlying stream fails
      */
-    public synchronized void writeBinanceEvent(long recvTimestampMs, byte[] rawPayloadBytes) throws IOException {
+    public synchronized void writeTimestampedPayload(long recvTimestampMs, byte[] rawPayloadBytes) throws IOException {
         if (closed || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
             return;
         }
@@ -95,6 +96,42 @@ public class ZstdJsonlWriter implements Closeable, Flushable {
         zstdOut.write(INFIX_PAYLOAD);
         zstdOut.write(rawPayloadBytes, start, end - start);
         zstdOut.write(SUFFIX_LINE);
+        recordsWritten.incrementAndGet();
+    }
+
+    /**
+     * Writes an unmodified raw JSON payload as a single JSONL line without wrapping it with a receipt timestamp:
+     * {@code <rawPayloadJson>\n}
+     *
+     * @param rawPayloadJson unmodified raw JSON payload from the WebSocket
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writeRawJsonLine(String rawPayloadJson) throws IOException {
+        if (closed || rawPayloadJson == null || rawPayloadJson.isBlank()) {
+            return;
+        }
+        writeRawJsonLine(rawPayloadJson.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Writes an unmodified raw UTF-8 {@code byte[]} JSON payload directly as a single JSONL line into the
+     * Zstandard stream without allocating a {@link String} or adding a receipt timestamp:
+     * {@code <rawPayloadBytes>\n}
+     *
+     * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
+     * @throws IOException if writing to the underlying stream fails
+     */
+    public synchronized void writeRawJsonLine(byte[] rawPayloadBytes) throws IOException {
+        if (closed || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+            return;
+        }
+        int start = firstNonWhitespaceIndex(rawPayloadBytes);
+        int end = lastNonWhitespaceEndIndex(rawPayloadBytes, start);
+        if (start >= end) {
+            return;
+        }
+        zstdOut.write(rawPayloadBytes, start, end - start);
+        zstdOut.write(NEWLINE);
         recordsWritten.incrementAndGet();
     }
 
