@@ -148,7 +148,7 @@ class BacktestEngineTest {
 
             @Override
             public Set<IndicatorType> getRequiredIndicators() {
-                return Set.of(IndicatorType.VWAP);
+                return Set.of(IndicatorType.CVD);
             }
 
             @Override
@@ -174,13 +174,13 @@ class BacktestEngineTest {
             @Override
             public void onPolymarketCryptoPrice(long timestampMs, String symbol, String source, double price, long priceTimestampMs) {
                 polymarketCryptoPriceCount.incrementAndGet();
-                assertThat(ctx.getIndicatorValue(IndicatorType.VWAP)).isNaN();
+                assertThat(ctx.getIndicatorValue(IndicatorType.CVD)).isZero();
             }
 
             @Override
             public void onPolymarketCryptoTwap60s(long timestampMs, String symbol, String source, double twapPrice, int windowSeconds, long twapTimestampMs) {
                 polymarketTwap60sCount.incrementAndGet();
-                assertThat(ctx.getIndicatorValue(IndicatorType.VWAP)).isNaN();
+                assertThat(ctx.getIndicatorValue(IndicatorType.CVD)).isZero();
             }
 
             @Override

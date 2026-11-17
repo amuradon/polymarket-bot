@@ -1439,8 +1439,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     finalPrice,
                     approxVolumeBtc,
                     approxVolumeUsd,
-                    approxDeltaBtc,
-                    0.0
+                    approxDeltaBtc
             );
             activeStrategy.onMarketCandleCompleted(candle);
             Log.infof("Resolved market candle [%d, %d]: outcome=%s, open=%.2f, close=%.2f, high=%.2f, low=%.2f, settledPositions=%d, balance=$%.2f",

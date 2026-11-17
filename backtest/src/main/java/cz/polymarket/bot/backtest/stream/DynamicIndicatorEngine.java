@@ -1,16 +1,12 @@
 package cz.polymarket.bot.backtest.stream;
 
-import cz.polymarket.bot.calculator.RealizedVolatilityCalculator;
-import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.strategy.IndicatorType;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -27,34 +23,13 @@ public class DynamicIndicatorEngine {
 
     private final EnumSet<IndicatorType> requiredIndicators;
     private final boolean hasAnyIndicators;
-    private final boolean needTwap;
-    private final boolean needVwap;
-    private final boolean needVwapZScore;
     private final boolean needCvd;
-    private final boolean needBasis;
-    private final boolean needVol4h;
 
-    private final RealizedVolatilityCalculator volCalculator = new RealizedVolatilityCalculator();
-    private final VwapCalculator vwapCalculator = new VwapCalculator();
-
-    private final List<MarketCandle> candleHistory = new ArrayList<>();
     private final double[] currentValues = new double[INDICATOR_COUNT];
 
-    // Precomputed historical 24h VWAP & standard deviation for O(1) Z-score updates on every spot trade
-    private boolean hasHistoricalVwap = false;
-    private double cachedHistoricalVwap = 0.0;
-    private double cachedHistoricalStdDev = 1.0;
-
     // Active candle intra-candle state
-    private double rollingTwapSum = 0.0;
-    private long rollingTwapCount = 0L;
-
-    private double rollingVwapUsd = 0.0;
-    private double rollingVwapBtc = 0.0;
     private double intraCandleCvdBtc = 0.0;
-
     private double currentSpotPrice = 0.0;
-    private double currentFuturesPrice = 0.0;
 
     // Active candle Spot/Futures OHLCV accumulators
     private double sOpen = 0.0;
@@ -85,57 +60,24 @@ public class DynamicIndicatorEngine {
             this.requiredIndicators = EnumSet.copyOf(requiredIndicators);
         }
         this.hasAnyIndicators = !this.requiredIndicators.isEmpty();
-        this.needTwap = this.requiredIndicators.contains(IndicatorType.TWAP);
-        this.needVwap = this.requiredIndicators.contains(IndicatorType.VWAP);
-        this.needVwapZScore = this.requiredIndicators.contains(IndicatorType.VWAP_ZSCORE);
         this.needCvd = this.requiredIndicators.contains(IndicatorType.CVD);
-        this.needBasis = this.requiredIndicators.contains(IndicatorType.BASIS);
-        this.needVol4h = this.requiredIndicators.contains(IndicatorType.VOLATILITY_4H);
         reset();
     }
 
     /**
-     * Resets the entire engine state including historical candles and computed indicator caches.
+     * Resets the entire engine state including computed indicator caches and active candle accumulators.
      */
     public void reset() {
-        candleHistory.clear();
-        hasHistoricalVwap = false;
-        cachedHistoricalVwap = 0.0;
-        cachedHistoricalStdDev = 1.0;
         Arrays.fill(currentValues, Double.NaN);
         resetActiveCandle();
-    }
-
-    /**
-     * Replaces the historical completed candle list (used when initializing isolated parallel market workers)
-     * and precomputes the rolling historical VWAP and standard deviation once per candle.
-     *
-     * @param priorCandles chronological list of completed candles preceding the active market
-     */
-    public void setCandleHistory(List<MarketCandle> priorCandles) {
-        candleHistory.clear();
-        if (priorCandles != null && !priorCandles.isEmpty()) {
-            int size = priorCandles.size();
-            int from = Math.max(0, size - VwapCalculator.MAX_WINDOW_CANDLES);
-            candleHistory.addAll(priorCandles.subList(from, size));
-        }
-        if (hasAnyIndicators) {
-            refreshHistoricalVwapCache();
-            recalculateAll();
-        }
     }
 
     /**
      * Resets intra-candle rolling accumulators for a new active candle interval.
      */
     public void resetActiveCandle() {
-        this.rollingTwapSum = 0.0;
-        this.rollingTwapCount = 0L;
-        this.rollingVwapUsd = 0.0;
-        this.rollingVwapBtc = 0.0;
         this.intraCandleCvdBtc = 0.0;
         this.currentSpotPrice = 0.0;
-        this.currentFuturesPrice = 0.0;
 
         this.sOpen = 0.0;
         this.sHigh = 0.0;
@@ -155,24 +97,8 @@ public class DynamicIndicatorEngine {
 
         if (hasAnyIndicators) {
             Arrays.fill(currentValues, Double.NaN);
-            recalculateAll();
-        }
-    }
-
-    /**
-     * Appends a completed market candle to historical memory and recalculates multi-candle indicators.
-     *
-     * @param candle completed domain market candle
-     */
-    public void onMarketCandleCompleted(MarketCandle candle) {
-        if (candle != null) {
-            candleHistory.add(candle);
-            if (candleHistory.size() > VwapCalculator.MAX_WINDOW_CANDLES) {
-                candleHistory.removeFirst();
-            }
-            if (hasAnyIndicators) {
-                refreshHistoricalVwapCache();
-                recalculateAll();
+            if (needCvd) {
+                currentValues[IndicatorType.CVD.ordinal()] = intraCandleCvdBtc;
             }
         }
     }
@@ -189,9 +115,6 @@ public class DynamicIndicatorEngine {
         if (sOpen <= 0.0 || sHigh <= 0.0 || sLow <= 0.0 || sClose <= 0.0) {
             return null;
         }
-        double basisBps = (sClose > 0.0 && fClose > 0.0)
-                ? ((fClose - sClose) / sClose) * 10000.0
-                : 0.0;
         return new MarketCandle(
                 tStart,
                 tEnd,
@@ -201,13 +124,12 @@ public class DynamicIndicatorEngine {
                 fHigh > 0.0 ? fHigh : sHigh,
                 fLow > 0.0 ? fLow : sLow,
                 fClose > 0.0 ? fClose : sClose,
-                futVolBtc, futVolUsd, futDeltaBtc,
-                basisBps
+                futVolBtc, futVolUsd, futDeltaBtc
         );
     }
 
     /**
-     * Updates rolling price, TWAP, VWAP, VWAP Z-score, CVD, and Basis indicators in {@code O(1)}
+     * Updates spot OHLCV metrics and rolling CVD indicator in {@code O(1)}
      * upon receiving a spot exchange trade.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
@@ -237,39 +159,14 @@ public class DynamicIndicatorEngine {
             return;
         }
 
-        if (needTwap) {
-            this.rollingTwapSum += price;
-            this.rollingTwapCount++;
-            currentValues[IndicatorType.TWAP.ordinal()] = rollingTwapSum / rollingTwapCount;
-        }
-
-        if (needVwap) {
-            this.rollingVwapUsd += usd;
-            this.rollingVwapBtc += quantity;
-            if (this.rollingVwapBtc > 0.0) {
-                currentValues[IndicatorType.VWAP.ordinal()] = this.rollingVwapUsd / this.rollingVwapBtc;
-            }
-        }
-
-        if (needVwapZScore) {
-            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = hasHistoricalVwap
-                    ? (price - cachedHistoricalVwap) / cachedHistoricalStdDev
-                    : 0.0;
-        }
-
         if (needCvd) {
             this.intraCandleCvdBtc += delta;
             currentValues[IndicatorType.CVD.ordinal()] = this.intraCandleCvdBtc;
         }
-
-        if (needBasis && currentFuturesPrice > 0.0 && currentSpotPrice > 0.0) {
-            currentValues[IndicatorType.BASIS.ordinal()] =
-                    ((currentFuturesPrice - currentSpotPrice) / currentSpotPrice) * 10000.0;
-        }
     }
 
     /**
-     * Updates futures reference price and basis spread upon receiving a futures exchange trade.
+     * Updates futures OHLCV metrics upon receiving a futures exchange trade.
      *
      * @param timestampMs event receipt timestamp in milliseconds UTC
      * @param price futures execution price
@@ -277,7 +174,6 @@ public class DynamicIndicatorEngine {
      * @param isBuyerMaker true if maker was buyer, false if aggressive buy
      */
     public void onFuturesTrade(long timestampMs, double price, double quantity, boolean isBuyerMaker) {
-        this.currentFuturesPrice = price;
         if (fOpen <= 0.0) {
             fOpen = price;
             fHigh = price;
@@ -290,57 +186,6 @@ public class DynamicIndicatorEngine {
         this.futVolBtc += quantity;
         this.futVolUsd += price * quantity;
         this.futDeltaBtc += isBuyerMaker ? -quantity : quantity;
-
-        if (needBasis && currentSpotPrice > 0.0) {
-            currentValues[IndicatorType.BASIS.ordinal()] =
-                    ((price - currentSpotPrice) / currentSpotPrice) * 10000.0;
-        }
-    }
-
-    private void refreshHistoricalVwapCache() {
-        if (!needVwapZScore || candleHistory.isEmpty()) {
-            hasHistoricalVwap = false;
-            cachedHistoricalVwap = 0.0;
-            cachedHistoricalStdDev = 1.0;
-            return;
-        }
-        VwapCalculator.VwapResult r0 = vwapCalculator.calculate(candleHistory, 0.0);
-        VwapCalculator.VwapResult r1 = vwapCalculator.calculate(candleHistory, 1.0);
-        if (r0.vwap() == r1.vwap()) {
-            hasHistoricalVwap = true;
-            cachedHistoricalVwap = r0.vwap();
-            cachedHistoricalStdDev = r0.stdDev();
-        } else {
-            hasHistoricalVwap = false;
-            cachedHistoricalVwap = 0.0;
-            cachedHistoricalStdDev = 1.0;
-        }
-    }
-
-    private void recalculateAll() {
-        if (needVol4h) {
-            double vol4h = volCalculator.calculate4hRealizedVolatility(candleHistory);
-            currentValues[IndicatorType.VOLATILITY_4H.ordinal()] = vol4h;
-        }
-
-        if (needVwapZScore) {
-            currentValues[IndicatorType.VWAP_ZSCORE.ordinal()] = (hasHistoricalVwap && currentSpotPrice > 0.0)
-                    ? (currentSpotPrice - cachedHistoricalVwap) / cachedHistoricalStdDev
-                    : 0.0;
-        }
-
-        if (needTwap && rollingTwapCount > 0) {
-            currentValues[IndicatorType.TWAP.ordinal()] = rollingTwapSum / rollingTwapCount;
-        }
-
-        if (needBasis && currentSpotPrice > 0.0 && currentFuturesPrice > 0.0) {
-            currentValues[IndicatorType.BASIS.ordinal()] =
-                    ((currentFuturesPrice - currentSpotPrice) / currentSpotPrice) * 10000.0;
-        }
-
-        if (needCvd) {
-            currentValues[IndicatorType.CVD.ordinal()] = intraCandleCvdBtc;
-        }
     }
 
     /**

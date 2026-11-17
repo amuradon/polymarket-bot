@@ -10,7 +10,6 @@ import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
-import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
@@ -268,9 +267,6 @@ public class BacktestEngine {
                 : Set.of();
         IndicatorType[] requiredIndicators = reqIndicatorsSet.toArray(new IndicatorType[0]);
         boolean hasIndicators = requiredIndicators.length > 0;
-        boolean needBasis = reqIndicatorsSet.contains(IndicatorType.BASIS);
-        boolean needCandleHistory = reqIndicatorsSet.contains(IndicatorType.VOLATILITY_4H)
-                || reqIndicatorsSet.contains(IndicatorType.VWAP_ZSCORE);
 
         Set<ExternalStreamType> requiredExternalStreams = strategy.getRequiredExternalStreams() != null
                 ? strategy.getRequiredExternalStreams()
@@ -291,10 +287,6 @@ public class BacktestEngine {
         double brierSum = 0.0;
         int evaluatedCount = 0;
 
-        List<MarketCandle> rollingCandleHistory = needCandleHistory
-                ? new ArrayList<>(VwapCalculator.MAX_WINDOW_CANDLES * 2)
-                : List.of();
-
         for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
             String dateStr = dayEntry.getKey();
             List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
@@ -311,24 +303,7 @@ public class BacktestEngine {
                             datasetService, sym, dateStr, requiredExternalStreams, binanceDelayMs)
                     : new BacktestEvent[0];
 
-            // 2. Pre-build bounded (<= 96 candles) prior MarketCandle snapshots if strategy uses multi-candle indicators
-            @SuppressWarnings("unchecked")
-            List<MarketCandle>[] priorCandlesPerMarket = needCandleHistory ? new List[dayMarketCount] : null;
-            if (needCandleHistory) {
-                for (int i = 0; i < dayMarketCount; i++) {
-                    CollectorMarketMetadata m = dayMarkets.get(i);
-                    int histSize = rollingCandleHistory.size();
-                    int fromIdx = Math.max(0, histSize - VwapCalculator.MAX_WINDOW_CANDLES);
-                    priorCandlesPerMarket[i] = List.copyOf(rollingCandleHistory.subList(fromIdx, histSize));
-                    MarketCandle built = ChronologicalEventStreamer.buildSpotCandleFromDailyEvents(
-                            sharedDailyEvents, m.tStart(), m.tEnd());
-                    if (built != null) {
-                        rollingCandleHistory.add(built);
-                    }
-                }
-            }
-
-            // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
+            // 2. Process the day's 15-minute Polymarket markets across the dedicated worker pool
             MarketSimulationOutcome[] dayOutcomes = new MarketSimulationOutcome[dayMarketCount];
             int numWorkers = parallelCapable ? Math.min(dayMarketCount, workerCount) : 1;
 
@@ -337,14 +312,12 @@ public class BacktestEngine {
                         new AtomicInteger(0),
                         dayMarkets,
                         sharedDailyEvents,
-                        priorCandlesPerMarket,
                         dayOutcomes,
                         strategy,
                         parallelCapable,
                         reqIndicatorsSet,
                         requiredIndicators,
                         hasIndicators,
-                        needBasis,
                         resolvedLatencyFactor,
                         sym
                 );
@@ -356,14 +329,12 @@ public class BacktestEngine {
                             cursor,
                             dayMarkets,
                             sharedDailyEvents,
-                            priorCandlesPerMarket,
                             dayOutcomes,
                             strategy,
                             true,
                             reqIndicatorsSet,
                             requiredIndicators,
                             hasIndicators,
-                            needBasis,
                             resolvedLatencyFactor,
                             sym
                     ), workerPool);
@@ -454,14 +425,12 @@ public class BacktestEngine {
             AtomicInteger cursor,
             List<CollectorMarketMetadata> dayMarkets,
             BacktestEvent[] sharedDailyEvents,
-            List<MarketCandle>[] priorCandlesPerMarket,
             MarketSimulationOutcome[] dayOutcomes,
             TradingStrategy templateStrategy,
             boolean createWorkerStrategyCopy,
             Set<IndicatorType> reqIndicatorsSet,
             IndicatorType[] requiredIndicators,
             boolean hasIndicators,
-            boolean needBasis,
             double resolvedLatencyFactor,
             String symbol) {
 
@@ -517,13 +486,6 @@ public class BacktestEngine {
                 orderBook.setMarketTokenIds(market.upTokenId(), market.downTokenId());
                 context.resetForCandle();
                 indicatorEngine.resetActiveCandle();
-                if (priorCandlesPerMarket != null && priorCandlesPerMarket[idx] != null) {
-                    indicatorEngine.setCandleHistory(priorCandlesPerMarket[idx]);
-                }
-
-                if (hasIndicators) {
-                    notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, tStartMs);
-                }
 
                 streamer.clear();
                 streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol, clobLookbackMs);
@@ -578,15 +540,8 @@ public class BacktestEngine {
                                 notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
                             }
                         }
-                        case BacktestEvent.BinanceFuturesTradeEvent e -> {
-                            indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                            if (needBasis) {
-                                double val = indicatorEngine.getIndicatorValue(IndicatorType.BASIS);
-                                if (!Double.isNaN(val)) {
-                                    activeStrategy.onIndicatorUpdate(IndicatorType.BASIS, val, evTs);
-                                }
-                            }
-                        }
+                        case BacktestEvent.BinanceFuturesTradeEvent e ->
+                                indicatorEngine.onFuturesTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);
                             if (report != null) {
@@ -608,11 +563,7 @@ public class BacktestEngine {
                                         ? e.completedCandle()
                                         : indicatorEngine.buildCompletedCandle(market.tStart(), market.tEnd());
                                 if (completedCandle != null) {
-                                    indicatorEngine.onMarketCandleCompleted(completedCandle);
                                     activeStrategy.onMarketCandleCompleted(completedCandle);
-                                }
-                                if (hasIndicators) {
-                                    notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
                                 }
 
                                 double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;

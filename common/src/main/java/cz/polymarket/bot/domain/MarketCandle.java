@@ -2,7 +2,7 @@ package cz.polymarket.bot.domain;
 
 /**
  * Immutable domain representation of a 15-minute market interval (candle)
- * containing both spot and futures metrics, delta volumes, and basis spread.
+ * containing both spot and futures metrics and delta volumes.
  */
 public record MarketCandle(
         long intervalStartSec,
@@ -20,8 +20,7 @@ public record MarketCandle(
         double futuresClose,
         double futuresVolumeBtc,
         double futuresVolumeUsd,
-        double futuresDeltaBtc,
-        double basisOpenBps
+        double futuresDeltaBtc
 ) {
     public MarketCandle {
         if (intervalStartSec <= 0 || intervalEndSec <= intervalStartSec) {

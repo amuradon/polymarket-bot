@@ -4,7 +4,6 @@ import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
-import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
@@ -404,100 +403,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                     combined.length, tasks.size(), symbol, dateStr);
         }
         return combined;
-    }
-
-    /**
-     * Builds a completed 15-minute {@link MarketCandle} directly from the pre-loaded daily stream array
-     * using {@code O(log N)} binary search over {@link BacktestEvent.BinanceSpotTradeEvent} and
-     * {@link BacktestEvent.BinanceFuturesTradeEvent} entries.
-     *
-     * @param sharedDailyEvents sorted array of daily stream events
-     * @param tStart candle start epoch seconds
-     * @param tEnd candle end epoch seconds
-     * @return constructed MarketCandle, or {@code null} if no spot trades exist
-     */
-    public static MarketCandle buildSpotCandleFromDailyEvents(BacktestEvent[] sharedDailyEvents, long tStart, long tEnd) {
-        if (sharedDailyEvents == null || sharedDailyEvents.length == 0) {
-            return null;
-        }
-        long tStartMs = tStart * 1000L;
-        long tEndMs = tEnd * 1000L;
-        int startIdx = findFirstIndexAtOrAfter(sharedDailyEvents, tStartMs);
-
-        double sOpen = 0.0;
-        double sHigh = 0.0;
-        double sLow = 0.0;
-        double sClose = 0.0;
-        double spotVolBtc = 0.0;
-        double spotVolUsd = 0.0;
-        double spotDeltaBtc = 0.0;
-
-        double fOpen = 0.0;
-        double fHigh = 0.0;
-        double fLow = 0.0;
-        double fClose = 0.0;
-        double futVolBtc = 0.0;
-        double futVolUsd = 0.0;
-        double futDeltaBtc = 0.0;
-
-        for (int i = startIdx; i < sharedDailyEvents.length; i++) {
-            BacktestEvent ev = sharedDailyEvents[i];
-            if (ev.timestampMs() > tEndMs) {
-                break;
-            }
-            if (ev instanceof BacktestEvent.BinanceSpotTradeEvent spot) {
-                double p = spot.price();
-                double q = spot.quantity();
-                if (sOpen <= 0.0) {
-                    sOpen = p;
-                    sHigh = p;
-                    sLow = p;
-                } else {
-                    if (p > sHigh) sHigh = p;
-                    if (p < sLow) sLow = p;
-                }
-                sClose = p;
-                spotVolBtc += q;
-                spotVolUsd += p * q;
-                spotDeltaBtc += spot.isBuyerMaker() ? -q : q;
-            } else if (ev instanceof BacktestEvent.BinanceFuturesTradeEvent fut) {
-                double p = fut.price();
-                double q = fut.quantity();
-                if (fOpen <= 0.0) {
-                    fOpen = p;
-                    fHigh = p;
-                    fLow = p;
-                } else {
-                    if (p > fHigh) fHigh = p;
-                    if (p < fLow) fLow = p;
-                }
-                fClose = p;
-                futVolBtc += q;
-                futVolUsd += p * q;
-                futDeltaBtc += fut.isBuyerMaker() ? -q : q;
-            }
-        }
-
-        if (sOpen <= 0.0 || sHigh <= 0.0 || sLow <= 0.0 || sClose <= 0.0) {
-            return null;
-        }
-
-        double basisBps = (sClose > 0.0 && fClose > 0.0)
-                ? ((fClose - sClose) / sClose) * 10000.0
-                : 0.0;
-
-        return new MarketCandle(
-                tStart,
-                tEnd,
-                sOpen, sHigh, sLow, sClose,
-                spotVolBtc, spotVolUsd, spotDeltaBtc,
-                fOpen > 0.0 ? fOpen : sOpen,
-                fHigh > 0.0 ? fHigh : sHigh,
-                fLow > 0.0 ? fLow : sLow,
-                fClose > 0.0 ? fClose : sClose,
-                futVolBtc, futVolUsd, futDeltaBtc,
-                basisBps
-        );
     }
 
     /**

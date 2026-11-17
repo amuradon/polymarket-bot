@@ -407,8 +407,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
                 finalPrice,
                 approxVolumeBtc,
                 approxVolumeUsd,
-                approxDeltaBtc,
-                0.0
+                approxDeltaBtc
         );
         activeStrategy.onMarketCandleCompleted(candle);
 

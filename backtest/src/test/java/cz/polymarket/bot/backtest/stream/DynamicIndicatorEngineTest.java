@@ -1,13 +1,10 @@
 package cz.polymarket.bot.backtest.stream;
 
-import cz.polymarket.bot.calculator.VwapCalculator;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.strategy.IndicatorType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,16 +13,13 @@ import static org.assertj.core.api.Assertions.within;
 class DynamicIndicatorEngineTest {
 
     @Test
-    @DisplayName("Should compute rolling TWAP, VWAP, CVD, and Basis dynamically")
-    void shouldComputeDynamicIndicators() {
-        DynamicIndicatorEngine engine = new DynamicIndicatorEngine(Set.of(
-                IndicatorType.TWAP,
-                IndicatorType.VWAP,
-                IndicatorType.CVD,
-                IndicatorType.BASIS
-        ));
+    @DisplayName("Should compute rolling CVD dynamically and reset cleanly between candles")
+    void shouldComputeCvdAndResetCleanly() {
+        DynamicIndicatorEngine engine = new DynamicIndicatorEngine(Set.of(IndicatorType.CVD));
 
         engine.resetActiveCandle();
+        assertThat(engine.getIndicatorValue(IndicatorType.CVD)).isZero();
+        assertThat(engine.getIndicatorValue(null)).isNaN();
 
         // Trade 0: Opening spot trade @ 60000 qty 0.0
         engine.onSpotTrade(1000000L, 60000.0, 0.0, false);
@@ -34,48 +28,34 @@ class DynamicIndicatorEngineTest {
         // Trade 2: Spot trade @ 60200 qty 2.0 (aggressive sell)
         engine.onSpotTrade(1000200L, 60200.0, 2.0, true);
 
-        // TWAP: (60000 + 60100 + 60200) / 3 = 60100
-        assertThat(engine.getIndicatorValue(IndicatorType.TWAP)).isCloseTo(60100.0, within(0.01));
-
-        // VWAP: (60100*1 + 60200*2) / 3 = 180500 / 3 = 60166.67
-        assertThat(engine.getIndicatorValue(IndicatorType.VWAP)).isCloseTo(60166.67, within(0.1));
-
         // CVD: +1.0 - 2.0 = -1.0
         assertThat(engine.getIndicatorValue(IndicatorType.CVD)).isCloseTo(-1.0, within(0.01));
+        assertThat(engine.getAllIndicators()).containsEntry(IndicatorType.CVD, -1.0);
+        assertThat(engine.getCurrentSpotPrice()).isCloseTo(60200.0, within(0.01));
 
-        // Futures Trade @ 60250 -> Basis vs Spot 60200: (60250 - 60200)/60200 * 10000 ~= 8.3 bps
-        engine.onFuturesTrade(1000250L, 60250.0, 1.0, false);
-        assertThat(engine.getIndicatorValue(IndicatorType.BASIS)).isCloseTo(8.3, within(0.2));
+        // Resetting active candle clears intra-candle CVD and spot price
+        engine.resetActiveCandle();
+        assertThat(engine.getIndicatorValue(IndicatorType.CVD)).isZero();
+        assertThat(engine.getCurrentSpotPrice()).isZero();
     }
 
     @Test
-    @DisplayName("Cached historical VWAP Z-score in DynamicIndicatorEngine must match VwapCalculator identically on every spot tick")
-    void shouldMatchVwapCalculatorZScoreIdentically() {
-        List<MarketCandle> history = new ArrayList<>();
-        for (int i = 0; i < 20; i++) {
-            double close = 60000.0 + (i - 10) * 18.5;
-            double volBtc = 12.0 + (i % 5) * 3.0;
-            history.add(new MarketCandle(
-                    1700000000L + i * 900L,
-                    1700000900L + i * 900L,
-                    close - 10.0, close + 15.0, close - 20.0, close,
-                    volBtc, close * volBtc, 1.5,
-                    close - 10.0, close + 15.0, close - 20.0, close,
-                    volBtc, close * volBtc, 1.5,
-                    0.0
-            ));
-        }
+    @DisplayName("Should build completed MarketCandle from accumulated spot and futures trades")
+    void shouldBuildCompletedMarketCandle() {
+        DynamicIndicatorEngine engine = new DynamicIndicatorEngine(Set.of());
+        assertThat(engine.buildCompletedCandle(1700000000L, 1700000900L)).isNull();
 
-        DynamicIndicatorEngine engine = new DynamicIndicatorEngine(Set.of(IndicatorType.VWAP_ZSCORE));
-        engine.setCandleHistory(history);
-        VwapCalculator refCalc = new VwapCalculator();
+        engine.onSpotTrade(1700000100000L, 60000.0, 1.0, false);
+        engine.onSpotTrade(1700000200000L, 60200.0, 2.0, true);
+        engine.onFuturesTrade(1700000250000L, 60250.0, 1.5, false);
 
-        double[] testPrices = {59850.0, 60000.0, 60125.5, 60340.25};
-        for (int i = 0; i < testPrices.length; i++) {
-            double p = testPrices[i];
-            engine.onSpotTrade(1700020000000L + i * 100L, p, 1.0, false);
-            double expected = refCalc.calculate(history, p).zScore();
-            assertThat(engine.getIndicatorValue(IndicatorType.VWAP_ZSCORE)).isEqualTo(expected);
-        }
+        MarketCandle candle = engine.buildCompletedCandle(1700000000L, 1700000900L);
+        assertThat(candle).isNotNull();
+        assertThat(candle.spotOpen()).isCloseTo(60000.0, within(0.01));
+        assertThat(candle.spotClose()).isCloseTo(60200.0, within(0.01));
+        assertThat(candle.spotDeltaBtc()).isCloseTo(-1.0, within(0.01));
+        assertThat(candle.futuresOpen()).isCloseTo(60250.0, within(0.01));
+        assertThat(candle.futuresClose()).isCloseTo(60250.0, within(0.01));
+        assertThat(candle.futuresDeltaBtc()).isCloseTo(1.5, within(0.01));
     }
 }
