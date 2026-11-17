@@ -388,7 +388,10 @@ class BacktestLoggingTest {
                 tempDir.resolve("out").toString(),
                 10000.0,
                 1.0,
-                2
+                2,
+                100L,
+                50L,
+                50L
         );
         return activeEngine;
     }

@@ -65,10 +65,13 @@ public class BacktestEngine {
     private final double defaultCapital;
     private final double defaultLatencyFactor;
     private final int workerCount;
+    private final long binanceDelayMs;
+    private final long krakenDelayMs;
+    private final long coinbaseDelayMs;
     private final ExecutorService workerPool;
 
     /**
-     * Primary constructor with all dependencies and worker pool sizing injected.
+     * Primary constructor with all dependencies, worker pool sizing, and simulated exchange delays injected.
      *
      * @param datasetService collector Parquet dataset discovery and path resolution service
      * @param strategyRegistry registry resolving requested strategies
@@ -80,6 +83,9 @@ public class BacktestEngine {
      * @param defaultCapital default initial trading balance in USD
      * @param defaultLatencyFactor default multiplier for simulated order execution latency (default {@code 1.0})
      * @param configuredWorkers number of parallel simulation workers (default {@code 4} physical cores)
+     * @param binanceDelayMs simulated one-way feed delay for Binance in milliseconds (default {@code 100})
+     * @param krakenDelayMs simulated one-way feed delay for Kraken in milliseconds (default {@code 50})
+     * @param coinbaseDelayMs simulated one-way feed delay for Coinbase in milliseconds (default {@code 50})
      */
     @Inject
     public BacktestEngine(
@@ -98,7 +104,13 @@ public class BacktestEngine {
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
             double defaultLatencyFactor,
             @ConfigProperty(name = "polymarket.backtest.workers", defaultValue = "4")
-            int configuredWorkers) {
+            int configuredWorkers,
+            @ConfigProperty(name = "backtest.binance.delay-ms", defaultValue = "100")
+            long binanceDelayMs,
+            @ConfigProperty(name = "backtest.kraken.delay-ms", defaultValue = "50")
+            long krakenDelayMs,
+            @ConfigProperty(name = "backtest.coinbase.delay-ms", defaultValue = "50")
+            long coinbaseDelayMs) {
         if (datasetService == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: datasetService cannot be null");
             throw new IllegalArgumentException("datasetService cannot be null");
@@ -115,6 +127,18 @@ public class BacktestEngine {
             Log.fatal("Fatal initialization error in BacktestEngine: jsonExporter cannot be null");
             throw new IllegalArgumentException("jsonExporter cannot be null");
         }
+        if (binanceDelayMs < 0L) {
+            Log.fatal("Fatal initialization error in BacktestEngine: binanceDelayMs must be non-negative");
+            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
+        }
+        if (krakenDelayMs < 0L) {
+            Log.fatal("Fatal initialization error in BacktestEngine: krakenDelayMs must be non-negative");
+            throw new IllegalArgumentException("krakenDelayMs must be non-negative");
+        }
+        if (coinbaseDelayMs < 0L) {
+            Log.fatal("Fatal initialization error in BacktestEngine: coinbaseDelayMs must be non-negative");
+            throw new IllegalArgumentException("coinbaseDelayMs must be non-negative");
+        }
         this.datasetService = datasetService;
         this.strategyRegistry = strategyRegistry;
         this.metricsCalculator = metricsCalculator;
@@ -129,6 +153,9 @@ public class BacktestEngine {
         this.defaultCapital = defaultCapital;
         this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
         this.workerCount = configuredWorkers > 0 ? configuredWorkers : 4;
+        this.binanceDelayMs = binanceDelayMs;
+        this.krakenDelayMs = krakenDelayMs;
+        this.coinbaseDelayMs = coinbaseDelayMs;
 
         AtomicInteger threadSeq = new AtomicInteger(0);
         this.workerPool = Executors.newFixedThreadPool(this.workerCount, runnable -> {
@@ -224,9 +251,9 @@ public class BacktestEngine {
         }
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d",
+            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
                     strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
-                    capital, resolvedLatencyFactor, workerCount);
+                    capital, resolvedLatencyFactor, workerCount, binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
         }
 
         List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
@@ -280,7 +307,8 @@ public class BacktestEngine {
 
             // 1. Load shared daily streams strictly ONCE for this UTC day
             BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
-                    ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr, requiredExternalStreams)
+                    ? ChronologicalEventStreamer.loadSharedDailyStreams(
+                            datasetService, sym, dateStr, requiredExternalStreams, binanceDelayMs)
                     : new BacktestEvent[0];
 
             // 2. Pre-build bounded (<= 96 candles) prior MarketCandle snapshots if strategy uses multi-candle indicators
@@ -442,7 +470,8 @@ public class BacktestEngine {
         SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
         DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(reqIndicatorsSet);
 
-        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(datasetService.getDuckDbSessionManager())) {
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(
+                datasetService.getDuckDbSessionManager(), binanceDelayMs, krakenDelayMs, coinbaseDelayMs)) {
             matchingEngine.setEventScheduler(streamer::scheduleEvent);
             BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
 

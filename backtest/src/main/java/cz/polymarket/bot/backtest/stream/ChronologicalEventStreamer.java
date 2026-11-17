@@ -49,6 +49,9 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private static final long KRAKEN_USDT_WARMUP_MS = 1_800_000L;
 
     private final DuckDbSessionManager duckDbSessionManager;
+    private final long binanceDelayMs;
+    private final long krakenDelayMs;
+    private final long coinbaseDelayMs;
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(16);
     private final CalculatedSpotTwapEngine calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
 
@@ -166,16 +169,39 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private int dailyEndIdx = 0;
 
     /**
-     * Constructs a chronological event streamer backed by the shared DuckDB session manager.
+     * Constructs a chronological event streamer backed by the shared DuckDB session manager and
+     * per-exchange simulated feed delays.
      *
      * @param duckDbSessionManager shared DuckDB session manager providing streaming connections
+     * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
+     * @param krakenDelayMs simulated Kraken one-way feed delay in milliseconds
+     * @param coinbaseDelayMs simulated Coinbase one-way feed delay in milliseconds
      */
-    public ChronologicalEventStreamer(DuckDbSessionManager duckDbSessionManager) {
+    public ChronologicalEventStreamer(
+            DuckDbSessionManager duckDbSessionManager,
+            long binanceDelayMs,
+            long krakenDelayMs,
+            long coinbaseDelayMs) {
         if (duckDbSessionManager == null) {
             Log.error("Invalid argument in ChronologicalEventStreamer: duckDbSessionManager cannot be null");
             throw new IllegalArgumentException("duckDbSessionManager cannot be null");
         }
+        if (binanceDelayMs < 0L) {
+            Log.error("Invalid argument in ChronologicalEventStreamer: binanceDelayMs must be non-negative");
+            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
+        }
+        if (krakenDelayMs < 0L) {
+            Log.error("Invalid argument in ChronologicalEventStreamer: krakenDelayMs must be non-negative");
+            throw new IllegalArgumentException("krakenDelayMs must be non-negative");
+        }
+        if (coinbaseDelayMs < 0L) {
+            Log.error("Invalid argument in ChronologicalEventStreamer: coinbaseDelayMs must be non-negative");
+            throw new IllegalArgumentException("coinbaseDelayMs must be non-negative");
+        }
         this.duckDbSessionManager = duckDbSessionManager;
+        this.binanceDelayMs = binanceDelayMs;
+        this.krakenDelayMs = krakenDelayMs;
+        this.coinbaseDelayMs = coinbaseDelayMs;
     }
 
     /**
@@ -262,19 +288,28 @@ public class ChronologicalEventStreamer implements AutoCloseable {
      * Loads all shared daily stream events ({@code polymarket/price_crypto}, {@code polymarket/price_crypto_twap_60s},
      * and any strategy-requested external Binance streams) for a single UTC day into a sorted,
      * immutable array shared read-only across all parallel 15-minute market workers of that day.
+     * <p>
+     * External Binance aggTrades timestamps are shifted forward by {@code binanceDelayMs} relative to
+     * the server timestamp ({@code COALESCE(event_time, trade_time)}) to simulate feed delivery latency.
      *
      * @param datasetService collector Parquet dataset service
      * @param symbol trading asset symbol
      * @param dateStr UTC date string ({@code yyyy-MM-dd})
      * @param requiredExternalStreams set of external streams required by the strategy
+     * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
      * @return sorted array of daily stream events
      */
     public static BacktestEvent[] loadSharedDailyStreams(
             CollectorParquetDatasetService datasetService,
             String symbol,
             String dateStr,
-            Set<ExternalStreamType> requiredExternalStreams) {
+            Set<ExternalStreamType> requiredExternalStreams,
+            long binanceDelayMs) {
 
+        if (binanceDelayMs < 0L) {
+            Log.error("Invalid argument in loadSharedDailyStreams: binanceDelayMs must be non-negative");
+            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
+        }
         if (datasetService == null || dateStr == null || dateStr.isBlank()) {
             return EMPTY_EVENTS;
         }
@@ -298,13 +333,13 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         if (extStreams.contains(ExternalStreamType.BINANCE_SPOT_AGG_TRADES)) {
             Path f = datasetService.getBinanceSpotAggTradesFile(symbol, dateStr);
             if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceSpotTrades(stmt, f, out)));
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceTrades(stmt, f, binanceDelayMs, true, out)));
             }
         }
         if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES)) {
             Path f = datasetService.getBinanceFuturesAggTradesFile(symbol, dateStr);
             if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceFuturesTrades(stmt, f, out)));
+                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceTrades(stmt, f, binanceDelayMs, false, out)));
             }
         }
 
@@ -584,27 +619,38 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         this.calcSpotSeq = 0L;
 
         try {
-            if (krakenUsdtReadExpr != null) {
-                String krakenUsdtSql = "SELECT ts, price FROM " + krakenUsdtReadExpr +
-                        " WHERE ts >= " + krakenWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+            if (krakenUsdtReadExpr != null && tEndMs >= krakenDelayMs) {
+                long minKrakenUsdtServerMs = Math.max(0L, krakenWarmupStartMs - krakenDelayMs);
+                long maxKrakenUsdtServerMs = tEndMs - krakenDelayMs;
+                String krakenUsdtSql = "SELECT (CAST(trade_timestamp AS BIGINT) + " + krakenDelayMs + ") AS eff_ts, price FROM " +
+                        krakenUsdtReadExpr +
+                        " WHERE trade_timestamp >= " + minKrakenUsdtServerMs +
+                        " AND trade_timestamp <= " + maxKrakenUsdtServerMs +
+                        " AND price IS NOT NULL" +
+                        " ORDER BY eff_ts ASC, trade_id ASC";
                 this.calcKrakenStatement = getOrCreateCalcKrakenStatement();
                 this.calcKrakenResultSet = this.calcKrakenStatement.executeQuery(krakenUsdtSql);
                 advanceKrakenRow();
             }
 
-            if (binanceReadExpr != null) {
-                String binanceSql = "SELECT ts, price, COALESCE(quantity, 1.0) FROM " + binanceReadExpr +
-                        " WHERE ts >= " + spotWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+            String binanceSql = buildSpotTradesSql(
+                    binanceReadExpr, "COALESCE(event_time, trade_time)", "COALESCE(quantity, 1.0)",
+                    "aggregate_trade_id", spotWarmupStartMs, tEndMs, binanceDelayMs);
+            if (binanceSql != null) {
                 venueCursors[0].open(binanceSql);
             }
-            if (coinbaseReadExpr != null) {
-                String coinbaseSql = "SELECT ts, price, COALESCE(qty, 1.0) FROM " + coinbaseReadExpr +
-                        " WHERE ts >= " + spotWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+
+            String coinbaseSql = buildSpotTradesSql(
+                    coinbaseReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
+                    "trade_id", spotWarmupStartMs, tEndMs, coinbaseDelayMs);
+            if (coinbaseSql != null) {
                 venueCursors[1].open(coinbaseSql);
             }
-            if (krakenSpotReadExpr != null) {
-                String krakenSpotSql = "SELECT ts, price, COALESCE(qty, 1.0) FROM " + krakenSpotReadExpr +
-                        " WHERE ts >= " + spotWarmupStartMs + " AND ts <= " + tEndMs + " AND price IS NOT NULL";
+
+            String krakenSpotSql = buildSpotTradesSql(
+                    krakenSpotReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
+                    "trade_id", spotWarmupStartMs, tEndMs, krakenDelayMs);
+            if (krakenSpotSql != null) {
                 venueCursors[2].open(krakenSpotSql);
             }
 
@@ -687,6 +733,27 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         } else {
             hasNextKrakenRow = false;
         }
+    }
+
+    private static String buildSpotTradesSql(
+            String readExpr,
+            String serverTsExpr,
+            String qtyExpr,
+            String tieBreakerCol,
+            long warmupStartMs,
+            long tEndMs,
+            long delayMs) {
+        if (readExpr == null || tEndMs < delayMs) {
+            return null;
+        }
+        long minServerMs = Math.max(0L, warmupStartMs - delayMs);
+        long maxServerMs = tEndMs - delayMs;
+        return "SELECT (CAST(" + serverTsExpr + " AS BIGINT) + " + delayMs + ") AS eff_ts, " +
+                "price, " + qtyExpr + " FROM " + readExpr +
+                " WHERE " + serverTsExpr + " >= " + minServerMs +
+                " AND " + serverTsExpr + " <= " + maxServerMs +
+                " AND price IS NOT NULL" +
+                " ORDER BY eff_ts ASC, " + tieBreakerCol + " ASC";
     }
 
     private static String buildParquetReadExpression(Path prevFile, Path curFile) {
@@ -1084,47 +1151,34 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         }
     }
 
-    private static void loadDailyBinanceSpotTrades(Statement stmt, Path file, List<BacktestEvent> out) {
+    private static void loadDailyBinanceTrades(
+            Statement stmt,
+            Path file,
+            long binanceDelayMs,
+            boolean spot,
+            List<BacktestEvent> out) {
         if (file == null || !Files.exists(file)) {
             return;
         }
         String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
+        String sql = "SELECT (CAST(COALESCE(event_time, trade_time) AS BIGINT) + " + binanceDelayMs + "), " +
+                "COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
+                "FROM read_parquet('" + norm + "') " +
+                "WHERE price IS NOT NULL AND COALESCE(event_time, trade_time) IS NOT NULL";
         try (ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
-                out.add(new BacktestEvent.BinanceSpotTradeEvent(
-                        rs.getLong(1),
-                        rs.getLong(2),
-                        rs.getDouble(3),
-                        rs.getDouble(4),
-                        rs.getBoolean(5)
-                ));
+                long effTs = rs.getLong(1);
+                long seq = rs.getLong(2);
+                double price = rs.getDouble(3);
+                double qty = rs.getDouble(4);
+                boolean isBuyerMaker = rs.getBoolean(5);
+                out.add(spot
+                        ? new BacktestEvent.BinanceSpotTradeEvent(effTs, seq, price, qty, isBuyerMaker)
+                        : new BacktestEvent.BinanceFuturesTradeEvent(effTs, seq, price, qty, isBuyerMaker));
             }
         } catch (SQLException e) {
-            Log.warnf("Could not load Binance Spot aggTrades file %s: %s", file, e.getMessage());
-        }
-    }
-
-    private static void loadDailyBinanceFuturesTrades(Statement stmt, Path file, List<BacktestEvent> out) {
-        if (file == null || !Files.exists(file)) {
-            return;
-        }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT ts, COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
-                "FROM read_parquet('" + norm + "') WHERE price IS NOT NULL";
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                out.add(new BacktestEvent.BinanceFuturesTradeEvent(
-                        rs.getLong(1),
-                        rs.getLong(2),
-                        rs.getDouble(3),
-                        rs.getDouble(4),
-                        rs.getBoolean(5)
-                ));
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load Binance Futures aggTrades file %s: %s", file, e.getMessage());
+            Log.warnf("Could not load Binance %s aggTrades file %s: %s",
+                    spot ? "Spot" : "Futures", file, e.getMessage());
         }
     }
 

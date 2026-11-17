@@ -7,6 +7,7 @@ import io.quarkus.runtime.QuarkusApplication;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -33,6 +34,15 @@ class BacktestApplicationTest {
 
     @Inject
     BacktestApplication application;
+
+    @ConfigProperty(name = "backtest.binance.delay-ms")
+    long configuredBinanceDelayMs;
+
+    @ConfigProperty(name = "backtest.kraken.delay-ms")
+    long configuredKrakenDelayMs;
+
+    @ConfigProperty(name = "backtest.coinbase.delay-ms")
+    long configuredCoinbaseDelayMs;
 
     @Test
     @DisplayName("BacktestApplication CDI bean should be injected successfully and implement QuarkusApplication")
@@ -183,11 +193,14 @@ class BacktestApplicationTest {
     }
 
     @Test
-    @DisplayName("Backtest application.properties should configure Enable-Native-Access manifest attribute for DuckDB JNI")
+    @DisplayName("Backtest application.properties should configure Enable-Native-Access manifest attribute and exchange feed delays")
     void shouldConfigureNativeAccessManifestAttributeForBacktestJar() throws Exception {
         List<String> lines = Files.readAllLines(Path.of("src/main/resources/application.properties"), StandardCharsets.UTF_8);
 
         assertThat(lines)
                 .contains("quarkus.package.jar.manifest.attributes.\"Enable-Native-Access\"=ALL-UNNAMED");
+        assertThat(configuredBinanceDelayMs).isEqualTo(100L);
+        assertThat(configuredKrakenDelayMs).isEqualTo(50L);
+        assertThat(configuredCoinbaseDelayMs).isEqualTo(50L);
     }
 }

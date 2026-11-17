@@ -95,24 +95,24 @@ class BacktestEngineTest {
                     "(" + ((c3Start + 60L) * 1000L) + "::UBIGINT, 3::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 59850.0::DOUBLE, '59850.0'::VARCHAR, " + ((c3Start + 60L) * 1000L - 5L) + "::UBIGINT)" +
                     ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
 
-            // 3. Binance Spot aggTrades
+            // 3. Binance Spot aggTrades (new schema without ts: event_time + trade_time)
             String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (c1Start * 1000L + 100L) + "::UBIGINT, 1::BIGINT, 60000.0::DOUBLE, 5.0::DOUBLE, false::BOOLEAN), " +
-                    "(" + ((c1Start + 60L) * 1000L) + "::UBIGINT, 2::BIGINT, 60000.0::DOUBLE, 5.0::DOUBLE, true::BOOLEAN), " +
-                    "(" + (c2Start * 1000L + 100L) + "::UBIGINT, 3::BIGINT, 60000.0::DOUBLE, 5.0::DOUBLE, false::BOOLEAN), " +
-                    "(" + ((c2Start + 60L) * 1000L) + "::UBIGINT, 4::BIGINT, 60150.0::DOUBLE, 15.0::DOUBLE, false::BOOLEAN), " +
-                    "(" + (c3Start * 1000L + 100L) + "::UBIGINT, 5::BIGINT, 60000.0::DOUBLE, 5.0::DOUBLE, true::BOOLEAN), " +
-                    "(" + ((c3Start + 60L) * 1000L) + "::UBIGINT, 6::BIGINT, 59850.0::DOUBLE, 20.0::DOUBLE, true::BOOLEAN)" +
-                    ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normSpot + "' (FORMAT PARQUET)");
+                    "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                    "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + ((c1Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN, true::BOOLEAN), " +
+                    "(NULL::UBIGINT, 3::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 3::BIGINT, 3::BIGINT, " + (c2Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                    "(NULL::UBIGINT, 4::BIGINT, 'BTCUSDT'::VARCHAR, 60150.0::DOUBLE, 15.0::DOUBLE, 4::BIGINT, 4::BIGINT, " + ((c2Start + 60L) * 1000L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                    "(NULL::UBIGINT, 5::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 5::BIGINT, 5::BIGINT, " + (c3Start * 1000L + 100L) + "::UBIGINT, true::BOOLEAN, true::BOOLEAN), " +
+                    "(NULL::UBIGINT, 6::BIGINT, 'BTCUSDT'::VARCHAR, 59850.0::DOUBLE, 20.0::DOUBLE, 6::BIGINT, 6::BIGINT, " + ((c3Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN, true::BOOLEAN)" +
+                    ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
-            // 4. Binance Futures aggTrades
+            // 4. Binance Futures aggTrades (new schema without ts: event_time + trade_time)
             String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(" + (c1Start * 1000L + 100L) + "::UBIGINT, 1::BIGINT, 60000.0::DOUBLE, 5.0::DOUBLE, false::BOOLEAN), " +
-                    "(" + ((c2Start + 60L) * 1000L) + "::UBIGINT, 2::BIGINT, 60160.0::DOUBLE, 18.0::DOUBLE, false::BOOLEAN), " +
-                    "(" + ((c3Start + 60L) * 1000L) + "::UBIGINT, 3::BIGINT, 59840.0::DOUBLE, 25.0::DOUBLE, true::BOOLEAN)" +
-                    ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
+                    "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN), " +
+                    "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 60160.0::DOUBLE, 18.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + ((c2Start + 60L) * 1000L) + "::UBIGINT, false::BOOLEAN), " +
+                    "(NULL::UBIGINT, 3::BIGINT, 'BTCUSDT'::VARCHAR, 59840.0::DOUBLE, 25.0::DOUBLE, 3::BIGINT, 3::BIGINT, " + ((c3Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN)" +
+                    ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
 
             // 5. Polymarket 15m typed CLOB market files
             TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
@@ -230,7 +230,10 @@ class BacktestEngineTest {
                 tempDir.resolve("export").toString(),
                 10000.0,
                 1.0,
-                2
+                2,
+                100L,
+                50L,
+                50L
         );
     }
 
@@ -372,7 +375,10 @@ class BacktestEngineTest {
                     tempDir.resolve("export_utter").toString(),
                     10000.0,
                     1.0,
-                    2
+                    2,
+                    100L,
+                    50L,
+                    50L
             );
 
             try {
@@ -518,7 +524,10 @@ class BacktestEngineTest {
                     tempDir.resolve("export_eq").toString(),
                     10000.0,
                     1.0,
-                    2
+                    2,
+                    100L,
+                    50L,
+                    50L
             );
 
             try {
@@ -585,5 +594,35 @@ class BacktestEngineTest {
                 "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01", 10000.0, null, 1.0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("startDate must not be after endDate");
+    }
+
+    @Test
+    @DisplayName("Should throw IllegalArgumentException when any configured exchange delay is negative")
+    void shouldThrowWhenExchangeDelayIsNegative(@TempDir Path tempDir) {
+        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDbSessionManager);
+        StrategyRegistry registry = new StrategyRegistry(Map.of());
+        PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
+        BacktestJsonExporter exporter = new BacktestJsonExporter(new ObjectMapper(), tempDir.toString());
+
+        assertThatThrownBy(() -> new BacktestEngine(
+                datasetService, registry, calc, exporter,
+                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                -1L, 50L, 50L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("binanceDelayMs");
+
+        assertThatThrownBy(() -> new BacktestEngine(
+                datasetService, registry, calc, exporter,
+                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                100L, -1L, 50L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("krakenDelayMs");
+
+        assertThatThrownBy(() -> new BacktestEngine(
+                datasetService, registry, calc, exporter,
+                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                100L, 50L, -1L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("coinbaseDelayMs");
     }
 }

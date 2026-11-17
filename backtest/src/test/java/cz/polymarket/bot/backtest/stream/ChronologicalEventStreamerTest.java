@@ -31,7 +31,7 @@ class ChronologicalEventStreamerTest {
     @DisplayName("Should pop events strictly in ascending receipt timestamp (ts) order")
     void shouldPopEventsInAscendingOrder() {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
             streamer.scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(3000L, 1L, 60200.0, 1.0, false));
             streamer.scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(1000L, 2L, 60000.0, 1.0, false));
             streamer.scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(2000L, 3L, 60100.0, 1.0, false));
@@ -93,18 +93,18 @@ class ChronologicalEventStreamerTest {
 
                 String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (tStart * 1000L + 1000L) + "::UBIGINT, 1::BIGINT, 60000.0::DOUBLE, 0.5::DOUBLE, false::BOOLEAN)" +
-                        ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normSpot + "' (FORMAT PARQUET)");
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 0.5::DOUBLE, 1::BIGINT, 1::BIGINT, " + (tStart * 1000L + 1000L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
                 String normKraken = krakenFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (tStart * 1000L + 900L) + "::UBIGINT, 0.9990::DOUBLE)" +
-                        ") AS t(ts, price)) TO '" + normKraken + "' (FORMAT PARQUET)");
+                        "(" + (tStart * 1000L + 900L) + "::UBIGINT, 'USDT/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 0.9990::DOUBLE, 1000.0::DOUBLE, '2026-08-01T00:00:00.900000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKraken + "' (FORMAT PARQUET)");
 
                 String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (tStart * 1000L + 1500L) + "::UBIGINT, 1::BIGINT, 60010.0::DOUBLE, 1.0::DOUBLE, false::BOOLEAN)" +
-                        ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60010.0::DOUBLE, 1.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (tStart * 1000L + 1500L) + "::UBIGINT, false::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
             }
 
             CollectorMarketMetadata metadata = new CollectorMarketMetadata(
@@ -115,8 +115,8 @@ class ChronologicalEventStreamerTest {
             // Case 1: Strategy requires NO external streams -> CalculatedSpotTwapEvent IS streamed when datasetService is passed,
             // while raw Binance Spot/Futures events must NOT be loaded
             BacktestEvent[] noExtDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
-                    datasetService, "BTCUSDT", dateStr, Set.of());
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+                    datasetService, "BTCUSDT", dateStr, Set.of(), 100L);
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
                 streamer.loadCandleEvents(metadata, noExtDaily, datasetService, "BTCUSDT", Long.MAX_VALUE);
 
                 int clobCount = 0;
@@ -136,6 +136,7 @@ class ChronologicalEventStreamerTest {
                     if (event instanceof BacktestEvent.CalculatedSpotTwapEvent calcEv) {
                         calcSpotTwapCount++;
                         assertThat(calcEv.symbol()).isEqualTo("btcusd");
+                        assertThat(calcEv.timestampMs()).isEqualTo(tStart * 1000L + 1100L);
                         assertThat(calcEv.spotPrice()).isCloseTo(60000.0 * 0.9990, within(1e-4));
                     }
                     if (event instanceof BacktestEvent.PolymarketCryptoPriceEvent) cryptoPriceCount++;
@@ -153,13 +154,13 @@ class ChronologicalEventStreamerTest {
                 assertThat(futCount).isZero();
             }
 
-            // Case 2: Strategy requests Binance Spot and Futures aggTrades -> all streams loaded and ordered by ts
+            // Case 2: Strategy requests Binance Spot and Futures aggTrades -> all streams loaded and ordered by delayed ts
             BacktestEvent[] withExtDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
                     datasetService, "BTCUSDT", dateStr, Set.of(
                             ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
                             ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
-                    ));
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+                    ), 100L);
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
                 streamer.loadCandleEvents(metadata, withExtDaily, Long.MAX_VALUE);
 
                 long prevTs = 0L;
@@ -169,8 +170,14 @@ class ChronologicalEventStreamerTest {
                     BacktestEvent event = streamer.next();
                     assertThat(event.timestampMs()).isGreaterThanOrEqualTo(prevTs);
                     prevTs = event.timestampMs();
-                    if (event instanceof BacktestEvent.BinanceSpotTradeEvent) spotCount++;
-                    if (event instanceof BacktestEvent.BinanceFuturesTradeEvent) futCount++;
+                    if (event instanceof BacktestEvent.BinanceSpotTradeEvent spotEv) {
+                        spotCount++;
+                        assertThat(spotEv.timestampMs()).isEqualTo(tStart * 1000L + 1100L);
+                    }
+                    if (event instanceof BacktestEvent.BinanceFuturesTradeEvent futEv) {
+                        futCount++;
+                        assertThat(futEv.timestampMs()).isEqualTo(tStart * 1000L + 1600L);
+                    }
                 }
 
                 assertThat(spotCount).isEqualTo(1);
@@ -205,7 +212,7 @@ class ChronologicalEventStreamerTest {
         };
 
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
             streamer.loadCandleEvents(metadata, daily, Long.MAX_VALUE);
 
             List<BacktestEvent> observed = new ArrayList<>();
@@ -286,29 +293,29 @@ class ChronologicalEventStreamerTest {
                         ClobRow.priceChange(baseMs + 500L, baseMs + 490L, 4, true, false, 5200, 200.0)
                 ));
 
-                // Kraken USDT/USD peg at 1.0000
+                // Kraken USDT/USD peg at 1.0000 (server +100ms -> +150ms with 50ms delay)
                 String normUsdt = krakenUsdtFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (baseMs + 100L) + "::UBIGINT, 1.0000::DOUBLE, 1000.0::DOUBLE)" +
-                        ") AS t(ts, price, qty)) TO '" + normUsdt + "' (FORMAT PARQUET)");
+                        "(" + (baseMs + 100L) + "::UBIGINT, 'USDT/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 1.0000::DOUBLE, 1000.0::DOUBLE, '2026-08-01T00:00:00.100000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normUsdt + "' (FORMAT PARQUET)");
 
-                // Binance BTCUSDT trade at +1000ms ($70,000)
+                // Binance BTCUSDT trade at server +1000ms ($70,000) -> +1100ms with 100ms delay (NULL event_time -> trade_time)
                 String normBinance = binanceSpotFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (baseMs + 1000L) + "::UBIGINT, 1::BIGINT, 70000.0::DOUBLE, 1.0::DOUBLE, false::BOOLEAN)" +
-                        ") AS t(ts, aggregate_trade_id, price, quantity, is_buyer_maker)) TO '" + normBinance + "' (FORMAT PARQUET)");
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 70000.0::DOUBLE, 1.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (baseMs + 1000L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normBinance + "' (FORMAT PARQUET)");
 
-                // Coinbase BTCUSD trade at +2000ms ($70,020)
+                // Coinbase BTCUSD trade at server +2000ms ($70,020) -> +2050ms with 50ms delay
                 String normCoinbase = coinbaseSpotFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (baseMs + 2000L) + "::UBIGINT, " + (baseMs + 2000L) + "::UBIGINT, 'BTCUSD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 70020.0::DOUBLE, 1.0::DOUBLE)" +
-                        ") AS t(ts, trade_timestamp, symbol, trade_id, side, price, qty)) TO '" + normCoinbase + "' (FORMAT PARQUET)");
+                        "(" + (baseMs + 2000L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 70020.0::DOUBLE, 1.0::DOUBLE, '2026-08-01T00:00:02.000000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCoinbase + "' (FORMAT PARQUET)");
 
-                // Kraken BTCUSD trade at +3000ms ($70,040)
+                // Kraken BTCUSD trade at server +3000ms ($70,040) -> +3050ms with 50ms delay
                 String normKraken = krakenSpotFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (baseMs + 3000L) + "::UBIGINT, " + (baseMs + 3000L) + "::UBIGINT, 'BTCUSD'::VARCHAR, 1::BIGINT, 'b'::VARCHAR, 'm'::VARCHAR, 70040.0::DOUBLE, 1.0::DOUBLE)" +
-                        ") AS t(ts, trade_timestamp, symbol, trade_id, side, ord_type, price, qty)) TO '" + normKraken + "' (FORMAT PARQUET)");
+                        "(" + (baseMs + 3000L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'market'::VARCHAR, 70040.0::DOUBLE, 1.0::DOUBLE, '2026-08-01T00:00:03.000000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKraken + "' (FORMAT PARQUET)");
             }
 
             CollectorMarketMetadata metadata = new CollectorMarketMetadata(
@@ -316,7 +323,7 @@ class ChronologicalEventStreamerTest {
                     "1001", "1002", 70000.0, 70030.0, TradeDirection.UP
             );
 
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
                 streamer.loadCandleEvents(metadata, new BacktestEvent[0], datasetService, "BTCUSDT", Long.MAX_VALUE);
 
                 List<BacktestEvent.CalculatedSpotTwapEvent> calcEvents = new ArrayList<>();
@@ -327,15 +334,16 @@ class ChronologicalEventStreamerTest {
                     }
                 }
 
-                // 3 spot trades (Binance @ +1000ms, Coinbase @ +2000ms, Kraken @ +3000ms) -> 3 CalculatedSpotTwapEvents
+                // 3 spot trades shifted by configured exchange delays:
+                // Binance @ +1100ms, Coinbase @ +2050ms, Kraken @ +3050ms
                 assertThat(calcEvents).hasSize(3);
-                assertThat(calcEvents.get(0).timestampMs()).isEqualTo(baseMs + 1000L);
+                assertThat(calcEvents.get(0).timestampMs()).isEqualTo(baseMs + 1100L);
                 assertThat(calcEvents.get(0).spotPrice()).isCloseTo(70000.0, within(1e-4));
 
-                assertThat(calcEvents.get(1).timestampMs()).isEqualTo(baseMs + 2000L);
+                assertThat(calcEvents.get(1).timestampMs()).isEqualTo(baseMs + 2050L);
                 assertThat(calcEvents.get(1).spotPrice()).isBetween(70005.0, 70015.0);
 
-                assertThat(calcEvents.get(2).timestampMs()).isEqualTo(baseMs + 3000L);
+                assertThat(calcEvents.get(2).timestampMs()).isEqualTo(baseMs + 3050L);
                 assertThat(calcEvents.get(2).spotPrice()).isBetween(70010.0, 70030.0);
             }
         }
@@ -374,7 +382,7 @@ class ChronologicalEventStreamerTest {
 
         PolymarketOrderBook book = new PolymarketOrderBook();
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
 
             streamer.loadCandleEvents(metadata, daily, 76_000L);
 
@@ -409,6 +417,97 @@ class ChronologicalEventStreamerTest {
             // Boundary twapOpen (60000.0) at tStartMs AND early price_crypto (+5s) AND closing twap (60080.0) were ALL delivered!
             assertThat(twapPrices).containsExactly(60000.0, 60080.0);
             assertThat(cryptoPriceCount).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("Should reorder multi-exchange spot trades chronologically after adding per-exchange delays and respect candle boundaries")
+    void shouldReorderSpotTradesByExchangeDelayAndRespectBoundaries(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
+
+            long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
+            long tEnd = tStart + 900L;
+            long baseMs = tStart * 1000L;
+            long endMs = tEnd * 1000L;
+            String dateStr = "2026-08-01";
+
+            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+            Path binanceSpotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
+            Path coinbaseSpotFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", dateStr);
+            Path krakenSpotFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", dateStr);
+            Path krakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
+
+            Files.createDirectories(pmDir);
+            Files.createDirectories(binanceSpotFile.getParent());
+            Files.createDirectories(coinbaseSpotFile.getParent());
+            Files.createDirectories(krakenSpotFile.getParent());
+            Files.createDirectories(krakenUsdtFile.getParent());
+
+            Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
+
+            try (Connection conn = duckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile, List.of(
+                        ClobRow.discovered(baseMs - 1000L, "1001", "1002")
+                ));
+
+                // Kraken USDT/USD peg before candle open (server -1000ms + 50ms = -950ms)
+                String normUsdt = krakenUsdtFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (baseMs - 1000L) + "::UBIGINT, 'USDT/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 1.0000::DOUBLE, 1000.0::DOUBLE, '2026-07-31T23:59:59.000000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normUsdt + "' (FORMAT PARQUET)");
+
+                // Binance Spot:
+                // 1) event_time populated (-60ms + 100ms = baseMs + 40ms -> shifted INTO candle!)
+                // 2) event_time NULL, trade_time (+1000ms + 100ms = baseMs + 1100ms -> arrives AFTER Coinbase & Kraken!)
+                // 3) trade_time near candle close (endMs - 50ms + 100ms = endMs + 50ms -> excluded!)
+                String normBinance = binanceSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (baseMs - 60L) + "::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 69950.0::DOUBLE, 1.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (baseMs - 70L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                        "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 70000.0::DOUBLE, 1.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + (baseMs + 1000L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                        "(NULL::UBIGINT, 3::BIGINT, 'BTCUSDT'::VARCHAR, 70500.0::DOUBLE, 1.0::DOUBLE, 3::BIGINT, 3::BIGINT, " + (endMs - 50L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normBinance + "' (FORMAT PARQUET)");
+
+                // Coinbase Spot at server +1020ms (+50ms = baseMs + 1070ms -> arrives BEFORE Binance +1000ms!)
+                String normCoinbase = coinbaseSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (baseMs + 1020L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 70100.0::DOUBLE, 1.0::DOUBLE, '2026-08-01T00:00:01.020000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCoinbase + "' (FORMAT PARQUET)");
+
+                // Kraken Spot at server +1040ms (+50ms = baseMs + 1090ms -> arrives BEFORE Binance +1000ms!)
+                String normKraken = krakenSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (baseMs + 1040L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 70200.0::DOUBLE, 1.0::DOUBLE, '2026-08-01T00:00:01.040000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKraken + "' (FORMAT PARQUET)");
+            }
+
+            CollectorMarketMetadata metadata = new CollectorMarketMetadata(
+                    tStart, tEnd, "2026-08-01T00:00:00Z", dateStr, pmFile,
+                    "1001", "1002", 70000.0, 70100.0, TradeDirection.UP
+            );
+
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
+                streamer.loadCandleEvents(metadata, new BacktestEvent[0], datasetService, "BTCUSDT", Long.MAX_VALUE);
+
+                List<BacktestEvent.CalculatedSpotTwapEvent> calcEvents = new ArrayList<>();
+                while (streamer.hasNext()) {
+                    BacktestEvent ev = streamer.next();
+                    if (ev instanceof BacktestEvent.CalculatedSpotTwapEvent calcEv) {
+                        calcEvents.add(calcEv);
+                    }
+                }
+
+                assertThat(calcEvents)
+                        .extracting(BacktestEvent.CalculatedSpotTwapEvent::timestampMs)
+                        .containsExactly(
+                                baseMs + 40L,    // Binance pre-open event_time (-60 + 100)
+                                baseMs + 1070L,  // Coinbase (+1020 + 50)
+                                baseMs + 1090L,  // Kraken (+1040 + 50)
+                                baseMs + 1100L   // Binance (+1000 + 100)
+                        );
+            }
         }
     }
 }

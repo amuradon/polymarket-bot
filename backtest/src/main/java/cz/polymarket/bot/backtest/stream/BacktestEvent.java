@@ -115,7 +115,7 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
      * Binance Spot ({@code <ASSET>USDT} via Kraken {@code USDT/USD} 5s EMA), Coinbase Spot
      * ({@code <ASSET>USD}), and Kraken Spot ({@code <ASSET>USD}) trades.
      *
-     * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC
+     * @param timestampMs simulated arrival timestamp ({@code server_ts + exchange_delay_ms}) in milliseconds UTC
      * @param sequenceNumber capture sequence number
      * @param symbol lowercase USD crypto symbol (e.g. {@code "btcusd"})
      * @param spotPrice calculated multi-exchange USD spot price
@@ -187,7 +187,7 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     /**
      * Aggressive spot trade execution event on Binance Spot.
      *
-     * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC
+     * @param timestampMs simulated arrival timestamp ({@code server_ts + backtest.binance.delay-ms}) in milliseconds UTC
      * @param sequenceNumber capture sequence / aggregate trade ID tiebreaker
      * @param price trade execution price
      * @param quantity trade volume in base asset
@@ -209,7 +209,7 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     /**
      * Aggressive futures trade execution event on Binance Futures.
      *
-     * @param timestampMs local EC2 receipt timestamp ({@code ts}) in milliseconds UTC
+     * @param timestampMs simulated arrival timestamp ({@code server_ts + backtest.binance.delay-ms}) in milliseconds UTC
      * @param sequenceNumber capture sequence / aggregate trade ID tiebreaker
      * @param price futures execution price
      * @param quantity trade volume in contracts/base asset
