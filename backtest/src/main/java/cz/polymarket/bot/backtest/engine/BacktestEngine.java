@@ -5,7 +5,6 @@ import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
-import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
@@ -14,7 +13,6 @@ import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExternalStreamType;
-import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
@@ -261,12 +259,6 @@ public class BacktestEngine {
             throw new IllegalArgumentException(msg);
         }
 
-        Set<IndicatorType> reqIndicatorsSet = strategy.getRequiredIndicators() != null
-                ? strategy.getRequiredIndicators()
-                : Set.of();
-        IndicatorType[] requiredIndicators = reqIndicatorsSet.toArray(new IndicatorType[0]);
-        boolean hasIndicators = requiredIndicators.length > 0;
-
         Set<ExternalStreamType> requiredExternalStreams = strategy.getRequiredExternalStreams() != null
                 ? strategy.getRequiredExternalStreams()
                 : Set.of();
@@ -314,9 +306,6 @@ public class BacktestEngine {
                         dayOutcomes,
                         strategy,
                         parallelCapable,
-                        reqIndicatorsSet,
-                        requiredIndicators,
-                        hasIndicators,
                         resolvedLatencyFactor,
                         sym
                 );
@@ -331,9 +320,6 @@ public class BacktestEngine {
                             dayOutcomes,
                             strategy,
                             true,
-                            reqIndicatorsSet,
-                            requiredIndicators,
-                            hasIndicators,
                             resolvedLatencyFactor,
                             sym
                     ), workerPool);
@@ -427,21 +413,17 @@ public class BacktestEngine {
             MarketSimulationOutcome[] dayOutcomes,
             TradingStrategy templateStrategy,
             boolean createWorkerStrategyCopy,
-            Set<IndicatorType> reqIndicatorsSet,
-            IndicatorType[] requiredIndicators,
-            boolean hasIndicators,
             double resolvedLatencyFactor,
             String symbol) {
 
         int total = dayMarkets.size();
         PolymarketOrderBook orderBook = new PolymarketOrderBook();
         SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
-        DynamicIndicatorEngine indicatorEngine = new DynamicIndicatorEngine(reqIndicatorsSet);
 
         try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(
                 datasetService.getDuckDbSessionManager(), binanceDelayMs, krakenDelayMs, coinbaseDelayMs)) {
             matchingEngine.setEventScheduler(streamer::scheduleEvent);
-            BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine, indicatorEngine);
+            BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine);
 
             TradingStrategy activeStrategy = createWorkerStrategyCopy
                     ? templateStrategy.createInstance()
@@ -484,7 +466,6 @@ public class BacktestEngine {
                 orderBook.clear();
                 orderBook.setMarketTokenIds(market.upTokenId(), market.downTokenId());
                 context.resetForCandle();
-                indicatorEngine.resetActiveCandle();
 
                 streamer.clear();
                 streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol, clobLookbackMs);
@@ -532,13 +513,8 @@ public class BacktestEngine {
                             activeStrategy.onPolymarketCryptoTwap60s(
                                     evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
                         }
-                        case BacktestEvent.BinanceSpotTradeEvent e -> {
-                            context.setLastReferencePrice(e.price());
-                            indicatorEngine.onSpotTrade(evTs, e.price(), e.quantity(), e.isBuyerMaker());
-                            if (hasIndicators) {
-                                notifyIndicators(activeStrategy, indicatorEngine, requiredIndicators, evTs);
-                            }
-                        }
+                        case BacktestEvent.BinanceSpotTradeEvent e ->
+                                context.setLastReferencePrice(e.price());
                         case BacktestEvent.BinanceFuturesTradeEvent e -> {
                         }
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
@@ -593,18 +569,4 @@ public class BacktestEngine {
             double brierDiffSq,
             boolean evaluated
     ) {}
-
-    private static void notifyIndicators(
-            TradingStrategy strategy,
-            DynamicIndicatorEngine indicatorEngine,
-            IndicatorType[] requiredIndicators,
-            long timestampMs) {
-        for (int i = 0; i < requiredIndicators.length; i++) {
-            IndicatorType type = requiredIndicators[i];
-            double val = indicatorEngine.getIndicatorValue(type);
-            if (!Double.isNaN(val)) {
-                strategy.onIndicatorUpdate(type, val, timestampMs);
-            }
-        }
-    }
 }

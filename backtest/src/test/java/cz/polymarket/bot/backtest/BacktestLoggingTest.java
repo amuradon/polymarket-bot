@@ -16,7 +16,6 @@ import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExternalStreamType;
-import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -329,11 +328,6 @@ class BacktestLoggingTest {
             @Override
             public String getName() {
                 return "TestBatchStrategy";
-            }
-
-            @Override
-            public Set<IndicatorType> getRequiredIndicators() {
-                return Set.of();
             }
 
             @Override

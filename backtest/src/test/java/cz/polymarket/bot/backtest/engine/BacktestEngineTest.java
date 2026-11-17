@@ -11,7 +11,6 @@ import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExternalStreamType;
-import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -45,7 +44,6 @@ class BacktestEngineTest {
     private BacktestEngine backtestEngine;
     private final AtomicInteger polymarketCryptoPriceCount = new AtomicInteger();
     private final AtomicInteger polymarketTwap60sCount = new AtomicInteger();
-    private final AtomicInteger externalSpotTradeCount = new AtomicInteger();
 
     private static final long BASE_START = 1785542400L; // 2026-08-01 00:00:00 UTC
 
@@ -147,11 +145,6 @@ class BacktestEngineTest {
             }
 
             @Override
-            public Set<IndicatorType> getRequiredIndicators() {
-                return Set.of(IndicatorType.CVD);
-            }
-
-            @Override
             public Set<ExternalStreamType> getRequiredExternalStreams() {
                 return Set.of();
             }
@@ -179,11 +172,6 @@ class BacktestEngineTest {
             @Override
             public void onPolymarketCryptoTwap60s(long timestampMs, String symbol, String source, double twapPrice, int windowSeconds, long twapTimestampMs) {
                 polymarketTwap60sCount.incrementAndGet();
-            }
-
-            @Override
-            public void onIndicatorUpdate(IndicatorType type, double value, long timestampMs) {
-                externalSpotTradeCount.incrementAndGet();
             }
 
             @Override
@@ -277,7 +265,6 @@ class BacktestEngineTest {
     void shouldSkipExternalFilesForPolymarketOnlyStrategy(@TempDir Path tempDir) {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);
-        externalSpotTradeCount.set(0);
 
         BacktestResult result = backtestEngine.runBacktest(
                 "PolymarketOnlyStrategy",
@@ -294,7 +281,6 @@ class BacktestEngineTest {
         assertThat(result.trades()).hasSize(6);
         assertThat(polymarketCryptoPriceCount.get()).isEqualTo(3);
         assertThat(polymarketTwap60sCount.get()).isGreaterThanOrEqualTo(3);
-        assertThat(externalSpotTradeCount.get()).isZero();
     }
 
     @Test

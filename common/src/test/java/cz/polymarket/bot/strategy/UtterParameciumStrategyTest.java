@@ -504,7 +504,6 @@ class UtterParameciumStrategyTest {
     @DisplayName("Should trigger refreshAccountBalance once per market at tau <= 71000 ms and declare zero external streams")
     void shouldTriggerRefreshAccountBalanceOncePerMarketAndDeclareZeroExternalStreams() {
         assertThat(strategy.getRequiredExternalStreams()).isEmpty();
-        assertThat(strategy.getRequiredIndicators()).isEmpty();
         assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(76_000L);
 
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);

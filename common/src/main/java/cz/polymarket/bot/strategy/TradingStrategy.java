@@ -19,22 +19,11 @@ public interface TradingStrategy {
     }
 
     /**
-     * Declares the set of technical indicators required by this strategy.
-     * The engine dynamically computes and updates these indicators on-the-fly.
-     *
-     * @return the set of required indicator types
-     */
-    default Set<IndicatorType> getRequiredIndicators() {
-        return Set.of();
-    }
-
-    /**
      * Declares the set of external exchange market data streams required by this strategy.
      * <p>
      * If a strategy returns an empty set, the backtesting engine skips loading all external
-     * Parquet files and skips computing indicators derived from external streams, streaming
-     * exclusively Polymarket CLOB, {@code polymarket/price_crypto}, and
-     * {@code polymarket/price_crypto_twap_60s} data.
+     * Parquet files, streaming exclusively Polymarket CLOB, {@code polymarket/price_crypto},
+     * and {@code polymarket/price_crypto_twap_60s} data.
      *
      * @return the set of required external stream types (empty by default)
      */
@@ -165,13 +154,4 @@ public interface TradingStrategy {
      * @param actualOutcome the final outcome direction
      */
     default void onCandleResolution(TradeDirection actualOutcome) {}
-
-    /**
-     * Optional callback triggered when a technical indicator value is updated.
-     *
-     * @param type indicator type
-     * @param value updated value
-     * @param timestampMs timestamp in milliseconds UTC
-     */
-    default void onIndicatorUpdate(IndicatorType type, double value, long timestampMs) {}
 }

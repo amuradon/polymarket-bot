@@ -5,7 +5,7 @@ package cz.polymarket.bot.strategy;
  * <p>
  * Strategies declare which external streams they require via
  * {@link TradingStrategy#getRequiredExternalStreams()}. During backtesting, only the
- * declared external streams (and indicators derived from them) are loaded from Parquet
+ * declared external streams are loaded from Parquet
  * archives and processed, avoiding unnecessary I/O and CPU overhead for strategies that
  * operate exclusively on Polymarket streams.
  */

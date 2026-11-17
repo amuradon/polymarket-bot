@@ -1,7 +1,6 @@
 package cz.polymarket.bot.backtest.engine;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
-import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionRouter;
@@ -18,20 +17,17 @@ import java.util.List;
 public class BacktestSimulationContext implements StrategyContext, ExecutionRouter {
 
     private final SimulatedMatchingEngine matchingEngine;
-    private final DynamicIndicatorEngine indicatorEngine;
 
     private long currentTimestampMs;
     private double lastReferencePrice;
 
     /**
-     * Constructs the simulation context with matching engine and dynamic indicators.
+     * Constructs the simulation context backed by the simulated matching engine.
      *
      * @param matchingEngine simulated latency and book fill matching engine
-     * @param indicatorEngine dynamic real-time indicator calculation engine
      */
-    public BacktestSimulationContext(SimulatedMatchingEngine matchingEngine, DynamicIndicatorEngine indicatorEngine) {
+    public BacktestSimulationContext(SimulatedMatchingEngine matchingEngine) {
         this.matchingEngine = matchingEngine;
-        this.indicatorEngine = indicatorEngine;
     }
 
     /**
@@ -129,9 +125,7 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
         double openRef = (metadata != null && !Double.isNaN(metadata.twapOpen()) && metadata.twapOpen() > 0.0)
                 ? metadata.twapOpen()
                 : 0.0;
-        double spotPrice = (indicatorEngine != null && indicatorEngine.getCurrentSpotPrice() > 0.0)
-                ? indicatorEngine.getCurrentSpotPrice()
-                : (lastReferencePrice > 0.0 ? lastReferencePrice : openRef);
+        double spotPrice = lastReferencePrice > 0.0 ? lastReferencePrice : openRef;
         if (openRef <= 0.0 || spotPrice <= 0.0) {
             return 0.50;
         }

@@ -315,11 +315,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
     }
 
     @Override
-    public Set<IndicatorType> getRequiredIndicators() {
-        return Set.of();
-    }
-
-    @Override
     public Set<ExternalStreamType> getRequiredExternalStreams() {
         return Set.of();
     }
