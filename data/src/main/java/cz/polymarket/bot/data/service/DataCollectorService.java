@@ -3,10 +3,6 @@ package cz.polymarket.bot.data.service;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
 import cz.polymarket.bot.connector.binance.BinanceStreamListener;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
-import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
-import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
-import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
-import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
 import cz.polymarket.bot.connector.ws.ConnectionState;
@@ -16,8 +12,6 @@ import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.data.storage.CollectorWriteCoordinator;
 import cz.polymarket.bot.data.storage.CollectorWriteMode;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
-import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
-import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import cz.polymarket.bot.data.web.CollectorStatusDto;
@@ -37,27 +31,26 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Main orchestrator service for the Data Collector application.
- * Always starts recording Binance, Kraken, Coinbase, and Polymarket WebSocket streams on application startup
- * using zero-decode {@code byte[]} Zstandard writing, supports Blue-Green STANDBY warm-up and atomic timestamp
- * cutover via {@link CollectorWriteCoordinator}, schedules periodic Polymarket market discovery/resolution
- * checks and Zstandard frame flushes, and exposes runtime status.
+ * Always starts recording Polymarket PolyBolt and CLOB WebSocket streams on application startup (plus optional
+ * Binance Spot/Futures {@code bookTicker} streams when explicitly enabled) using zero-decode {@code byte[]}
+ * Zstandard writing, supports Blue-Green STANDBY warm-up and atomic timestamp cutover via
+ * {@link CollectorWriteCoordinator}, schedules periodic Polymarket market discovery/resolution checks and
+ * Zstandard frame flushes, and exposes runtime status.
  */
 @ApplicationScoped
 public class DataCollectorService {
 
     private final BinanceStreamConnector binanceConnector;
     private final DailyBinanceStorageManager binanceStorage;
-    private final KrakenStreamConnector krakenConnector;
-    private final DailyKrakenStorageManager krakenStorage;
-    private final CoinbaseStreamConnector coinbaseConnector;
-    private final DailyCoinbaseStorageManager coinbaseStorage;
     private final DailyPolyBoltStorageManager polyBoltDailyStorage;
     private final PolymarketLifecycleCoordinator polymarketCoordinator;
     private final PolymarketMarketStorageManager polymarketStorage;
@@ -66,9 +59,9 @@ public class DataCollectorService {
     private final CollectorWriteCoordinator writeCoordinator;
     private final Vertx vertx;
     private final String symbol;
-    private final String krakenPrimarySymbol;
     private final String timeframe;
-    private final boolean krakenUsdtUsdEnabled;
+    private final boolean binanceSpotBookTickerEnabled;
+    private final boolean binanceFuturesBookTickerEnabled;
     private final int publicPort;
 
     private volatile HttpServer publicHttpServer;
@@ -76,32 +69,25 @@ public class DataCollectorService {
     /**
      * Constructs the Data Collector orchestrator service.
      *
-     * @param binanceConnector      Binance Spot & Futures {@code aggTrades} and {@code bookTicker} WebSocket connector
-     * @param binanceStorage        daily Zstd storage manager for Binance streams
-     * @param krakenConnector       Kraken Spot trade WebSocket connector
-     * @param krakenStorage         daily Zstd storage manager for Kraken Spot trades
-     * @param coinbaseConnector     Coinbase Spot trade WebSocket connector
-     * @param coinbaseStorage       daily Zstd storage manager for Coinbase Spot trades
-     * @param polyBoltDailyStorage  daily Zstd storage manager for PolyBolt {@code price.crypto} stream
-     * @param polymarketCoordinator lifecycle coordinator for Polymarket markets
-     * @param polymarketStorage     per-market Zstd storage manager for Polymarket
-     * @param polyBoltClient        Polymarket PolyBolt v2 WebSocket client
-     * @param clobClient            Polymarket CLOB WebSocket client
-     * @param writeCoordinator      Blue-Green write mode and standby buffer coordinator
-     * @param vertx                 Vert.x instance used to bind the optional public status listener on port 443
-     * @param symbol                configured trading symbol (default BTCUSDT)
-     * @param timeframe             configured Polymarket market timeframe (default 15m)
-     * @param krakenUsdtUsdEnabled  whether to also listen and collect Kraken {@code USDTUSD} trade stream (default true)
-     * @param publicPort            optional public HTTP port for {@code /api/collector/status} bound only when ACTIVE (default 0 = disabled)
+     * @param binanceConnector                Binance {@code bookTicker} WebSocket connector (used when enabled)
+     * @param binanceStorage                  daily Zstd storage manager for Binance {@code bookTicker} streams
+     * @param polyBoltDailyStorage            daily Zstd storage manager for PolyBolt {@code price.crypto} and {@code price.crypto.twap} streams
+     * @param polymarketCoordinator           lifecycle coordinator for Polymarket markets
+     * @param polymarketStorage               per-market Zstd storage manager for Polymarket
+     * @param polyBoltClient                  Polymarket PolyBolt v2 WebSocket client
+     * @param clobClient                      Polymarket CLOB WebSocket client
+     * @param writeCoordinator                Blue-Green write mode and standby buffer coordinator
+     * @param vertx                           Vert.x instance used to bind the optional public status listener on port 443
+     * @param symbol                          configured trading symbol (default BTCUSDT)
+     * @param timeframe                       configured Polymarket market timeframe (default 15m)
+     * @param binanceSpotBookTickerEnabled    whether to connect and persist Binance Spot {@code bookTicker} (default false)
+     * @param binanceFuturesBookTickerEnabled whether to connect and persist Binance USD-M Futures {@code bookTicker} (default false)
+     * @param publicPort                      optional public HTTP port for {@code /api/collector/status} bound only when ACTIVE (default 0 = disabled)
      */
     @Inject
     public DataCollectorService(
             BinanceStreamConnector binanceConnector,
             DailyBinanceStorageManager binanceStorage,
-            KrakenStreamConnector krakenConnector,
-            DailyKrakenStorageManager krakenStorage,
-            CoinbaseStreamConnector coinbaseConnector,
-            DailyCoinbaseStorageManager coinbaseStorage,
             DailyPolyBoltStorageManager polyBoltDailyStorage,
             PolymarketLifecycleCoordinator polymarketCoordinator,
             PolymarketMarketStorageManager polymarketStorage,
@@ -113,16 +99,14 @@ public class DataCollectorService {
             String symbol,
             @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
             String timeframe,
-            @ConfigProperty(name = "polymarket.collector.kraken.usdtusd-enabled", defaultValue = "true")
-            boolean krakenUsdtUsdEnabled,
+            @ConfigProperty(name = "polymarket.collector.binance.spot-book-ticker-enabled", defaultValue = "false")
+            boolean binanceSpotBookTickerEnabled,
+            @ConfigProperty(name = "polymarket.collector.binance.futures-book-ticker-enabled", defaultValue = "false")
+            boolean binanceFuturesBookTickerEnabled,
             @ConfigProperty(name = "polymarket.collector.public-port", defaultValue = "0")
             int publicPort) {
         this.binanceConnector = binanceConnector;
         this.binanceStorage = binanceStorage;
-        this.krakenConnector = krakenConnector;
-        this.krakenStorage = krakenStorage;
-        this.coinbaseConnector = coinbaseConnector;
-        this.coinbaseStorage = coinbaseStorage;
         this.polyBoltDailyStorage = polyBoltDailyStorage;
         this.polymarketCoordinator = polymarketCoordinator;
         this.polymarketStorage = polymarketStorage;
@@ -131,20 +115,19 @@ public class DataCollectorService {
         this.writeCoordinator = writeCoordinator;
         this.vertx = vertx;
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
-        this.krakenPrimarySymbol = KrakenStreamConnector.normalizeSymbol(symbol);
         this.timeframe = timeframe;
-        this.krakenUsdtUsdEnabled = krakenUsdtUsdEnabled;
+        this.binanceSpotBookTickerEnabled = binanceSpotBookTickerEnabled;
+        this.binanceFuturesBookTickerEnabled = binanceFuturesBookTickerEnabled;
         this.publicPort = publicPort;
         this.binanceConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
-        this.krakenConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
-        this.coinbaseConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.clobClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
     }
 
     void onStart(@Observes StartupEvent event) {
-        Log.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s, krakenUsdtUsdEnabled=%s, writeMode=%s...",
-                symbol, timeframe, krakenUsdtUsdEnabled, writeCoordinator.getWriteMode());
+        Set<BinanceStreamType> enabledBinanceStreams = enabledBinanceStreams();
+        Log.infof("Starting Data Collector for symbol=%s, polymarketTimeframe=%s, binanceSpotBookTickerEnabled=%s, binanceFuturesBookTickerEnabled=%s, writeMode=%s...",
+                symbol, timeframe, binanceSpotBookTickerEnabled, binanceFuturesBookTickerEnabled, writeCoordinator.getWriteMode());
         try {
             polyBoltClient.startCryptoPriceStream(symbol, new RawWebSocketListener() {
                 @Override
@@ -172,39 +155,19 @@ public class DataCollectorService {
                     }
                 }
             });
-            binanceConnector.start(symbol, new BinanceStreamListener() {
-                @Override
-                public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-                    writeCoordinator.recordBinance(streamType, rawJson, recvTimestampMs);
-                }
+            if (!enabledBinanceStreams.isEmpty()) {
+                binanceConnector.start(symbol, enabledBinanceStreams, new BinanceStreamListener() {
+                    @Override
+                    public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+                        writeCoordinator.recordBinance(streamType, rawJson, recvTimestampMs);
+                    }
 
-                @Override
-                public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                    writeCoordinator.recordBinanceBytes(streamType, rawUtf8Bytes, recvTimestampMs);
-                }
-            });
-            krakenConnector.start(symbol, krakenUsdtUsdEnabled, new KrakenStreamListener() {
-                @Override
-                public void onStreamMessage(String normalizedSymbol, String rawJson, long recvTimestampMs) {
-                    writeCoordinator.recordKraken(normalizedSymbol, rawJson, recvTimestampMs);
-                }
-
-                @Override
-                public void onStreamFrame(String normalizedSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                    writeCoordinator.recordKrakenBytes(normalizedSymbol, rawUtf8Bytes, recvTimestampMs);
-                }
-            });
-            coinbaseConnector.start(symbol, new CoinbaseStreamListener() {
-                @Override
-                public void onStreamMessage(String normalizedSymbol, String rawJson, long recvTimestampMs) {
-                    writeCoordinator.recordCoinbase(normalizedSymbol, rawJson, recvTimestampMs);
-                }
-
-                @Override
-                public void onStreamFrame(String normalizedSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                    writeCoordinator.recordCoinbaseBytes(normalizedSymbol, rawUtf8Bytes, recvTimestampMs);
-                }
-            });
+                    @Override
+                    public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                        writeCoordinator.recordBinanceBytes(streamType, rawUtf8Bytes, recvTimestampMs);
+                    }
+                }, null);
+            }
             polymarketCoordinator.start(Instant.now().getEpochSecond());
 
             if (writeCoordinator.getWriteMode() == CollectorWriteMode.ACTIVE) {
@@ -221,8 +184,6 @@ public class DataCollectorService {
         Log.info("Shutting down Data Collector and closing Zstd streams...");
         unbindPublicPort();
         binanceConnector.stop();
-        krakenConnector.stop();
-        coinbaseConnector.stop();
         polymarketCoordinator.stop();
         polyBoltClient.stop();
         writeCoordinator.closeAll();
@@ -292,16 +253,16 @@ public class DataCollectorService {
      * @return current {@link CollectorStatusDto}
      */
     public CollectorStatusDto getStatus() {
-        Map<BinanceStreamType, ConnectionState> rawBinanceStates = binanceConnector.getConnectionStates();
+        Set<BinanceStreamType> enabledBinanceStreams = enabledBinanceStreams();
+        Map<BinanceStreamType, ConnectionState> rawBinanceStates = enabledBinanceStreams.isEmpty()
+                ? Map.of()
+                : binanceConnector.getConnectionStates();
         Map<String, String> binanceStates = new LinkedHashMap<>();
         if (rawBinanceStates != null) {
-            rawBinanceStates.forEach((type, state) -> binanceStates.put(type.name(), state.name()));
-        }
-
-        Map<String, ConnectionState> rawKrakenStates = krakenConnector.getConnectionStates();
-        Map<String, String> krakenStates = new LinkedHashMap<>();
-        if (rawKrakenStates != null) {
-            rawKrakenStates.forEach((sym, state) -> krakenStates.put(sym, state.name()));
+            for (BinanceStreamType type : enabledBinanceStreams) {
+                ConnectionState state = rawBinanceStates.get(type);
+                binanceStates.put(type.name(), state != null ? state.name() : ConnectionState.DISCONNECTED.name());
+            }
         }
 
         Map<String, ConnectionState> rawClobStates = clobClient.getConnectionStates();
@@ -310,23 +271,19 @@ public class DataCollectorService {
             rawClobStates.forEach((slug, state) -> clobStates.put(slug, state.name()));
         }
 
-        ConnectionState coinbaseState = coinbaseConnector.getState();
         ConnectionState polyBoltTwapState = polyBoltClient.getTwapState();
         ConnectionState polyBoltCryptoState = polyBoltClient.getCryptoPriceState();
         List<String> trackedSlugs = polymarketCoordinator.getTrackedMarketSlugs();
 
         long binanceWritten = binanceStorage.getTotalRecordsWritten();
-        long krakenWritten = krakenStorage.getTotalRecordsWritten();
-        long coinbaseWritten = coinbaseStorage.getTotalRecordsWritten();
         long polyBoltWritten = polyBoltDailyStorage.getTotalRecordsWritten();
         long polymarketWritten = polymarketStorage.getTotalRecordsWritten();
         long standbyBuffered = writeCoordinator.getStandbyBufferedRecords();
-        long totalProcessedOrBuffered = binanceWritten + krakenWritten + coinbaseWritten + polyBoltWritten + polymarketWritten + standbyBuffered;
+        long totalProcessedOrBuffered = binanceWritten + polyBoltWritten + polymarketWritten + standbyBuffered;
 
         boolean readyForCutover = evaluateReadyForCutover(
+                enabledBinanceStreams,
                 rawBinanceStates,
-                rawKrakenStates,
-                coinbaseState,
                 polyBoltTwapState,
                 polyBoltCryptoState,
                 trackedSlugs,
@@ -340,26 +297,33 @@ public class DataCollectorService {
                 writeCoordinator.getWriteMode().name(),
                 readyForCutover,
                 standbyBuffered,
+                binanceSpotBookTickerEnabled,
+                binanceFuturesBookTickerEnabled,
                 binanceStates,
-                krakenUsdtUsdEnabled,
-                krakenStates,
-                coinbaseState != null ? coinbaseState.name() : ConnectionState.DISCONNECTED.name(),
                 polyBoltTwapState != null ? polyBoltTwapState.name() : ConnectionState.DISCONNECTED.name(),
                 polyBoltCryptoState != null ? polyBoltCryptoState.name() : ConnectionState.DISCONNECTED.name(),
                 clobStates,
                 trackedSlugs,
                 binanceWritten,
-                krakenWritten,
-                coinbaseWritten,
                 polyBoltWritten,
                 polymarketWritten
         );
     }
 
+    private Set<BinanceStreamType> enabledBinanceStreams() {
+        EnumSet<BinanceStreamType> streams = EnumSet.noneOf(BinanceStreamType.class);
+        if (binanceSpotBookTickerEnabled) {
+            streams.add(BinanceStreamType.SPOT_BOOK_TICKER);
+        }
+        if (binanceFuturesBookTickerEnabled) {
+            streams.add(BinanceStreamType.FUTURES_BOOK_TICKER);
+        }
+        return streams;
+    }
+
     private boolean evaluateReadyForCutover(
+            Set<BinanceStreamType> enabledBinanceStreams,
             Map<BinanceStreamType, ConnectionState> binanceStates,
-            Map<String, ConnectionState> krakenStates,
-            ConnectionState coinbaseState,
             ConnectionState polyBoltTwapState,
             ConnectionState polyBoltCryptoState,
             List<String> trackedSlugs,
@@ -368,22 +332,17 @@ public class DataCollectorService {
         if (totalProcessedOrBuffered <= 0L) {
             return false;
         }
-        if (binanceStates == null) {
-            return false;
-        }
-        for (BinanceStreamType type : BinanceStreamType.values()) {
-            if (binanceStates.get(type) != ConnectionState.CONNECTED) {
+        if (!enabledBinanceStreams.isEmpty()) {
+            if (binanceStates == null) {
                 return false;
             }
+            for (BinanceStreamType type : enabledBinanceStreams) {
+                if (binanceStates.get(type) != ConnectionState.CONNECTED) {
+                    return false;
+                }
+            }
         }
-        if (krakenStates == null || krakenStates.get(krakenPrimarySymbol) != ConnectionState.CONNECTED) {
-            return false;
-        }
-        if (krakenUsdtUsdEnabled && krakenStates.get(KrakenStreamConnector.USDTUSD_SYMBOL) != ConnectionState.CONNECTED) {
-            return false;
-        }
-        if (coinbaseState != ConnectionState.CONNECTED
-                || polyBoltTwapState != ConnectionState.CONNECTED
+        if (polyBoltTwapState != ConnectionState.CONNECTED
                 || polyBoltCryptoState != ConnectionState.CONNECTED) {
             return false;
         }

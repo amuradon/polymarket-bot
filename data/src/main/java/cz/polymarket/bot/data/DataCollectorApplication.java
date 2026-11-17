@@ -5,7 +5,7 @@ import io.quarkus.runtime.annotations.QuarkusMain;
 import org.jboss.logging.Logger;
 
 /**
- * Main entry point for the standalone Polymarket & Binance Data Collector Quarkus application.
+ * Main entry point for the standalone Polymarket Data Collector Quarkus application.
  */
 @QuarkusMain
 public class DataCollectorApplication {
@@ -18,7 +18,7 @@ public class DataCollectorApplication {
      * @param args command line arguments
      */
     public static void main(String... args) {
-        LOG.info("Starting Polymarket & Binance Data Collector Application...");
+        LOG.info("Starting Polymarket Data Collector Application...");
         Quarkus.run(args);
     }
 }

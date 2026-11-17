@@ -28,8 +28,6 @@ public class CollectorWriteCoordinator {
 
     private enum EventSource {
         BINANCE,
-        KRAKEN,
-        COINBASE,
         POLYBOLT_CRYPTO_PRICE,
         POLYBOLT_TWAP,
         POLYMARKET_MARKET
@@ -46,8 +44,6 @@ public class CollectorWriteCoordinator {
     }
 
     private final DailyBinanceStorageManager binanceStorage;
-    private final DailyKrakenStorageManager krakenStorage;
-    private final DailyCoinbaseStorageManager coinbaseStorage;
     private final DailyPolyBoltStorageManager polyBoltDailyStorage;
     private final PolymarketMarketStorageManager polymarketStorage;
     private final long standbyBufferRetentionMs;
@@ -63,9 +59,7 @@ public class CollectorWriteCoordinator {
     /**
      * Constructs the write coordinator.
      *
-     * @param binanceStorage           daily Binance storage manager
-     * @param krakenStorage            daily Kraken Spot storage manager
-     * @param coinbaseStorage          daily Coinbase Spot storage manager
+     * @param binanceStorage           daily Binance {@code bookTicker} storage manager
      * @param polyBoltDailyStorage     daily PolyBolt storage manager
      * @param polymarketStorage        per-market Polymarket storage manager
      * @param initialWriteMode         initial write mode ({@code "ACTIVE"} or {@code "STANDBY"})
@@ -74,8 +68,6 @@ public class CollectorWriteCoordinator {
     @Inject
     public CollectorWriteCoordinator(
             DailyBinanceStorageManager binanceStorage,
-            DailyKrakenStorageManager krakenStorage,
-            DailyCoinbaseStorageManager coinbaseStorage,
             DailyPolyBoltStorageManager polyBoltDailyStorage,
             PolymarketMarketStorageManager polymarketStorage,
             @ConfigProperty(name = "polymarket.collector.initial-write-mode", defaultValue = "ACTIVE")
@@ -83,8 +75,6 @@ public class CollectorWriteCoordinator {
             @ConfigProperty(name = "polymarket.collector.standby-buffer-retention-ms", defaultValue = "30000")
             long standbyBufferRetentionMs) {
         this.binanceStorage = binanceStorage;
-        this.krakenStorage = krakenStorage;
-        this.coinbaseStorage = coinbaseStorage;
         this.polyBoltDailyStorage = polyBoltDailyStorage;
         this.polymarketStorage = polymarketStorage;
         this.standbyBufferRetentionMs = Math.max(1_000L, standbyBufferRetentionMs);
@@ -128,35 +118,37 @@ public class CollectorWriteCoordinator {
      */
     public long getTotalRecordsWritten() {
         return binanceStorage.getTotalRecordsWritten()
-                + krakenStorage.getTotalRecordsWritten()
-                + coinbaseStorage.getTotalRecordsWritten()
                 + polyBoltDailyStorage.getTotalRecordsWritten()
                 + polymarketStorage.getTotalRecordsWritten();
     }
 
     /**
-     * Records a Binance stream message (UTF-8 {@link String}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
+     * Records a Binance {@code bookTicker} stream message (UTF-8 {@link String}) or buffers it if in
+     * {@link CollectorWriteMode#STANDBY}.
      *
-     * @param streamType      Binance stream type
+     * @param streamType      Binance stream type ({@code SPOT_BOOK_TICKER} or {@code FUTURES_BOOK_TICKER})
      * @param rawJson         raw JSON payload
      * @param recvTimestampMs receipt timestamp in epoch milliseconds
      */
     public void recordBinance(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-        if (streamType == null || rawJson == null || rawJson.isBlank()) {
+        DailyBinanceStorageManager.validateSupportedStream(streamType);
+        if (rawJson == null || rawJson.isBlank()) {
             return;
         }
         recordBinanceBytes(streamType, rawJson.getBytes(StandardCharsets.UTF_8), recvTimestampMs);
     }
 
     /**
-     * Records a Binance stream message ({@code byte[]}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
+     * Records a Binance {@code bookTicker} stream message ({@code byte[]}) or buffers it if in
+     * {@link CollectorWriteMode#STANDBY}.
      *
-     * @param streamType      Binance stream type
+     * @param streamType      Binance stream type ({@code SPOT_BOOK_TICKER} or {@code FUTURES_BOOK_TICKER})
      * @param rawPayloadBytes raw UTF-8 JSON bytes
      * @param recvTimestampMs receipt timestamp in epoch milliseconds
      */
     public void recordBinanceBytes(BinanceStreamType streamType, byte[] rawPayloadBytes, long recvTimestampMs) {
-        if (streamType == null || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+        DailyBinanceStorageManager.validateSupportedStream(streamType);
+        if (rawPayloadBytes == null || rawPayloadBytes.length == 0) {
             return;
         }
         CollectorWriteMode currentMode = this.mode;
@@ -170,82 +162,6 @@ public class CollectorWriteCoordinator {
             return;
         }
         enqueueOrWriteStandby(new BufferedEvent(EventSource.BINANCE, streamType, null, null, rawPayloadBytes.clone(), recvTimestampMs));
-    }
-
-    /**
-     * Records a Kraken Spot trade message (UTF-8 {@link String}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
-     *
-     * @param symbol          Kraken symbol
-     * @param rawJson         raw JSON payload
-     * @param recvTimestampMs receipt timestamp in epoch milliseconds
-     */
-    public void recordKraken(String symbol, String rawJson, long recvTimestampMs) {
-        if (symbol == null || symbol.isBlank() || rawJson == null || rawJson.isBlank()) {
-            return;
-        }
-        recordKrakenBytes(symbol, rawJson.getBytes(StandardCharsets.UTF_8), recvTimestampMs);
-    }
-
-    /**
-     * Records a Kraken Spot trade message ({@code byte[]}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
-     *
-     * @param symbol          Kraken symbol
-     * @param rawPayloadBytes raw UTF-8 JSON bytes
-     * @param recvTimestampMs receipt timestamp in epoch milliseconds
-     */
-    public void recordKrakenBytes(String symbol, byte[] rawPayloadBytes, long recvTimestampMs) {
-        if (symbol == null || symbol.isBlank() || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
-            return;
-        }
-        CollectorWriteMode currentMode = this.mode;
-        if (currentMode == CollectorWriteMode.ACTIVE) {
-            if (recvTimestampMs > activationCutoffTimestampMs && recvTimestampMs <= freezeCutoffTimestampMs) {
-                krakenStorage.recordBytes(symbol, rawPayloadBytes, recvTimestampMs);
-            }
-            return;
-        }
-        if (currentMode == CollectorWriteMode.FROZEN) {
-            return;
-        }
-        enqueueOrWriteStandby(new BufferedEvent(EventSource.KRAKEN, null, symbol, null, rawPayloadBytes.clone(), recvTimestampMs));
-    }
-
-    /**
-     * Records a Coinbase Spot trade message (UTF-8 {@link String}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
-     *
-     * @param symbol          Coinbase symbol
-     * @param rawJson         raw JSON payload
-     * @param recvTimestampMs receipt timestamp in epoch milliseconds
-     */
-    public void recordCoinbase(String symbol, String rawJson, long recvTimestampMs) {
-        if (rawJson == null || rawJson.isBlank()) {
-            return;
-        }
-        recordCoinbaseBytes(symbol, rawJson.getBytes(StandardCharsets.UTF_8), recvTimestampMs);
-    }
-
-    /**
-     * Records a Coinbase Spot trade message ({@code byte[]}) or buffers it if in {@link CollectorWriteMode#STANDBY}.
-     *
-     * @param symbol          Coinbase symbol
-     * @param rawPayloadBytes raw UTF-8 JSON bytes
-     * @param recvTimestampMs receipt timestamp in epoch milliseconds
-     */
-    public void recordCoinbaseBytes(String symbol, byte[] rawPayloadBytes, long recvTimestampMs) {
-        if (rawPayloadBytes == null || rawPayloadBytes.length == 0) {
-            return;
-        }
-        CollectorWriteMode currentMode = this.mode;
-        if (currentMode == CollectorWriteMode.ACTIVE) {
-            if (recvTimestampMs > activationCutoffTimestampMs && recvTimestampMs <= freezeCutoffTimestampMs) {
-                coinbaseStorage.recordBytes(symbol, rawPayloadBytes, recvTimestampMs);
-            }
-            return;
-        }
-        if (currentMode == CollectorWriteMode.FROZEN) {
-            return;
-        }
-        enqueueOrWriteStandby(new BufferedEvent(EventSource.COINBASE, null, symbol, null, rawPayloadBytes.clone(), recvTimestampMs));
     }
 
     /**
@@ -380,8 +296,6 @@ public class CollectorWriteCoordinator {
             return;
         }
         binanceStorage.flushAll();
-        krakenStorage.flushAll();
-        coinbaseStorage.flushAll();
         polyBoltDailyStorage.flushAll();
         polymarketStorage.flushAll();
     }
@@ -394,8 +308,6 @@ public class CollectorWriteCoordinator {
             standbyBuffer.clear();
             standbyBufferedCount = 0L;
             binanceStorage.closeAll();
-            krakenStorage.closeAll();
-            coinbaseStorage.closeAll();
             polyBoltDailyStorage.closeAll();
             polymarketStorage.closeAll();
         }
@@ -415,13 +327,9 @@ public class CollectorWriteCoordinator {
             standbyBuffer.clear();
             standbyBufferedCount = 0L;
             binanceStorage.flushAll();
-            krakenStorage.flushAll();
-            coinbaseStorage.flushAll();
             polyBoltDailyStorage.flushAll();
             polymarketStorage.flushAll();
             binanceStorage.closeAll();
-            krakenStorage.closeAll();
-            coinbaseStorage.closeAll();
             polyBoltDailyStorage.closeAll();
             polymarketStorage.closeAll();
             long totalWritten = getTotalRecordsWritten();
@@ -496,8 +404,6 @@ public class CollectorWriteCoordinator {
     private void writeEventDirect(BufferedEvent ev) {
         switch (ev.source()) {
             case BINANCE -> binanceStorage.recordBytes(ev.binanceStreamType(), ev.rawPayloadBytes(), ev.recvTimestampMs());
-            case KRAKEN -> krakenStorage.recordBytes(ev.key(), ev.rawPayloadBytes(), ev.recvTimestampMs());
-            case COINBASE -> coinbaseStorage.recordBytes(ev.key(), ev.rawPayloadBytes(), ev.recvTimestampMs());
             case POLYBOLT_CRYPTO_PRICE -> polyBoltDailyStorage.recordCryptoPriceBytes(ev.rawPayloadBytes(), ev.recvTimestampMs());
             case POLYBOLT_TWAP -> polyBoltDailyStorage.recordTwapBytes(ev.rawPayloadBytes(), ev.recvTimestampMs());
             case POLYMARKET_MARKET -> polymarketStorage.recordMarketEventBytes(ev.key(), ev.recvTimestampMs(), ev.eventType(), ev.rawPayloadBytes());

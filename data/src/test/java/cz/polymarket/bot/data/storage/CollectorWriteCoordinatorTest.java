@@ -39,19 +39,19 @@ class CollectorWriteCoordinatorTest {
         assertThat(coordinator.getWriteMode()).isEqualTo(CollectorWriteMode.STANDBY);
 
         coordinator.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":1,\"p\":\"90000.0\"}".getBytes(StandardCharsets.UTF_8),
+                BinanceStreamType.SPOT_BOOK_TICKER,
+                "{\"u\":1,\"b\":\"90000.0\"}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS
         );
-        coordinator.recordKrakenBytes(
-                "BTCUSD",
-                "{\"symbol\":\"BTC/USD\",\"price\":90001.0}".getBytes(StandardCharsets.UTF_8),
+        coordinator.recordPolyBoltTwapBytes(
+                "{\"channel\":\"price.crypto.twap\",\"value\":90001.0}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 1_000L
         );
-        coordinator.recordCoinbaseBytes(
-                "BTCUSD",
-                "{\"product_id\":\"BTC-USD\",\"price\":\"90002.0\"}".getBytes(StandardCharsets.UTF_8),
-                BASE_TS_MS + 2_000L
+        coordinator.recordPolymarketEventBytes(
+                "btc-updown-15m-1794828600",
+                BASE_TS_MS + 2_000L,
+                "clob",
+                "{\"seq\":1}".getBytes(StandardCharsets.UTF_8)
         );
 
         // Flush in STANDBY must be a no-op on disk
@@ -71,23 +71,30 @@ class CollectorWriteCoordinatorTest {
     }
 
     @Test
-    void shouldPerformSeamlessBlueGreenCutoverWithZeroLossAndZeroDuplicates() throws Exception {
+    void shouldPerformSeamlessBlueGreenCutoverFromFullOldSlotToPolymarketOnlyNewSlotWithZeroLossAndZeroDuplicates() throws Exception {
         CollectorWriteCoordinator blue = createCoordinator(tempDir, "ACTIVE", 30_000L);
         CollectorWriteCoordinator green = createCoordinator(tempDir, "STANDBY", 30_000L);
 
         String slugExisting = "btc-updown-15m-1794828600";
         String slugNewInGreen = "btc-updown-15m-1794829500";
 
-        // 1. Blue discovers existing market and records events up to t = BASE_TS_MS + 200
+        // 1. Blue (simulating previous deployment still recording bookTicker + PolyBolt + CLOB) records up to t = BASE_TS_MS + 200
         blue.recordPolymarketEvent(slugExisting, BASE_TS_MS, "market_discovered", "{\"slug\":\"" + slugExisting + "\"}");
         blue.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":101}".getBytes(StandardCharsets.UTF_8),
+                BinanceStreamType.SPOT_BOOK_TICKER,
+                "{\"u\":101}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 100L
         );
-        blue.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":102}".getBytes(StandardCharsets.UTF_8),
+        blue.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":1}".getBytes(StandardCharsets.UTF_8),
+                BASE_TS_MS + 100L
+        );
+        blue.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":2}".getBytes(StandardCharsets.UTF_8),
+                BASE_TS_MS + 200L
+        );
+        blue.recordPolyBoltTwapBytes(
+                "{\"channel\":\"price.crypto.twap\",\"seq\":10}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 200L
         );
         blue.recordPolymarketEventBytes(
@@ -97,23 +104,28 @@ class CollectorWriteCoordinatorTest {
                 "{\"seq\":1}".getBytes(StandardCharsets.UTF_8)
         );
 
-        // 2. Green is warming up in STANDBY concurrently, receiving overlapping events (100, 200) and newer events (300, 400)
+        // 2. Green (new deployment with bookTicker disabled) warms up in STANDBY receiving only PolyBolt + CLOB
         green.recordPolymarketEvent(slugExisting, BASE_TS_MS + 50L, "market_discovered", "{\"slug\":\"" + slugExisting + "\"}");
         green.recordPolymarketEvent(slugNewInGreen, BASE_TS_MS + 60L, "market_discovered", "{\"slug\":\"" + slugNewInGreen + "\"}");
 
-        green.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":101}".getBytes(StandardCharsets.UTF_8),
+        green.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":1}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 100L
         );
-        green.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":102}".getBytes(StandardCharsets.UTF_8),
+        green.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":2}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 200L
         );
-        green.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":103}".getBytes(StandardCharsets.UTF_8),
+        green.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":3}".getBytes(StandardCharsets.UTF_8),
+                BASE_TS_MS + 300L
+        );
+        green.recordPolyBoltTwapBytes(
+                "{\"channel\":\"price.crypto.twap\",\"seq\":10}".getBytes(StandardCharsets.UTF_8),
+                BASE_TS_MS + 200L
+        );
+        green.recordPolyBoltTwapBytes(
+                "{\"channel\":\"price.crypto.twap\",\"seq\":11}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 300L
         );
         green.recordPolymarketEventBytes(
@@ -136,9 +148,8 @@ class CollectorWriteCoordinatorTest {
         assertThat(freezeResp.cutoverTimestampMs()).isEqualTo(cutoverTs);
 
         // Late event arriving at Blue after freeze must be ignored
-        blue.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":999}".getBytes(StandardCharsets.UTF_8),
+        blue.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":999}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 250L
         );
 
@@ -146,15 +157,14 @@ class CollectorWriteCoordinatorTest {
         CutoverActivateResponseDto activateResp = green.activate(cutoverTs);
         assertThat(activateResp.writeMode()).isEqualTo("ACTIVE");
         assertThat(activateResp.activatedAfterTimestampMs()).isEqualTo(cutoverTs);
-        // Replayed: a=103 (ts+300), seq=2 (ts+300), plus market_discovered for slugNewInGreen (since file didn't exist)
-        assertThat(activateResp.replayedRecords()).isEqualTo(3L);
-        // Dropped duplicates: market_discovered for slugExisting (file already existed from Blue), a=101, a=102, seq=1
-        assertThat(activateResp.droppedDuplicateRecords()).isEqualTo(4L);
+        // Replayed: price.crypto seq=3 (ts+300), twap seq=11 (ts+300), clob seq=2 (ts+300), plus market_discovered for slugNewInGreen
+        assertThat(activateResp.replayedRecords()).isEqualTo(4L);
+        // Dropped duplicates: market_discovered for slugExisting, crypto seq=1,2, twap seq=10, clob seq=1
+        assertThat(activateResp.droppedDuplicateRecords()).isEqualTo(5L);
 
-        // 5. Green continues writing live events in ACTIVE mode
-        green.recordBinanceBytes(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"a\":104}".getBytes(StandardCharsets.UTF_8),
+        // 5. Green continues writing live PolyBolt + CLOB events in ACTIVE mode
+        green.recordPolyBoltCryptoPriceBytes(
+                "{\"channel\":\"price.crypto\",\"seq\":4}".getBytes(StandardCharsets.UTF_8),
                 BASE_TS_MS + 400L
         );
         green.recordPolymarketEventBytes(
@@ -165,18 +175,30 @@ class CollectorWriteCoordinatorTest {
         );
         green.closeAll();
 
-        // 6. Verify concatenated Zstandard frames in Binance file contain exact chronological sequence 101, 102, 103, 104
+        // 6. Verify Blue's Binance bookTicker file was flushed and closed cleanly at freeze
         DailyBinanceStorageManager helperBinance = new DailyBinanceStorageManager(tempDir.toString(), "BTCUSDT");
-        Path binanceFile = helperBinance.resolveDailyFilePath(BinanceStreamType.SPOT_AGG_TRADES, BASE_UTC_DATE);
-        List<String> binanceLines = readZstLines(binanceFile);
-        assertThat(binanceLines).containsExactly(
-                "{\"ts\":" + (BASE_TS_MS + 100L) + ",\"payload\":{\"a\":101}}",
-                "{\"ts\":" + (BASE_TS_MS + 200L) + ",\"payload\":{\"a\":102}}",
-                "{\"ts\":" + (BASE_TS_MS + 300L) + ",\"payload\":{\"a\":103}}",
-                "{\"ts\":" + (BASE_TS_MS + 400L) + ",\"payload\":{\"a\":104}}"
+        Path binanceFile = helperBinance.resolveDailyFilePath(BinanceStreamType.SPOT_BOOK_TICKER, BASE_UTC_DATE);
+        assertThat(readZstLines(binanceFile)).containsExactly(
+                "{\"ts\":" + (BASE_TS_MS + 100L) + ",\"payload\":{\"u\":101}}"
         );
 
-        // 7. Verify existing Polymarket market file has 1 market_discovered and seq 1, 2, 3 without duplicates
+        // 7. Verify concatenated Zstandard frames in PolyBolt price_crypto file contain exact sequence 1, 2, 3, 4 without duplicates
+        DailyPolyBoltStorageManager helperPolyBolt = new DailyPolyBoltStorageManager(tempDir.toString(), "BTCUSDT");
+        Path cryptoFile = helperPolyBolt.resolveDailyFilePath("price_crypto", BASE_UTC_DATE);
+        assertThat(readZstLines(cryptoFile)).containsExactly(
+                "{\"ts\":" + (BASE_TS_MS + 100L) + ",\"payload\":{\"channel\":\"price.crypto\",\"seq\":1}}",
+                "{\"ts\":" + (BASE_TS_MS + 200L) + ",\"payload\":{\"channel\":\"price.crypto\",\"seq\":2}}",
+                "{\"ts\":" + (BASE_TS_MS + 300L) + ",\"payload\":{\"channel\":\"price.crypto\",\"seq\":3}}",
+                "{\"ts\":" + (BASE_TS_MS + 400L) + ",\"payload\":{\"channel\":\"price.crypto\",\"seq\":4}}"
+        );
+
+        Path twapFile = helperPolyBolt.resolveDailyFilePath("price_crypto_twap_60s", BASE_UTC_DATE);
+        assertThat(readZstLines(twapFile)).containsExactly(
+                "{\"ts\":" + (BASE_TS_MS + 200L) + ",\"payload\":{\"channel\":\"price.crypto.twap\",\"seq\":10}}",
+                "{\"ts\":" + (BASE_TS_MS + 300L) + ",\"payload\":{\"channel\":\"price.crypto.twap\",\"seq\":11}}"
+        );
+
+        // 8. Verify existing Polymarket market file has 1 market_discovered and seq 1, 2, 3 without duplicates
         PolymarketMarketStorageManager helperPoly = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
         Path existingMarketFile = helperPoly.resolveMarketFilePath(slugExisting);
         List<String> existingMarketLines = readZstLines(existingMarketFile);
@@ -187,7 +209,7 @@ class CollectorWriteCoordinatorTest {
                 "{\"ts\":" + (BASE_TS_MS + 400L) + ",\"type\":\"clob\",\"payload\":{\"seq\":3}}"
         );
 
-        // 8. Verify brand-new Polymarket market file discovered by Green during STANDBY has its market_discovered written
+        // 9. Verify brand-new Polymarket market file discovered by Green during STANDBY has its market_discovered written
         Path newMarketFile = helperPoly.resolveMarketFilePath(slugNewInGreen);
         List<String> newMarketLines = readZstLines(newMarketFile);
         assertThat(newMarketLines).containsExactly(
@@ -199,8 +221,6 @@ class CollectorWriteCoordinatorTest {
         String dirStr = dir.toString();
         return new CollectorWriteCoordinator(
                 new DailyBinanceStorageManager(dirStr, "BTCUSDT"),
-                new DailyKrakenStorageManager(dirStr, "BTCUSDT"),
-                new DailyCoinbaseStorageManager(dirStr, "BTCUSDT"),
                 new DailyPolyBoltStorageManager(dirStr, "BTCUSDT"),
                 new PolymarketMarketStorageManager(dirStr, "BTCUSDT", "15m"),
                 initialMode,

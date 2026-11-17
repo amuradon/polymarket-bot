@@ -10,8 +10,6 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.data.storage.CollectorWriteCoordinator;
 import cz.polymarket.bot.data.storage.DailyBinanceStorageManager;
-import cz.polymarket.bot.data.storage.DailyCoinbaseStorageManager;
-import cz.polymarket.bot.data.storage.DailyKrakenStorageManager;
 import cz.polymarket.bot.data.storage.DailyPolyBoltStorageManager;
 import cz.polymarket.bot.data.storage.PolymarketMarketStorageManager;
 import org.junit.jupiter.api.Test;
@@ -300,8 +298,6 @@ class PolymarketLifecycleCoordinatorTest {
         String dirStr = dir.toString();
         return new CollectorWriteCoordinator(
                 new DailyBinanceStorageManager(dirStr, "BTCUSDT"),
-                new DailyKrakenStorageManager(dirStr, "BTCUSDT"),
-                new DailyCoinbaseStorageManager(dirStr, "BTCUSDT"),
                 new DailyPolyBoltStorageManager(dirStr, "BTCUSDT"),
                 new PolymarketMarketStorageManager(dirStr, "BTCUSDT", "15m"),
                 "ACTIVE",

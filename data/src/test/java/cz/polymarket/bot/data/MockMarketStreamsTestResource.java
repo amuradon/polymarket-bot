@@ -3,6 +3,7 @@ package cz.polymarket.bot.data;
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.ServerWebSocket;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -15,12 +16,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 /**
- * Quarkus test resource starting an embedded Vert.x server that mocks all external streams:
+ * Quarkus test resource starting an embedded Vert.x server that mocks external streams used by the Data Collector:
  * <ul>
- *   <li>Binance Spot WebSockets ({@code @aggTrade}, {@code @bookTicker})</li>
- *   <li>Binance Futures WebSockets ({@code @aggTrade}, {@code @bookTicker})</li>
- *   <li>Kraken Spot v2 WebSocket ({@code /kraken/ws/v2})</li>
- *   <li>Coinbase Exchange Spot WebSocket ({@code /coinbase/ws})</li>
+ *   <li>Binance Spot WebSocket ({@code @bookTicker})</li>
+ *   <li>Binance Futures WebSocket ({@code @bookTicker})</li>
  *   <li>Polymarket Gamma HTTP API ({@code /gamma/markets/slug/...})</li>
  *   <li>Polymarket PolyBolt v2 WebSocket ({@code /polybolt/ws}) with mandatory {@code auth} -> {@code authed} -> {@code subscribe} handshake</li>
  *   <li>Polymarket CLOB WebSocket ({@code /clob/ws/market})</li>
@@ -43,6 +42,10 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
         vertx = Vertx.vertx();
         server = vertx.createHttpServer()
                 .requestHandler(req -> {
+                    if ("websocket".equalsIgnoreCase(req.getHeader("Upgrade"))) {
+                        req.toWebSocket().onSuccess(this::handleWebSocket);
+                        return;
+                    }
                     String reqPath = req.path();
                     String prefix = "/gamma/markets/slug/";
                     if (reqPath.startsWith(prefix) && reqPath.length() > prefix.length()) {
@@ -63,66 +66,6 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                         }
                     }
                     req.response().setStatusCode(404).end();
-                })
-                .webSocketHandler(ws -> {
-                    String path = ws.path();
-                    if (path.startsWith("/binance/spot/")) {
-                        if (path.endsWith("@aggTrade")) {
-                            ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600100,\"s\":\"BTCUSDT\",\"a\":1001,\"p\":\"78450.10\",\"q\":\"0.25\",\"m\":false}");
-                        } else if (path.endsWith("@bookTicker")) {
-                            ws.writeTextMessage("{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"78450.00\",\"B\":\"1.25\",\"a\":\"78450.10\",\"A\":\"0.80\"}");
-                        }
-                    } else if (path.startsWith("/binance/futures/")) {
-                        if (path.endsWith("@aggTrade")) {
-                            ws.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1789041600110,\"s\":\"BTCUSDT\",\"a\":2001,\"p\":\"78451.00\",\"q\":\"1.50\",\"m\":true}");
-                        } else if (path.endsWith("@bookTicker")) {
-                            ws.writeTextMessage("{\"e\":\"bookTicker\",\"u\":400900218,\"s\":\"BTCUSDT\",\"b\":\"78450.50\",\"B\":\"2.50\",\"a\":\"78451.00\",\"A\":\"1.75\",\"T\":1789041600115,\"E\":1789041600116}");
-                        }
-                    } else if (path.equals("/polybolt/ws")) {
-                        AtomicBoolean authed = new AtomicBoolean(false);
-                        ws.textMessageHandler(msg -> {
-                            if (msg.contains("\"op\":\"auth\"") && msg.contains("\"apiKey\":\"test-api-key\"")) {
-                                authed.set(true);
-                                ws.writeTextMessage("{\"op\":\"authed\",\"rid\":\"a1\"}");
-                            } else if (msg.contains("\"op\":\"subscribe\"")) {
-                                if (!authed.get()) {
-                                    ws.writeTextMessage("{\"op\":\"error\",\"code\":\"auth_required\",\"rid\":\"s1\"}");
-                                } else if (msg.contains("\"channel\":\"price.crypto.twap\"")) {
-                                    ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto.twap\",\"rid\":\"s1\"}");
-                                    ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":1,\"ts\":1789041600200,\"payload\":{\"symbol\":\"btcusd\",\"value\":78450.5,\"full_accuracy_value\":\"78450.50000000\",\"timestamp\":1789041600200,\"source\":\"chainlink\",\"window_seconds\":60}}");
-                                } else if (msg.contains("\"channel\":\"price.crypto\"")) {
-                                    ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto\",\"rid\":\"s1\"}");
-                                    ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":1,\"ts\":1789041600200,\"payload\":{\"symbol\":\"btcusd\",\"value\":78460.0,\"full_accuracy_value\":\"78460.00000000\",\"timestamp\":1789041600200,\"source\":\"chainlink\"}}");
-                                }
-                            }
-                        });
-                    } else if (path.equals("/clob/ws/market")) {
-                        ws.textMessageHandler(msg -> {
-                            if (msg.contains("\"type\":\"market\"")) {
-                                ws.writeTextMessage("[{\"event_type\":\"book\",\"bids\":[{\"price\":\"0.49\",\"size\":\"100\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"100\"}]}]");
-                                ws.writeTextMessage("{\"event_type\":\"last_trade_price\",\"price\":\"0.50\",\"size\":\"25\",\"side\":\"BUY\"}");
-                            }
-                        });
-                    } else if (path.equals("/kraken/ws/v2")) {
-                        ws.textMessageHandler(msg -> {
-                            if (msg.contains("\"method\":\"subscribe\"") && msg.contains("\"channel\":\"trade\"")) {
-                                if (msg.contains("\"USDT/USD\"")) {
-                                    ws.writeTextMessage("{\"method\":\"subscribe\",\"result\":{\"channel\":\"trade\",\"symbol\":\"USDT/USD\"},\"success\":true}");
-                                    ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"buy\",\"price\":1.0001,\"qty\":500.0,\"ord_type\":\"limit\",\"trade_id\":9001,\"timestamp\":\"2026-11-13T00:00:00.127740Z\"}]}");
-                                } else if (msg.contains("\"BTC/USD\"")) {
-                                    ws.writeTextMessage("{\"method\":\"subscribe\",\"result\":{\"channel\":\"trade\",\"symbol\":\"BTC/USD\"},\"success\":true}");
-                                    ws.writeTextMessage("{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"sell\",\"price\":78450.0,\"qty\":0.05,\"ord_type\":\"market\",\"trade_id\":9002,\"timestamp\":\"2026-11-13T00:00:00.250000Z\"}]}");
-                                }
-                            }
-                        });
-                    } else if (path.equals("/coinbase/ws")) {
-                        ws.textMessageHandler(msg -> {
-                            if (msg.contains("\"type\":\"subscribe\"") && msg.contains("\"matches\"") && msg.contains("\"BTC-USD\"")) {
-                                ws.writeTextMessage("{\"type\":\"subscriptions\",\"channels\":[{\"name\":\"matches\",\"product_ids\":[\"BTC-USD\"]}]}");
-                                ws.writeTextMessage("{\"type\":\"match\",\"trade_id\":8001,\"maker_order_id\":\"m1\",\"taker_order_id\":\"t1\",\"side\":\"buy\",\"size\":\"0.12000000\",\"price\":\"78455.25\",\"product_id\":\"BTC-USD\",\"sequence\":123456,\"time\":\"2026-11-13T00:00:00.090223Z\"}");
-                            }
-                        });
-                    }
                 });
 
         try {
@@ -133,8 +76,6 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     Map.entry("polymarket.collector.flush-interval", "1s"),
                     Map.entry("polymarket.connector.binance.spot-ws-base-url", "ws://localhost:" + port + "/binance/spot"),
                     Map.entry("polymarket.connector.binance.futures-ws-base-url", "ws://localhost:" + port + "/binance/futures"),
-                    Map.entry("polymarket.connector.kraken.spot-ws-url", "ws://localhost:" + port + "/kraken/ws/v2"),
-                    Map.entry("polymarket.connector.coinbase.spot-ws-url", "ws://localhost:" + port + "/coinbase/ws"),
                     Map.entry("polymarket.connector.gamma.base-url", "http://localhost:" + port + "/gamma"),
                     Map.entry("polymarket.connector.polybolt.ws-url", "ws://localhost:" + port + "/polybolt/ws"),
                     Map.entry("polymarket.connector.clob.ws-url", "ws://localhost:" + port + "/clob/ws/market"),
@@ -144,6 +85,40 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
             );
         } catch (Exception e) {
             throw new RuntimeException("Failed to start MockMarketStreamsTestResource", e);
+        }
+    }
+
+    private void handleWebSocket(ServerWebSocket ws) {
+        String path = ws.path();
+        if (path.startsWith("/binance/spot/") && path.endsWith("@bookTicker")) {
+            ws.writeTextMessage("{\"u\":400900217,\"s\":\"BTCUSDT\",\"b\":\"78450.00\",\"B\":\"1.25\",\"a\":\"78450.10\",\"A\":\"0.80\"}");
+        } else if (path.startsWith("/binance/futures/") && path.endsWith("@bookTicker")) {
+            ws.writeTextMessage("{\"e\":\"bookTicker\",\"u\":400900218,\"s\":\"BTCUSDT\",\"b\":\"78450.50\",\"B\":\"2.50\",\"a\":\"78451.00\",\"A\":\"1.75\",\"T\":1789041600115,\"E\":1789041600116}");
+        } else if (path.equals("/polybolt/ws")) {
+            AtomicBoolean authed = new AtomicBoolean(false);
+            ws.textMessageHandler(msg -> {
+                if (msg.contains("\"op\":\"auth\"") && msg.contains("\"apiKey\":\"test-api-key\"")) {
+                    authed.set(true);
+                    ws.writeTextMessage("{\"op\":\"authed\",\"rid\":\"a1\"}");
+                } else if (msg.contains("\"op\":\"subscribe\"")) {
+                    if (!authed.get()) {
+                        ws.writeTextMessage("{\"op\":\"error\",\"code\":\"auth_required\",\"rid\":\"s1\"}");
+                    } else if (msg.contains("\"channel\":\"price.crypto.twap\"")) {
+                        ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto.twap\",\"rid\":\"s1\"}");
+                        ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":1,\"ts\":1789041600200,\"payload\":{\"symbol\":\"btcusd\",\"value\":78450.5,\"full_accuracy_value\":\"78450.50000000\",\"timestamp\":1789041600200,\"source\":\"chainlink\",\"window_seconds\":60}}");
+                    } else if (msg.contains("\"channel\":\"price.crypto\"")) {
+                        ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto\",\"rid\":\"s1\"}");
+                        ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":1,\"ts\":1789041600200,\"payload\":{\"symbol\":\"btcusd\",\"value\":78460.0,\"full_accuracy_value\":\"78460.00000000\",\"timestamp\":1789041600200,\"source\":\"chainlink\"}}");
+                    }
+                }
+            });
+        } else if (path.equals("/clob/ws/market")) {
+            ws.textMessageHandler(msg -> {
+                if (msg.contains("\"type\":\"market\"")) {
+                    ws.writeTextMessage("[{\"event_type\":\"book\",\"bids\":[{\"price\":\"0.49\",\"size\":\"100\"}],\"asks\":[{\"price\":\"0.51\",\"size\":\"100\"}]}]");
+                    ws.writeTextMessage("{\"event_type\":\"last_trade_price\",\"price\":\"0.50\",\"size\":\"25\",\"side\":\"BUY\"}");
+                }
+            });
         }
     }
 

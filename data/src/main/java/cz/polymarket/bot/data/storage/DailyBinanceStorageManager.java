@@ -14,19 +14,26 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for each of the 4 Binance
- * ({@code aggTrades} and {@code bookTicker} for Spot and USD-M Futures) streams,
- * automatically rotating files at UTC midnight with per-stream lock isolation and zero-decode {@code byte[]} writing.
+ * Manages daily Zstandard streaming JSONL files ({@code .jsonl.zst}) for Binance Spot and USD-M Futures
+ * {@code bookTicker} streams ({@link BinanceStreamType#SPOT_BOOK_TICKER} and
+ * {@link BinanceStreamType#FUTURES_BOOK_TICKER}), automatically rotating files at UTC midnight with
+ * per-stream lock isolation and zero-decode {@code byte[]} writing.
  */
 @ApplicationScoped
 public class DailyBinanceStorageManager {
 
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    private static final Set<BinanceStreamType> SUPPORTED_STREAMS = EnumSet.of(
+            BinanceStreamType.SPOT_BOOK_TICKER,
+            BinanceStreamType.FUTURES_BOOK_TICKER
+    );
 
     private final Path baseDataDir;
     private final String symbol;
@@ -51,21 +58,22 @@ public class DailyBinanceStorageManager {
             String symbol) {
         this.baseDataDir = Path.of(dataDirStr);
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
-        for (BinanceStreamType type : BinanceStreamType.values()) {
+        for (BinanceStreamType type : SUPPORTED_STREAMS) {
             this.streamLocks.put(type, new Object());
         }
     }
 
     /**
-     * Records a raw Binance stream message into the stream's corresponding UTC daily {@code .jsonl.zst} file.
-     * Automatically rotates to a new file when the UTC date advances.
+     * Records a raw Binance {@code bookTicker} stream message into the stream's corresponding UTC daily
+     * {@code .jsonl.zst} file. Automatically rotates to a new file when the UTC date advances.
      *
-     * @param streamType      Binance stream type
+     * @param streamType      Binance stream type ({@code SPOT_BOOK_TICKER} or {@code FUTURES_BOOK_TICKER})
      * @param rawJson         unmodified raw WebSocket JSON payload
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
     public void record(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-        if (streamType == null || rawJson == null || rawJson.isBlank()) {
+        validateSupportedStream(streamType);
+        if (rawJson == null || rawJson.isBlank()) {
             return;
         }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
@@ -81,15 +89,16 @@ public class DailyBinanceStorageManager {
     }
 
     /**
-     * Records a raw UTF-8 {@code byte[]} Binance stream payload directly into the stream's corresponding
-     * UTC daily {@code .jsonl.zst} file without allocating a {@link String}.
+     * Records a raw UTF-8 {@code byte[]} Binance {@code bookTicker} stream payload directly into the stream's
+     * corresponding UTC daily {@code .jsonl.zst} file without allocating a {@link String}.
      *
-     * @param streamType      Binance stream type
+     * @param streamType      Binance stream type ({@code SPOT_BOOK_TICKER} or {@code FUTURES_BOOK_TICKER})
      * @param rawPayloadBytes unmodified raw UTF-8 JSON bytes from the WebSocket frame
      * @param recvTimestampMs local receipt timestamp in epoch milliseconds
      */
     public void recordBytes(BinanceStreamType streamType, byte[] rawPayloadBytes, long recvTimestampMs) {
-        if (streamType == null || rawPayloadBytes == null || rawPayloadBytes.length == 0) {
+        validateSupportedStream(streamType);
+        if (rawPayloadBytes == null || rawPayloadBytes.length == 0) {
             return;
         }
         LocalDate utcDate = Instant.ofEpochMilli(recvTimestampMs).atZone(ZoneOffset.UTC).toLocalDate();
@@ -108,7 +117,7 @@ public class DailyBinanceStorageManager {
      * Flushes all currently open daily Binance stream writers to disk.
      */
     public void flushAll() {
-        for (BinanceStreamType type : BinanceStreamType.values()) {
+        for (BinanceStreamType type : SUPPORTED_STREAMS) {
             synchronized (streamLocks.get(type)) {
                 ActiveDailyWriter active = activeWriters.get(type);
                 if (active != null) {
@@ -126,7 +135,7 @@ public class DailyBinanceStorageManager {
      * Closes all open daily Binance stream writers cleanly.
      */
     public void closeAll() {
-        for (BinanceStreamType type : BinanceStreamType.values()) {
+        for (BinanceStreamType type : SUPPORTED_STREAMS) {
             synchronized (streamLocks.get(type)) {
                 ActiveDailyWriter active = activeWriters.remove(type);
                 if (active != null) {
@@ -141,13 +150,14 @@ public class DailyBinanceStorageManager {
     }
 
     /**
-     * Resolves the daily file path for a specific Binance stream type and UTC date.
+     * Resolves the daily file path for a supported Binance {@code bookTicker} stream type and UTC date.
      *
-     * @param streamType Binance stream type
+     * @param streamType Binance stream type ({@code SPOT_BOOK_TICKER} or {@code FUTURES_BOOK_TICKER})
      * @param utcDate    UTC date
      * @return path to the {@code .jsonl.zst} file
      */
     public Path resolveDailyFilePath(BinanceStreamType streamType, LocalDate utcDate) {
+        validateSupportedStream(streamType);
         String dateStr = utcDate.format(UTC_DATE_FORMATTER);
         String filename = symbol + "-" + streamType.getStreamFolder() + "-" + dateStr + ".jsonl.zst";
         return baseDataDir
@@ -156,6 +166,13 @@ public class DailyBinanceStorageManager {
                 .resolve(symbol)
                 .resolve(streamType.getStreamFolder())
                 .resolve(filename);
+    }
+
+    static void validateSupportedStream(BinanceStreamType streamType) {
+        if (streamType == null || !SUPPORTED_STREAMS.contains(streamType)) {
+            throw new IllegalArgumentException("Unsupported Binance collector stream type: " + streamType
+                    + " (only SPOT_BOOK_TICKER and FUTURES_BOOK_TICKER are supported)");
+        }
     }
 
     /**
