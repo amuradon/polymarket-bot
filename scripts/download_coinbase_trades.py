@@ -10,7 +10,6 @@ Default dir:
   D:\\Crypto\\data\\Polymarket\\collector\\coinbase\\spot
 
 Parquet schema:
-  - ts: uint64              (trade_timestamp + latency_ms, default +15ms)
   - trade_timestamp: uint64 (exchange trade time in epoch milliseconds)
   - symbol: string          (Coinbase product ID, e.g. "BTC-USD")
   - trade_id: int64         (unique sequential Coinbase trade ID)
@@ -39,7 +38,6 @@ COINBASE_API_BASE_URL = "https://api.exchange.coinbase.com"
 
 COINBASE_TRADES_PARQUET_SCHEMA = pa.schema(
     [
-        ("ts", pa.uint64()),
         ("trade_timestamp", pa.uint64()),
         ("symbol", pa.string()),
         ("trade_id", pa.int64()),
@@ -65,7 +63,6 @@ class DailyColumnBuffer:
     """
 
     __slots__ = (
-        "ts",
         "trade_timestamp",
         "trade_id",
         "side",
@@ -75,7 +72,6 @@ class DailyColumnBuffer:
     )
 
     def __init__(self) -> None:
-        self.ts: list[int] = []
         self.trade_timestamp: list[int] = []
         self.trade_id: list[int] = []
         self.side: list[str] = []
@@ -85,7 +81,6 @@ class DailyColumnBuffer:
 
     def append(
         self,
-        ts: int,
         trade_timestamp: int,
         trade_id: int,
         side: str,
@@ -93,7 +88,6 @@ class DailyColumnBuffer:
         qty: float,
         timestamp: str,
     ) -> None:
-        self.ts.append(ts)
         self.trade_timestamp.append(trade_timestamp)
         self.trade_id.append(trade_id)
         self.side.append(side)
@@ -102,11 +96,11 @@ class DailyColumnBuffer:
         self.timestamp.append(timestamp)
 
     def __len__(self) -> int:
-        return len(self.ts)
+        return len(self.trade_timestamp)
 
     def to_sorted_arrow_table(self, product_id: str) -> pa.Table:
-        """Constructs a PyArrow Table sorted by (ts ASC, trade_id ASC)."""
-        n = len(self.ts)
+        """Constructs a PyArrow Table sorted by (trade_timestamp ASC, trade_id ASC)."""
+        n = len(self.trade_timestamp)
         if n == 0:
             return pa.Table.from_pydict(
                 {field.name: [] for field in COINBASE_TRADES_PARQUET_SCHEMA},
@@ -116,7 +110,6 @@ class DailyColumnBuffer:
         # Since Coinbase pagination walks backwards (newest to oldest), reversing
         # often yields an already ascending sequence in O(N) before checking sort order.
         if n > 1 and self.trade_id[0] > self.trade_id[-1]:
-            self.ts.reverse()
             self.trade_timestamp.reverse()
             self.trade_id.reverse()
             self.side.reverse()
@@ -125,17 +118,16 @@ class DailyColumnBuffer:
             self.timestamp.reverse()
 
         is_sorted = True
-        ts_list = self.ts
+        trade_ts_list = self.trade_timestamp
         tid_list = self.trade_id
         for i in range(1, n):
-            prev_ts = ts_list[i - 1]
-            curr_ts = ts_list[i]
+            prev_ts = trade_ts_list[i - 1]
+            curr_ts = trade_ts_list[i]
             if curr_ts < prev_ts or (curr_ts == prev_ts and tid_list[i] < tid_list[i - 1]):
                 is_sorted = False
                 break
 
         if is_sorted:
-            ts_col = self.ts
             trade_ts_col = self.trade_timestamp
             tid_col = self.trade_id
             side_col = self.side
@@ -143,8 +135,7 @@ class DailyColumnBuffer:
             qty_col = self.qty
             iso_col = self.timestamp
         else:
-            order = sorted(range(n), key=lambda i: (ts_list[i], tid_list[i]))
-            ts_col = [self.ts[i] for i in order]
+            order = sorted(range(n), key=lambda i: (trade_ts_list[i], tid_list[i]))
             trade_ts_col = [self.trade_timestamp[i] for i in order]
             tid_col = [self.trade_id[i] for i in order]
             side_col = [self.side[i] for i in order]
@@ -154,7 +145,6 @@ class DailyColumnBuffer:
 
         return pa.Table.from_arrays(
             [
-                pa.array(ts_col, type=pa.uint64()),
                 pa.array(trade_ts_col, type=pa.uint64()),
                 pa.repeat(pa.scalar(product_id, type=pa.string()), n),
                 pa.array(tid_col, type=pa.int64()),
@@ -190,10 +180,10 @@ def normalize_coinbase_product_id(symbol: str) -> str:
     return raw
 
 
-def parse_coinbase_time_to_ms(iso_str: str, latency_ms: int) -> tuple[int, int, str]:
+def parse_coinbase_time_to_ms(iso_str: str) -> tuple[int, str]:
     """
     Parses Coinbase ISO-8601 UTC timestamp string (e.g. '2026-11-10T00:00:00.139360Z')
-    into (ts_ms, trade_timestamp_ms, canonical_iso_str).
+    into (trade_timestamp_ms, canonical_iso_str).
     """
     s = iso_str.strip()
     if s.endswith("Z"):
@@ -205,9 +195,8 @@ def parse_coinbase_time_to_ms(iso_str: str, latency_ms: int) -> tuple[int, int, 
 
     epoch_us = int(round(dt.timestamp() * 1_000_000))
     trade_ts_ms = epoch_us // 1_000
-    ts_ms = trade_ts_ms + latency_ms
     canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    return ts_ms, trade_ts_ms, canonical_iso
+    return trade_ts_ms, canonical_iso
 
 
 def compute_rate_limit_delay(headers: Mapping[str, str], default_delay: float = 0.10) -> float:
@@ -337,12 +326,11 @@ def find_trade_id_at_or_after_ts(
     product_id: str,
     target_ts_ms: int,
     latest_trade_id: int,
-    latency_ms: int,
     base_delay: float = 0.05,
 ) -> int:
     """
     Uses binary search over sequential Coinbase trade_id in [1, latest_trade_id]
-    to find the smallest trade_id whose `ts = trade_timestamp + latency_ms >= target_ts_ms`.
+    to find the smallest trade_id whose `trade_timestamp >= target_ts_ms`.
     Requires only ~30 lightweight (limit=1) requests instead of scanning millions of trades.
     """
     lo = 1
@@ -365,10 +353,10 @@ def find_trade_id_at_or_after_ts(
             continue
 
         t_obj = trades[0]
-        ts_ms, _trade_ts_ms, _iso = parse_coinbase_time_to_ms(t_obj["time"], latency_ms=latency_ms)
+        trade_ts_ms, _iso = parse_coinbase_time_to_ms(t_obj["time"])
         actual_tid = int(t_obj["trade_id"])
 
-        if ts_ms < target_ts_ms:
+        if trade_ts_ms < target_ts_ms:
             lo = max(mid + 1, actual_tid + 1)
         else:
             hi = mid
@@ -406,7 +394,6 @@ def download_coinbase_spot_trades(
     from_date: str,
     to_date: str,
     root_dir: Path | str = DEFAULT_ROOT_DIR,
-    latency_ms: int = 15,
     base_delay: float = 0.10,
 ) -> list[Path]:
     """
@@ -459,7 +446,7 @@ def download_coinbase_spot_trades(
 
         latest_trade = latest_trades[0]
         latest_tid = int(latest_trade["trade_id"])
-        latest_ts_ms, _, _ = parse_coinbase_time_to_ms(latest_trade["time"], latency_ms=latency_ms)
+        latest_ts_ms, _ = parse_coinbase_time_to_ms(latest_trade["time"])
 
         if latest_ts_ms < window_start_ms:
             print(f"Latest trade on exchange ({latest_trade['time']}) is older than From date ({from_date}).", flush=True)
@@ -475,7 +462,6 @@ def download_coinbase_spot_trades(
                 product_id=product_id,
                 target_ts_ms=window_end_exclusive_ms,
                 latest_trade_id=latest_tid,
-                latency_ms=latency_ms,
                 base_delay=0.04,
             )
             # Add small safety margin (+50 trades) in case of microsecond out-of-order timestamps
@@ -518,25 +504,22 @@ def download_coinbase_spot_trades(
                     continue
                 seen_trade_ids.add(tid)
 
-                ts_ms, trade_ts_ms, canonical_iso = parse_coinbase_time_to_ms(
-                    raw_trade["time"], latency_ms=latency_ms
-                )
+                trade_ts_ms, canonical_iso = parse_coinbase_time_to_ms(raw_trade["time"])
 
-                if min_ts_in_page is None or ts_ms < min_ts_in_page:
-                    min_ts_in_page = ts_ms
+                if min_ts_in_page is None or trade_ts_ms < min_ts_in_page:
+                    min_ts_in_page = trade_ts_ms
 
-                if window_start_ms <= ts_ms < window_end_exclusive_ms:
+                if window_start_ms <= trade_ts_ms < window_end_exclusive_ms:
                     side_raw = str(raw_trade.get("side", "")).lower()
                     side = "buy" if side_raw == "buy" else "sell"
                     price = float(raw_trade["price"])
                     qty = float(raw_trade["size"])
 
                     utc_date_str = datetime.datetime.fromtimestamp(
-                        ts_ms / 1000.0, tz=datetime.timezone.utc
+                        trade_ts_ms / 1000.0, tz=datetime.timezone.utc
                     ).strftime("%Y-%m-%d")
 
                     buffers_by_date[utc_date_str].append(
-                        ts=ts_ms,
                         trade_timestamp=trade_ts_ms,
                         trade_id=tid,
                         side=side,
@@ -681,12 +664,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_ROOT_DIR,
         help=f"Root output directory (default: {DEFAULT_ROOT_DIR}).",
     )
-    parser.add_argument(
-        "--latency-ms",
-        type=int,
-        default=50,
-        help="Simulated one-way latency in ms added to trade_timestamp for ts (default: 50).",
-    )
     return parser.parse_args(args)
 
 
@@ -703,7 +680,6 @@ def main() -> None:
     print(f" To         : {args.to_date} (inclusive, UTC)", flush=True)
     print(f" Root Dir   : {args.root_dir}", flush=True)
     print(f" Target Dir : {target_trades_dir}", flush=True)
-    print(f" Latency    : +{args.latency_ms} ms (ts = trade_timestamp + {args.latency_ms})", flush=True)
     print("=================================================================", flush=True)
 
     try:
@@ -712,7 +688,6 @@ def main() -> None:
             from_date=args.from_date,
             to_date=args.to_date,
             root_dir=args.root_dir,
-            latency_ms=args.latency_ms,
         )
         print("=================================================================", flush=True)
         print(f" Completed! Daily Parquet files written: {len(written)}", flush=True)

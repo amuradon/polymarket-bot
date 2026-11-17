@@ -9,8 +9,7 @@ Target path layout:
 Default dir:
   D:\\Crypto\\data\\Polymarket\\collector\\kraken\\spot
 
-Parquet schema (aligned with Kraken WebSocket v2 `trade` channel + collector `ts`):
-  - ts: uint64              (trade_timestamp + latency_ms, default +15ms)
+Parquet schema (aligned with Kraken WebSocket v2 `trade` channel):
   - trade_timestamp: uint64 (exchange trade time in epoch milliseconds)
   - symbol: string          (Kraken WS v2 symbol, e.g. "BTC/USD", "USDT/USD")
   - trade_id: int64         (unique sequential Kraken trade ID)
@@ -41,7 +40,6 @@ KRAKEN_TRADES_URL = "https://api.kraken.com/0/public/Trades"
 
 KRAKEN_TRADES_PARQUET_SCHEMA = pa.schema(
     [
-        ("ts", pa.uint64()),
         ("trade_timestamp", pa.uint64()),
         ("symbol", pa.string()),
         ("trade_id", pa.int64()),
@@ -82,7 +80,6 @@ class DailyColumnBuffer:
     """
 
     __slots__ = (
-        "ts",
         "trade_timestamp",
         "trade_id",
         "side",
@@ -93,7 +90,6 @@ class DailyColumnBuffer:
     )
 
     def __init__(self) -> None:
-        self.ts: list[int] = []
         self.trade_timestamp: list[int] = []
         self.trade_id: list[int] = []
         self.side: list[str] = []
@@ -104,7 +100,6 @@ class DailyColumnBuffer:
 
     def append(
         self,
-        ts: int,
         trade_timestamp: int,
         trade_id: int,
         side: str,
@@ -113,7 +108,6 @@ class DailyColumnBuffer:
         qty: float,
         timestamp: str,
     ) -> None:
-        self.ts.append(ts)
         self.trade_timestamp.append(trade_timestamp)
         self.trade_id.append(trade_id)
         self.side.append(side)
@@ -123,11 +117,11 @@ class DailyColumnBuffer:
         self.timestamp.append(timestamp)
 
     def __len__(self) -> int:
-        return len(self.ts)
+        return len(self.trade_timestamp)
 
     def to_sorted_arrow_table(self, ws_symbol: str) -> pa.Table:
-        """Constructs a PyArrow Table sorted by (ts ASC, trade_id ASC)."""
-        n = len(self.ts)
+        """Constructs a PyArrow Table sorted by (trade_timestamp ASC, trade_id ASC)."""
+        n = len(self.trade_timestamp)
         if n == 0:
             return pa.Table.from_pydict(
                 {field.name: [] for field in KRAKEN_TRADES_PARQUET_SCHEMA},
@@ -136,17 +130,16 @@ class DailyColumnBuffer:
 
         # Check if already sorted in ascending order (common case for Kraken REST pagination)
         is_sorted = True
-        ts_list = self.ts
+        trade_ts_list = self.trade_timestamp
         tid_list = self.trade_id
         for i in range(1, n):
-            prev_ts = ts_list[i - 1]
-            curr_ts = ts_list[i]
+            prev_ts = trade_ts_list[i - 1]
+            curr_ts = trade_ts_list[i]
             if curr_ts < prev_ts or (curr_ts == prev_ts and tid_list[i] < tid_list[i - 1]):
                 is_sorted = False
                 break
 
         if is_sorted:
-            ts_col = self.ts
             trade_ts_col = self.trade_timestamp
             tid_col = self.trade_id
             side_col = self.side
@@ -155,8 +148,7 @@ class DailyColumnBuffer:
             qty_col = self.qty
             iso_col = self.timestamp
         else:
-            order = sorted(range(n), key=lambda i: (ts_list[i], tid_list[i]))
-            ts_col = [self.ts[i] for i in order]
+            order = sorted(range(n), key=lambda i: (trade_ts_list[i], tid_list[i]))
             trade_ts_col = [self.trade_timestamp[i] for i in order]
             tid_col = [self.trade_id[i] for i in order]
             side_col = [self.side[i] for i in order]
@@ -167,7 +159,6 @@ class DailyColumnBuffer:
 
         return pa.Table.from_arrays(
             [
-                pa.array(ts_col, type=pa.uint64()),
                 pa.array(trade_ts_col, type=pa.uint64()),
                 pa.repeat(pa.scalar(ws_symbol, type=pa.string()), n),
                 pa.array(tid_col, type=pa.int64()),
@@ -387,7 +378,6 @@ def download_kraken_spot_trades(
     from_date: str,
     to_date: str,
     root_dir: Path | str = DEFAULT_ROOT_DIR,
-    latency_ms: int = 15,
     base_delay: float = 1.0,
 ) -> list[Path]:
     """
@@ -417,8 +407,7 @@ def download_kraken_spot_trades(
         * 1000
     )
 
-    # Query slightly before window_start_ms so trades whose +latency_ms crosses 00:00:00 UTC are captured
-    query_start_ns = max(0, (window_start_ms - max(latency_ms, 1000)) * 1_000_000)
+    query_start_ns = max(0, (window_start_ms - 1000) * 1_000_000)
 
     since_ns = query_start_ns
     seen_trade_ids: set[int] = set()
@@ -472,12 +461,11 @@ def download_kraken_spot_trades(
                 epoch_sec = float(time_val)
                 epoch_us = int(round(epoch_sec * 1_000_000))
                 trade_ts_ms = epoch_us // 1_000
-                ts_ms = trade_ts_ms + int(latency_ms)
 
-                if ts_ms > max_ts_in_page:
-                    max_ts_in_page = ts_ms
+                if trade_ts_ms > max_ts_in_page:
+                    max_ts_in_page = trade_ts_ms
 
-                if window_start_ms <= ts_ms < window_end_exclusive_ms:
+                if window_start_ms <= trade_ts_ms < window_end_exclusive_ms:
                     side = SIDE_MAP.get(str(side_code).lower())
                     if side is None:
                         raise ValueError(f"Unsupported Kraken trade side code: '{side_code}'")
@@ -487,11 +475,10 @@ def download_kraken_spot_trades(
                         raise ValueError(f"Unsupported Kraken order type code: '{ord_type_code}'")
 
                     utc_date_str = datetime.datetime.fromtimestamp(
-                        ts_ms / 1000.0, tz=datetime.timezone.utc
+                        trade_ts_ms / 1000.0, tz=datetime.timezone.utc
                     ).strftime("%Y-%m-%d")
 
                     buffers_by_date[utc_date_str].append(
-                        ts=ts_ms,
                         trade_timestamp=trade_ts_ms,
                         trade_id=tid,
                         side=side,
@@ -630,12 +617,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_ROOT_DIR,
         help=f"Root output directory (default: {DEFAULT_ROOT_DIR}).",
     )
-    parser.add_argument(
-        "--latency-ms",
-        type=int,
-        default=50,
-        help="Simulated one-way latency in ms added to trade_timestamp for ts (default: 50).",
-    )
     return parser.parse_args(args)
 
 
@@ -652,7 +633,6 @@ def main() -> None:
     print(f" To         : {args.to_date} (inclusive, UTC)", flush=True)
     print(f" Root Dir   : {args.root_dir}", flush=True)
     print(f" Target Dir : {target_trades_dir}", flush=True)
-    print(f" Latency    : +{args.latency_ms} ms (ts = trade_timestamp + {args.latency_ms})", flush=True)
     print("=================================================================", flush=True)
 
     try:
@@ -661,7 +641,6 @@ def main() -> None:
             from_date=args.from_date,
             to_date=args.to_date,
             root_dir=args.root_dir,
-            latency_ms=args.latency_ms,
         )
         print("=================================================================", flush=True)
         print(f" Completed! Daily Parquet files written: {len(written)}", flush=True)
