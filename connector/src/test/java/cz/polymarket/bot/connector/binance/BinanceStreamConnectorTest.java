@@ -1,9 +1,13 @@
 package cz.polymarket.bot.connector.binance;
 
+import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.ServerWebSocket;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,15 +36,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BinanceStreamConnectorTest {
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
+        }
         if (server != null) {
             server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -77,7 +86,7 @@ class BinanceStreamConnectorTest {
         String futuresWsBase = "ws://localhost:" + port + "/futures";
 
         BinanceStreamConnector connector = new BinanceStreamConnector(
-                vertx,
+                marketWsRuntime,
                 spotWsBase,
                 futuresWsBase,
                 200L,
@@ -109,7 +118,7 @@ class BinanceStreamConnectorTest {
                     assertThat(connector.isAllConnected()).isTrue();
                     assertThat(connector.getIoReaderThread()).isNotNull();
                     assertThat(connector.getIoReaderThread().getName())
-                            .isEqualTo(BinanceStreamConnector.DEDICATED_BINANCE_IO_THREAD_NAME);
+                            .isEqualTo(MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME);
                     assertThat(connector.getIoReaderThread().getPriority()).isEqualTo(Thread.MAX_PRIORITY);
                 });
 
@@ -142,7 +151,7 @@ class BinanceStreamConnectorTest {
         String futuresWsBase = "ws://localhost:" + port + "/futures";
 
         BinanceStreamConnector connector = new BinanceStreamConnector(
-                vertx,
+                marketWsRuntime,
                 spotWsBase,
                 futuresWsBase,
                 200L,
@@ -182,7 +191,7 @@ class BinanceStreamConnectorTest {
         };
 
         externalWorker.start();
-        connector.start("BTCUSDT", byteListener, externalWorker);
+        connector.start("BTCUSDT", java.util.EnumSet.allOf(BinanceStreamType.class), byteListener, externalWorker);
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
@@ -200,34 +209,65 @@ class BinanceStreamConnectorTest {
     }
 
     @Test
-    void shouldConnectOnlySpotAggTradesWhenStartSpotAggTradesIsCalled() throws Exception {
+    void shouldFastForwardDualSpotAggTradesLegsAndDropDelayedOutOfOrderRetransmissions() throws Exception {
+        List<ServerWebSocket> aggTradeSockets = new CopyOnWriteArrayList<>();
+
         server = vertx.createHttpServer()
-                .webSocketHandler(ws -> ws.writeTextMessage("{\"streamPath\":\"" + ws.path() + "\",\"spotOnly\":true}"));
+                .webSocketHandler(ws -> {
+                    if ("/spot/btcusdt@aggTrade".equals(ws.path())) {
+                        aggTradeSockets.add(ws);
+                        if (aggTradeSockets.size() == 2) {
+                            ServerWebSocket fastLeg = aggTradeSockets.get(0);
+                            ServerWebSocket slowRetransmittingLeg = aggTradeSockets.get(1);
+                            fastLeg.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1000,\"s\":\"BTCUSDT\",\"a\":1002,\"p\":\"85020.00\",\"q\":\"0.50\",\"m\":false}");
+                            vertx.setTimer(30L, id -> {
+                                slowRetransmittingLeg.writeTextMessage("{\"e\":\"aggTrade\",\"E\":999,\"s\":\"BTCUSDT\",\"a\":1001,\"p\":\"85000.00\",\"q\":\"0.25\",\"m\":true}");
+                                slowRetransmittingLeg.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1000,\"s\":\"BTCUSDT\",\"a\":1002,\"p\":\"85020.00\",\"q\":\"0.50\",\"m\":false}");
+                                slowRetransmittingLeg.writeTextMessage("{\"e\":\"aggTrade\",\"E\":1005,\"s\":\"BTCUSDT\",\"a\":1003,\"p\":\"85035.00\",\"q\":\"0.75\",\"m\":false}");
+                            });
+                        }
+                    }
+                });
 
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
-        String spotWsBase = "ws://localhost:" + port + "/spot";
-        String futuresWsBase = "ws://localhost:" + port + "/futures";
+        String spotWsBase = "ws://127.0.0.1:" + port + "/spot";
+        String futuresWsBase = "ws://127.0.0.1:" + port + "/futures";
 
         BinanceStreamConnector connector = new BinanceStreamConnector(
-                vertx,
+                marketWsRuntime,
                 spotWsBase,
                 futuresWsBase,
                 200L,
                 5000L
         );
 
-        Map<BinanceStreamType, String> receivedByType = new ConcurrentHashMap<>();
-        connector.startSpotAggTrades("BTCUSDT", (type, rawJson, recvTs) -> receivedByType.put(type, rawJson));
+        List<Long> deliveredAggTradeIds = new CopyOnWriteArrayList<>();
+        connector.startSpotAggTradesBatch("BTCUSDT", batch -> {
+            for (TimestampedFrame frame : batch) {
+                deliveredAggTradeIds.add(BinanceStreamConnector.extractAggTradeId(frame.rawUtf8Bytes()));
+            }
+        }, null);
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
-                    assertThat(receivedByType).containsOnlyKeys(BinanceStreamType.SPOT_AGG_TRADES);
-                    assertThat(receivedByType.get(BinanceStreamType.SPOT_AGG_TRADES))
-                            .contains("/spot/btcusdt@aggTrade");
-                    assertThat(connector.isAllConnected()).isTrue();
-                    assertThat(connector.getStreamTelemetries()).hasSize(1);
+                    assertThat(aggTradeSockets).hasSize(2);
+                    assertThat(deliveredAggTradeIds).containsExactly(1002L, 1003L);
+                    assertThat(connector.getConnectionStates().get(BinanceStreamType.SPOT_AGG_TRADES))
+                            .isEqualTo(ConnectionState.CONNECTED);
+                    assertThat(connector.getStreamTelemetries()).hasSize(2);
                 });
+
+        long coalescedTotal = connector.getStreamTelemetries().stream()
+                .mapToLong(WebSocketStreamTelemetry::coalescedFramesCount)
+                .sum();
+        assertThat(coalescedTotal).isGreaterThanOrEqualTo(2L);
+
+        StreamRedundancyStatus redundancy =
+                connector.describeStreamRedundancy("BINANCE-SPOT_AGG_TRADES-BTCUSDT");
+        assertThat(redundancy.dualStream()).isTrue();
+        assertThat(redundancy.peerStreamName()).isEqualTo("BINANCE-SPOT_AGG_TRADES-BTCUSDT-BACKUP");
+        assertThat(redundancy.failoverActive()).isTrue();
 
         connector.destroy();
         assertThat(connector.isAllConnected()).isFalse();

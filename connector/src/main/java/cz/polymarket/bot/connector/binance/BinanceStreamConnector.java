@@ -1,16 +1,15 @@
 package cz.polymarket.bot.connector.binance;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.RawWebSocketBatchListener;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,33 +24,32 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Manages resilient WebSocket connections for the 4 Binance Spot and USD-M Futures data streams:
- * Spot aggTrades, Spot bookTicker, Futures aggTrades, and Futures bookTicker.
+ * Manages resilient WebSocket connections for Binance Spot and USD-M Futures data streams
+ * ({@code SPOT_AGG_TRADES}, {@code SPOT_BOOK_TICKER}, {@code FUTURES_AGG_TRADES}, {@code FUTURES_BOOK_TICKER})
+ * on the consolidated {@link MarketWebSocketRuntime} ({@code market-ws-io-reader} on {@code CPU #1}).
  * <p>
- * Isolates all 4 Binance streams onto a dedicated single-thread Netty EventLoop ({@code binance-ws-io-reader})
- * with native Linux Epoll transport, native BoringSSL ({@code netty-tcnative}), and CloudFront DNS round-robin
- * rotation, forwarding raw {@code byte[]} frames paired with local receipt timestamps without UTF-8 {@link String} allocation overhead.
+ * For latency-sensitive live/paper trading ({@link #startSpotAggTradesBatch}), opens two independent TCP/TLS
+ * connections pinned to distinct Tokyo ({@code ap-northeast-1}) edge IPv4 addresses ({@code slot 0} and {@code slot 1})
+ * paired with a zero-allocation monotonic {@code aggTradeId} ({@code "a"}) fast-forward filter: whichever path delivers
+ * a trade first immediately advances {@code maxSeenAggTradeId}, while delayed or retransmitted frames arriving out-of-order
+ * on the slower path ({@code aggTradeId <= maxSeenAggTradeId}) are dropped in nanoseconds without waiting for TCP retransmission.
  */
 @ApplicationScoped
 public class BinanceStreamConnector {
 
-    /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing all 4 Binance WebSocket streams.
-     */
-    public static final String DEDICATED_BINANCE_IO_THREAD_NAME = "binance-ws-io-reader";
-
-    private final Vertx binanceVertx;
+    private final MarketWebSocketRuntime marketWsRuntime;
     private final String spotWsBaseUrl;
     private final String futuresWsBaseUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
     private final Map<BinanceStreamType, ReconnectingWebSocketStream> streams = new EnumMap<>(BinanceStreamType.class);
+    private volatile ReconnectingWebSocketStream backupSpotAggTradesStream;
     private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Binance multi-stream WebSocket connector with an isolated 1-thread Vert.x instance.
+     * Constructs the Binance multi-stream WebSocket connector backed by {@link MarketWebSocketRuntime}.
      *
-     * @param vertx            shared Quarkus Vert.x instance
+     * @param marketWsRuntime  consolidated 1-EventLoop market WebSocket runtime
      * @param spotWsBaseUrl    Binance Spot WebSocket base URL
      * @param futuresWsBaseUrl Binance USD-M Futures WebSocket base URL
      * @param reconnectDelayMs delay in ms before reconnecting a dropped stream
@@ -59,7 +57,7 @@ public class BinanceStreamConnector {
      */
     @Inject
     public BinanceStreamConnector(
-            Vertx vertx,
+            MarketWebSocketRuntime marketWsRuntime,
             @ConfigProperty(name = "polymarket.connector.binance.spot-ws-base-url", defaultValue = "wss://stream.binance.com:9443/ws")
             String spotWsBaseUrl,
             @ConfigProperty(name = "polymarket.connector.binance.futures-ws-base-url", defaultValue = "wss://fstream.binance.com")
@@ -68,42 +66,31 @@ public class BinanceStreamConnector {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "15000")
             long pingIntervalMs) {
-        this.binanceVertx = Vertx.vertx(new VertxOptions()
-                .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true)
-                .setAddressResolverOptions(new AddressResolverOptions()
-                        .setRoundRobinInetAddress(true)
-                        .setRotateServers(true)
-                        .setCacheMaxTimeToLive(60)));
-        if (!this.binanceVertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on binanceVertx (os=%s); falling back to JDK NIO EventLoop",
-                    System.getProperty("os.name", "unknown"));
-        } else {
-            Log.infof("Initialized dedicated binanceVertx with native Linux Epoll transport (openSslAvailable=%b)",
-                    OpenSsl.isAvailable());
+        if (marketWsRuntime == null) {
+            throw new IllegalArgumentException("marketWsRuntime cannot be null");
         }
+        this.marketWsRuntime = marketWsRuntime;
         this.spotWsBaseUrl = spotWsBaseUrl;
         this.futuresWsBaseUrl = futuresWsBaseUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
     }
 
+    /**
+     * Stops active Binance streams on bean destruction.
+     */
     @PreDestroy
     public void destroy() {
         stop();
-        try {
-            binanceVertx.close();
-        } catch (Exception ignored) {
-        }
     }
 
     /**
-     * Returns whether native Linux Epoll transport is active on the dedicated Binance Vert.x instance.
+     * Returns whether native Linux Epoll transport is active on the consolidated market WebSocket runtime.
      *
      * @return {@code true} if native transport is enabled
      */
     public boolean isNativeTransportEnabled() {
-        return binanceVertx.isNativeTransportEnabled();
+        return marketWsRuntime.isNativeTransportEnabled();
     }
 
     /**
@@ -112,7 +99,7 @@ public class BinanceStreamConnector {
      * @return {@code true} if native OpenSSL/BoringSSL is available
      */
     public boolean isOpenSslAvailable() {
-        return OpenSsl.isAvailable();
+        return marketWsRuntime.isOpenSslAvailable();
     }
 
     /**
@@ -125,50 +112,20 @@ public class BinanceStreamConnector {
         for (ReconnectingWebSocketStream stream : streams.values()) {
             stream.setDisconnectListener(disconnectListener);
         }
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        if (backup != null) {
+            backup.setDisconnectListener(disconnectListener);
+        }
     }
 
     /**
-     * Starts all 4 Binance WebSocket streams for the given symbol and routes messages to the listener.
+     * Starts all 4 Binance WebSocket streams (single-leg raw archival mode for Data Collector) and routes messages to {@code listener}.
      *
      * @param symbol   trading pair symbol (e.g. BTCUSDT)
      * @param listener callback receiving stream type, payload, and local receipt timestamp
      */
     public synchronized void start(String symbol, BinanceStreamListener listener) {
         start(symbol, EnumSet.allOf(BinanceStreamType.class), listener, null);
-    }
-
-    /**
-     * Starts all 4 Binance WebSocket streams for the given symbol, optionally bound to an external worker thread.
-     *
-     * @param symbol         trading pair symbol (e.g. BTCUSDT)
-     * @param listener       callback receiving stream type, payload, and local receipt timestamp
-     * @param externalWorker optional dedicated platform worker thread responsible for draining these streams
-     */
-    public synchronized void start(String symbol, BinanceStreamListener listener, Thread externalWorker) {
-        start(symbol, EnumSet.allOf(BinanceStreamType.class), listener, externalWorker);
-    }
-
-    /**
-     * Starts only the Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES}) WebSocket stream
-     * for the given symbol.
-     *
-     * @param symbol   trading pair symbol (e.g. BTCUSDT)
-     * @param listener callback receiving stream type, payload, and local receipt timestamp
-     */
-    public synchronized void startSpotAggTrades(String symbol, BinanceStreamListener listener) {
-        start(symbol, EnumSet.of(BinanceStreamType.SPOT_AGG_TRADES), listener, null);
-    }
-
-    /**
-     * Starts only the Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES}) WebSocket stream
-     * for the given symbol, optionally bound to an external worker thread.
-     *
-     * @param symbol         trading pair symbol (e.g. BTCUSDT)
-     * @param listener       callback receiving stream type, payload, and local receipt timestamp
-     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
-     */
-    public synchronized void startSpotAggTrades(String symbol, BinanceStreamListener listener, Thread externalWorker) {
-        start(symbol, EnumSet.of(BinanceStreamType.SPOT_AGG_TRADES), listener, externalWorker);
     }
 
     /**
@@ -209,7 +166,7 @@ public class BinanceStreamConnector {
                 }
             };
             ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                    binanceVertx,
+                    marketWsRuntime.vertx(),
                     streamName,
                     wsUrl,
                     List::of,
@@ -217,7 +174,6 @@ public class BinanceStreamConnector {
                     reconnectDelayMs,
                     pingIntervalMs
             );
-            stream.setDedicatedIoThreadName(DEDICATED_BINANCE_IO_THREAD_NAME);
             stream.setDisconnectListener(this.disconnectListener);
             if (externalWorker != null) {
                 stream.bindExternalWorker(externalWorker);
@@ -228,21 +184,115 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Drains all currently queued frames across the 5 Binance streams into {@code scratchBatch}.
+     * Starts a dual Active-Active pair of Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES})
+     * WebSocket connections pinned to distinct Tokyo edge IPv4 addresses ({@code slot 0} and {@code slot 1})
+     * with monotonic {@code aggTradeId} ({@code "a"}) fast-forward filtering to eliminate TCP head-of-line
+     * retransmission delays and drop delayed/reordered frames on arrival.
+     *
+     * @param symbol         trading pair symbol (e.g. BTCUSDT)
+     * @param batchListener  listener invoked with strictly forward-progressing {@code aggTrade} frame batches
+     * @param externalWorker optional dedicated platform worker thread (e.g. {@code market-strategy-worker})
+     */
+    public synchronized void startSpotAggTradesBatch(
+            String symbol,
+            RawWebSocketBatchListener batchListener,
+            Thread externalWorker) {
+        stop();
+        String normalizedSymbol = normalizeSymbol(symbol);
+        String wsUrl = BinanceStreamType.SPOT_AGG_TRADES.buildWsUrl(spotWsBaseUrl, futuresWsBaseUrl, normalizedSymbol);
+        String primaryName = "BINANCE-" + BinanceStreamType.SPOT_AGG_TRADES.name() + "-" + normalizedSymbol;
+        String backupName = primaryName + "-BACKUP";
+
+        AggTradeFastForwardFilter fastForwardFilter = new AggTradeFastForwardFilter();
+        ReconnectingWebSocketStream[] primaryHolder = new ReconnectingWebSocketStream[1];
+        ReconnectingWebSocketStream[] backupHolder = new ReconnectingWebSocketStream[1];
+
+        RawWebSocketBatchListener primaryBatchListener = batch ->
+                dispatchFastForwardedBatch(batch, primaryHolder[0], fastForwardFilter, batchListener);
+        RawWebSocketBatchListener backupBatchListener = batch ->
+                dispatchFastForwardedBatch(batch, backupHolder[0], fastForwardFilter, batchListener);
+
+        ReconnectingWebSocketStream primary = new ReconnectingWebSocketStream(
+                marketWsRuntime.vertx(),
+                primaryName,
+                wsUrl,
+                List::of,
+                null,
+                primaryBatchListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                null
+        );
+        primaryHolder[0] = primary;
+        primary.setPreferredAddressSlot(marketWsRuntime, 0);
+        primary.setDisconnectListener(this.disconnectListener);
+
+        ReconnectingWebSocketStream backup = new ReconnectingWebSocketStream(
+                marketWsRuntime.vertx(),
+                backupName,
+                wsUrl,
+                List::of,
+                null,
+                backupBatchListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                null
+        );
+        backupHolder[0] = backup;
+        backup.setPreferredAddressSlot(marketWsRuntime, 1);
+        backup.setDisconnectListener(this.disconnectListener);
+
+        if (externalWorker != null) {
+            primary.bindExternalWorker(externalWorker);
+            backup.bindExternalWorker(externalWorker);
+        }
+
+        streams.put(BinanceStreamType.SPOT_AGG_TRADES, primary);
+        this.backupSpotAggTradesStream = backup;
+        Log.infof("Opening dual multi-path Binance SPOT_AGG_TRADES WebSocket streams for %s (edgeSlots=0/1, monotonicFastForward=true)",
+                normalizedSymbol);
+        primary.start();
+        backup.start();
+    }
+
+    private static void dispatchFastForwardedBatch(
+            List<TimestampedFrame> batch,
+            ReconnectingWebSocketStream sourceStream,
+            AggTradeFastForwardFilter filter,
+            RawWebSocketBatchListener delegate) {
+        if (delegate == null || batch == null || batch.isEmpty()) {
+            return;
+        }
+        int skipped = filter.filterStrictlyNewerInPlace(batch);
+        if (skipped > 0 && sourceStream != null) {
+            sourceStream.addCoalescedFrames(skipped);
+        }
+        if (!batch.isEmpty()) {
+            delegate.onMessageBatch(batch);
+        }
+    }
+
+    /**
+     * Drains all currently queued frames across active Binance streams (including dual {@code SPOT_AGG_TRADES} backup)
+     * into {@code scratchBatch}.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
-     * @return total number of frames drained across all 5 streams
+     * @return total number of frames drained
      */
     public synchronized int drainStreams(List<TimestampedFrame> scratchBatch) {
         int total = 0;
         for (ReconnectingWebSocketStream stream : streams.values()) {
             total += stream.drainAvailableBatch(scratchBatch);
         }
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        if (backup != null) {
+            total += backup.drainAvailableBatch(scratchBatch);
+        }
         return total;
     }
 
     /**
-     * Returns whether any of the 5 Binance streams currently has frames waiting in its inbound queue.
+     * Returns whether any active Binance stream currently has frames waiting in its inbound queue.
      *
      * @return {@code true} if any Binance stream queue is non-empty
      */
@@ -252,7 +302,24 @@ public class BinanceStreamConnector {
                 return true;
             }
         }
-        return false;
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        return backup != null && backup.hasQueuedFrames();
+    }
+
+    /**
+     * Marks all active Binance streams as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * if frames arrived concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public synchronized boolean prepareStreamsToPark() {
+        for (ReconnectingWebSocketStream stream : streams.values()) {
+            if (stream.prepareToParkAndCheckQueuedFrames()) {
+                return true;
+            }
+        }
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        return backup != null && backup.prepareToParkAndCheckQueuedFrames();
     }
 
     /**
@@ -263,61 +330,104 @@ public class BinanceStreamConnector {
             stream.stop();
         }
         streams.clear();
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        this.backupSpotAggTradesStream = null;
+        if (backup != null) {
+            backup.stop();
+        }
     }
 
     /**
      * Returns an immutable snapshot of the connection state for each Binance stream type.
+     * For dual multi-path {@code SPOT_AGG_TRADES}, reports {@link ConnectionState#CONNECTED} when either leg is connected.
      *
      * @return map of stream type to its current {@link ConnectionState}
      */
     public synchronized Map<BinanceStreamType, ConnectionState> getConnectionStates() {
         Map<BinanceStreamType, ConnectionState> result = new EnumMap<>(BinanceStreamType.class);
         for (BinanceStreamType type : BinanceStreamType.values()) {
-            ReconnectingWebSocketStream stream = streams.get(type);
-            result.put(type, stream != null ? stream.getState() : ConnectionState.DISCONNECTED);
+            ReconnectingWebSocketStream primary = streams.get(type);
+            ConnectionState effective = primary != null ? primary.getState() : ConnectionState.DISCONNECTED;
+            if (type == BinanceStreamType.SPOT_AGG_TRADES && effective != ConnectionState.CONNECTED) {
+                ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+                if (backup != null && (backup.getState() == ConnectionState.CONNECTED || effective == ConnectionState.DISCONNECTED)) {
+                    effective = backup.getState();
+                }
+            }
+            result.put(type, effective);
         }
         return Collections.unmodifiableMap(result);
     }
 
     /**
-     * Returns telemetry snapshots for all active Binance WebSocket streams.
+     * Returns telemetry snapshots for all active Binance WebSocket streams (including backup {@code SPOT_AGG_TRADES} leg).
      *
      * @return list of {@link WebSocketStreamTelemetry} snapshots
      */
     public synchronized List<WebSocketStreamTelemetry> getStreamTelemetries() {
-        List<WebSocketStreamTelemetry> result = new ArrayList<>(streams.size());
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(streams.size() + 1);
         for (ReconnectingWebSocketStream stream : streams.values()) {
             result.add(stream.getTelemetrySnapshot());
+        }
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        if (backup != null) {
+            result.add(backup.getTelemetrySnapshot());
         }
         return result;
     }
 
     /**
-     * Returns the dedicated Netty I/O reader thread observed by any active Binance stream, or {@code null}.
+     * Evaluates the live connection state of the peer leg when a dual multi-path Binance {@code SPOT_AGG_TRADES}
+     * stream disconnects.
      *
-     * @return Netty I/O reader thread
+     * @param streamName identifier of the stream that disconnected
+     * @return {@link StreamRedundancyStatus} describing whether the peer leg is actively covering failover
      */
-    public synchronized Thread getIoReaderThread() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            Thread t = stream.getIoReaderThread();
-            if (t != null) {
-                return t;
-            }
+    public synchronized StreamRedundancyStatus describeStreamRedundancy(String streamName) {
+        ReconnectingWebSocketStream primary = streams.get(BinanceStreamType.SPOT_AGG_TRADES);
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        if (streamName == null || primary == null || backup == null) {
+            return StreamRedundancyStatus.NONE;
         }
-        return null;
+        ReconnectingWebSocketStream peer;
+        if (streamName.equals(primary.getStreamName())) {
+            peer = backup;
+        } else if (streamName.equals(backup.getStreamName())) {
+            peer = primary;
+        } else {
+            return StreamRedundancyStatus.NONE;
+        }
+        ConnectionState peerState = peer.getState();
+        return new StreamRedundancyStatus(
+                true,
+                peer.getStreamName(),
+                peerState,
+                peer.getRemoteAddress(),
+                peerState == ConnectionState.CONNECTED
+        );
     }
 
     /**
-     * Checks whether all active Binance streams are currently in the {@link ConnectionState#CONNECTED} state.
+     * Returns the consolidated Netty I/O reader thread ({@code market-ws-io-reader}).
      *
-     * @return true if at least one stream is registered and all active streams are connected
+     * @return Netty I/O reader thread
+     */
+    public Thread getIoReaderThread() {
+        return marketWsRuntime.getIoReaderThread();
+    }
+
+    /**
+     * Checks whether all active Binance stream types are currently in the {@link ConnectionState#CONNECTED} state.
+     *
+     * @return true if at least one stream is registered and all active stream types are connected
      */
     public synchronized boolean isAllConnected() {
         if (streams.isEmpty()) {
             return false;
         }
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            if (stream.getState() != ConnectionState.CONNECTED) {
+        Map<BinanceStreamType, ConnectionState> currentStates = getConnectionStates();
+        for (BinanceStreamType type : streams.keySet()) {
+            if (currentStates.get(type) != ConnectionState.CONNECTED) {
                 return false;
             }
         }
@@ -339,5 +449,80 @@ public class BinanceStreamConnector {
             return clean + "USDT";
         }
         return clean;
+    }
+
+    /**
+     * Extracts the strictly monotonic integer {@code aggTrade} ID ({@code "a":<digits>}) directly from raw
+     * UTF-8 JSON bytes without {@link String} or Jackson parser allocation.
+     *
+     * @param rawBytes UTF-8 JSON payload bytes
+     * @return parsed non-negative {@code aggTradeId}, or {@code -1L} if not present
+     */
+    static long extractAggTradeId(byte[] rawBytes) {
+        if (rawBytes == null || rawBytes.length < 6) {
+            return -1L;
+        }
+        int limit = rawBytes.length - 4;
+        for (int i = 0; i <= limit; i++) {
+            if (rawBytes[i] == '"' && rawBytes[i + 1] == 'a' && rawBytes[i + 2] == '"') {
+                int pos = i + 3;
+                while (pos < rawBytes.length && (rawBytes[pos] == ' ' || rawBytes[pos] == '\t')) {
+                    pos++;
+                }
+                if (pos >= rawBytes.length || rawBytes[pos] != ':') {
+                    continue;
+                }
+                pos++;
+                while (pos < rawBytes.length && (rawBytes[pos] == ' ' || rawBytes[pos] == '\t')) {
+                    pos++;
+                }
+                if (pos >= rawBytes.length || rawBytes[pos] < '0' || rawBytes[pos] > '9') {
+                    continue;
+                }
+                long val = 0L;
+                while (pos < rawBytes.length) {
+                    byte c = rawBytes[pos];
+                    if (c < '0' || c > '9') {
+                        break;
+                    }
+                    val = val * 10L + (c - '0');
+                    pos++;
+                }
+                return val;
+            }
+        }
+        return -1L;
+    }
+
+    /**
+     * Monotonic {@code aggTradeId} fast-forward filter that drops duplicate frames across dual Tokyo TCP paths
+     * as well as delayed/retransmitted out-of-order frames ({@code aggTradeId <= maxSeenAggTradeId}) released
+     * after a TCP out-of-order stall.
+     */
+    static final class AggTradeFastForwardFilter {
+
+        private long maxSeenAggTradeId = -1L;
+
+        synchronized int filterStrictlyNewerInPlace(List<TimestampedFrame> batch) {
+            int n = batch.size();
+            int writeIdx = 0;
+            for (int i = 0; i < n; i++) {
+                TimestampedFrame frame = batch.get(i);
+                long id = extractAggTradeId(frame.rawUtf8Bytes());
+                if (id < 0L || id > maxSeenAggTradeId) {
+                    if (id > maxSeenAggTradeId) {
+                        maxSeenAggTradeId = id;
+                    }
+                    if (writeIdx != i) {
+                        batch.set(writeIdx, frame);
+                    }
+                    writeIdx++;
+                }
+            }
+            if (writeIdx < n) {
+                batch.subList(writeIdx, n).clear();
+            }
+            return n - writeIdx;
+        }
     }
 }

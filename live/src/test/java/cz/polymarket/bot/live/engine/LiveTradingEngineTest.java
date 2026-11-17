@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
-import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
@@ -13,6 +12,8 @@ import cz.polymarket.bot.connector.polymarket.PolymarketPolyBoltClient;
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketSecretsResolver;
 import cz.polymarket.bot.connector.polymarket.clob.PolymarketClobRestClient;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.live.monitoring.SystemNetworkTelemetryMonitor;
@@ -34,6 +35,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +66,7 @@ class LiveTradingEngineTest {
             "50942702967128588059751532145364262040082665861951814492817689719364041142319";
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer mockServer;
     private int port;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -105,6 +108,7 @@ class LiveTradingEngineTest {
         krakenSockets.clear();
         coinbaseSockets.clear();
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
 
@@ -290,20 +294,20 @@ class LiveTradingEngineTest {
         mockServer.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         port = mockServer.actualPort();
         binanceConnector = new BinanceStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/binance/spot",
                 "ws://localhost:" + port + "/binance/futures",
                 1000L,
                 10000L
         );
         krakenConnector = new KrakenStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/kraken/ws/v2",
                 1000L,
                 10000L
         );
         coinbaseConnector = new CoinbaseStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/coinbase/ws",
                 1000L,
                 10000L
@@ -322,6 +326,9 @@ class LiveTradingEngineTest {
         }
         if (coinbaseConnector != null) {
             coinbaseConnector.destroy();
+        }
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
         }
         if (mockServer != null) {
             mockServer.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -346,7 +353,7 @@ class LiveTradingEngineTest {
         String baseHttpUrl = "http://localhost:" + port;
         PolymarketGammaClient gammaClient = new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper);
         PolymarketPolyBoltClient polyBoltClient = new PolymarketPolyBoltClient(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/polybolt",
                 Optional.of("api-key-live"),
                 Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
@@ -356,6 +363,7 @@ class LiveTradingEngineTest {
         );
         PolymarketClobClient clobClient = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/clob",
                 1000L,
                 10000L
@@ -699,8 +707,8 @@ class LiveTradingEngineTest {
                     emptyResolver,
                     new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, emptyResolver),
                     new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
-                    new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
-                    new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                    new PolymarketClobClient(vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                    new PolymarketPolyBoltClient(marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
                             Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L),
                     binanceConnector,
                     krakenConnector,
@@ -833,8 +841,8 @@ class LiveTradingEngineTest {
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
-                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
-                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                new PolymarketClobClient(vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
                         Optional.of("api-key-live"),
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
@@ -1251,11 +1259,10 @@ class LiveTradingEngineTest {
                 long ts = windowStartMs + s * 1_000L;
                 double osc = (s % 2 == 0) ? 0.75 : -0.75;
                 double spot = 89_995.00 + osc;
-                engine.onRawBinanceFrame(
-                        BinanceStreamType.SPOT_AGG_TRADES,
-                        "{\"e\":\"aggTrade\",\"p\":\"" + spot + "\",\"q\":\"1.0\",\"m\":false}",
+                engine.onRawBinanceFrameBatch(List.of(new TimestampedFrame(
+                        ("{\"e\":\"aggTrade\",\"p\":\"" + spot + "\",\"q\":\"1.0\",\"m\":false}").getBytes(StandardCharsets.UTF_8),
                         ts - 240L
-                );
+                )));
                 engine.onRawCoinbaseFrame(
                         "BTCUSD",
                         "{\"type\":\"match\",\"price\":\"" + spot + "\",\"size\":\"1.0\"}",
@@ -1277,11 +1284,10 @@ class LiveTradingEngineTest {
 
             // 3. Breakout across Binance, Coinbase, and Kraken before Chainlink updates -> triggers live FAK order!
             long breakoutTs = tau46Ms + 400L;
-            engine.onRawBinanceFrame(
-                    BinanceStreamType.SPOT_AGG_TRADES,
-                    "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.0\",\"m\":false}",
+            engine.onRawBinanceFrameBatch(List.of(new TimestampedFrame(
+                    "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.0\",\"m\":false}".getBytes(StandardCharsets.UTF_8),
                     breakoutTs
-            );
+            )));
             engine.onRawCoinbaseFrame(
                     "BTCUSD",
                     "{\"type\":\"match\",\"price\":\"90018.00\",\"size\":\"2.0\"}",
@@ -1322,8 +1328,8 @@ class LiveTradingEngineTest {
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
-                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
-                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                new PolymarketClobClient(vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
                         Optional.of("api-key-live"),
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
@@ -1364,6 +1370,159 @@ class LiveTradingEngineTest {
         }
     }
 
+    @Test
+    void shouldDrainUserChannelImmediatelyOnDedicatedCpu0WorkerWhilePostOrderIsBlockedOnCpu3() throws Exception {
+        mockOrderResponseDelayMs.set(700L);
+        PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
+                Optional.of(TEST_PRIVATE_KEY),
+                Optional.of("api-key-live"),
+                Optional.of("passphrase-live"),
+                Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                Optional.of(TEST_MAKER_ADDRESS),
+                Optional.of(TEST_EOA_ADDRESS)
+        );
+        HttpClient httpClient = HttpClient.newHttpClient();
+        String baseHttpUrl = "http://localhost:" + port;
+        PolymarketClobClient clobClient = new PolymarketClobClient(
+                vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L);
+        PolymarketPolyBoltClient polyBoltClient = new PolymarketPolyBoltClient(
+                marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
+                Optional.of("api-key-live"),
+                Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
+                Optional.of("passphrase-live"),
+                1000L, 10000L);
+
+        AtomicBoolean triggerSent = new AtomicBoolean(false);
+        cz.polymarket.bot.strategy.TradingStrategy triggerStrategy = new cz.polymarket.bot.strategy.TradingStrategy() {
+            private cz.polymarket.bot.strategy.StrategyContext ctx;
+
+            @Override
+            public String getName() {
+                return "TriggerOrderStrategy";
+            }
+
+            @Override
+            public void init(cz.polymarket.bot.strategy.StrategyContext context) {
+                this.ctx = context;
+            }
+
+            @Override
+            public void onExecutionReport(cz.polymarket.bot.strategy.ExecutionReport report) {
+            }
+
+            @Override
+            public void onPolymarketCryptoPrice(long timestampMs, String symbol, String source, double price, long priceTimestampMs) {
+                if (price >= 99_000.0 && triggerSent.compareAndSet(false, true)) {
+                    ctx.getExecutionRouter().submitOrder(new OrderCommand(
+                            "slow-order-1",
+                            "pm-btc-15m",
+                            "BTC-UP",
+                            Timeframe.FIFTEEN_MINUTES,
+                            "BUY",
+                            BigDecimal.valueOf(0.55),
+                            BigDecimal.valueOf(100)
+                    ));
+                }
+            }
+        };
+
+        LiveTradingEngine engine = new LiveTradingEngine(
+                new StrategyRegistry(Map.of(triggerStrategy.getName(), triggerStrategy)),
+                secretsResolver,
+                new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
+                new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
+                clobClient,
+                polyBoltClient,
+                binanceConnector,
+                krakenConnector,
+                coinbaseConnector,
+                new PolymarketStreamParser(objectMapper, "BTCUSDT"),
+                spotStreamProcessor,
+                new SystemNetworkTelemetryMonitor(),
+                "TriggerOrderStrategy",
+                "BTCUSDT",
+                "15m",
+                true,
+                "FAK",
+                250L
+        );
+
+        try {
+            engine.onStart(null);
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(clobUserAuthed.get()).isTrue();
+                        assertThat(engine.getActiveMarketInfo()).isNotNull();
+                        assertThat(binanceSockets).hasSizeGreaterThanOrEqualTo(2);
+                        assertThat(polyBoltSockets).isNotEmpty();
+                    });
+
+            // Verify all 5 market connectors share the exact same consolidated market-ws-io-reader EventLoop thread
+            Thread sharedIoThread = marketWsRuntime.getIoReaderThread();
+            assertThat(sharedIoThread).isNotNull();
+            assertThat(sharedIoThread.getName()).isEqualTo(MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME);
+            assertThat(clobClient.getIoReaderThread()).isSameAs(sharedIoThread);
+            assertThat(polyBoltClient.getIoReaderThread()).isSameAs(sharedIoThread);
+            assertThat(binanceConnector.getIoReaderThread()).isSameAs(sharedIoThread);
+            assertThat(krakenConnector.getIoReaderThread()).isSameAs(sharedIoThread);
+            assertThat(coinbaseConnector.getIoReaderThread()).isSameAs(sharedIoThread);
+
+            // Emit synthetic PolyBolt tick >= 99_000 so market-strategy-worker (CPU #2) dispatches slow-order-1 to order-execution-io-worker (CPU #3)
+            long nowMs = System.currentTimeMillis();
+            polyBoltSockets.getFirst().writeTextMessage("""
+                    {
+                      "channel": "price.crypto",
+                      "key": "btcusd",
+                      "timestamp": %d,
+                      "payload": {
+                        "symbol": "btcusd",
+                        "timestamp": %d,
+                        "value": 99500.0
+                      }
+                    }
+                    """.formatted(nowMs + 5000L, nowMs + 5000L));
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(2))
+                    .untilAsserted(() -> assertThat(orderBodies).hasSize(1));
+
+            // Confirm POST /order is still blocked in flight on order-execution-io-worker (700 ms server delay)
+            assertThat(engine.getOpenPositions()).isEmpty();
+
+            // Push a trade fill over POLYMARKET-CLOB-USER while order-execution-io-worker is blocked
+            long sendMs = System.currentTimeMillis();
+            for (ServerWebSocket userWs : userSockets) {
+                userWs.writeTextMessage("""
+                        {
+                          "event_type": "trade",
+                          "id": "trade-while-blocked-1",
+                          "side": "BUY",
+                          "size": "100",
+                          "price": "0.55",
+                          "fee_rate_bps": "700",
+                          "status": "MATCHED"
+                        }
+                        """);
+            }
+
+            // clob-user-worker on CPU #0 must update balance immediately (< 300 ms), BEFORE the 700 ms POST /order finishes!
+            Awaitility.await()
+                    .atMost(Duration.ofMillis(300))
+                    .untilAsserted(() -> assertThat(engine.getCurrentBalance())
+                            .isCloseTo(2328.0 - 56.7325, org.assertj.core.data.Offset.offset(0.01)));
+            assertThat(System.currentTimeMillis() - sendMs).isLessThan(400L);
+            assertThat(engine.getOpenPositions()).isEmpty();
+
+            // Finally wait for the 700 ms POST /order to complete and open the position
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(3))
+                    .untilAsserted(() -> assertThat(engine.getOpenPositions()).hasSize(1));
+        } finally {
+            engine.onStop(null);
+        }
+    }
+
     private LiveTradingEngine createTestEngine(long maxQuoteAgeMs) {
         PolymarketSecretsResolver secretsResolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY),
@@ -1381,8 +1540,8 @@ class LiveTradingEngineTest {
                 secretsResolver,
                 new PolymarketClobRestClient(baseHttpUrl, httpClient, objectMapper, secretsResolver),
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
-                new PolymarketClobClient(vertx, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
-                new PolymarketPolyBoltClient(vertx, "ws://localhost:" + port + "/ws/polybolt",
+                new PolymarketClobClient(vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
+                new PolymarketPolyBoltClient(marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
                         Optional.of("api-key-live"),
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),

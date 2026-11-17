@@ -8,6 +8,7 @@ import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,6 +18,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Shared zero-allocation CDI bean that streams live Binance Spot ({@code aggTrades}),
@@ -111,9 +113,68 @@ public class CalculatedSpotStreamProcessor {
                 || recvTimestampMs <= 0L) {
             return;
         }
+        double twap60sUsd = applyBinanceAggTradeBytes(rawUtf8Bytes, recvTimestampMs);
+        if (Double.isNaN(twap60sUsd)) {
+            return;
+        }
+        double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+        long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
+        if (strategy != null && spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
+            strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, twap60sUsd);
+        }
+    }
+
+    /**
+     * Processes a batch of forward-progressing Binance {@code SPOT_AGG_TRADES} frames into
+     * {@link CalculatedSpotTwapEngine} without allocation and invokes {@code strategy.onCalculatedSpotTwap}
+     * at most once for the final aggregated state of the batch.
+     *
+     * @param batch    chronological batch of deduplicated/fast-forwarded Binance {@code aggTrade} frames
+     * @param strategy active trading strategy receiving {@code onCalculatedSpotTwap}
+     */
+    public void processBinanceFrameBatch(
+            List<TimestampedFrame> batch,
+            TradingStrategy strategy) {
+        if (batch == null || batch.isEmpty()) {
+            return;
+        }
+        boolean anyApplied = false;
+        double latestTwap60sUsd = Double.NaN;
+        long latestRecvTs = 0L;
+
+        for (int i = 0, n = batch.size(); i < n; i++) {
+            TimestampedFrame frame = batch.get(i);
+            if (frame == null) {
+                continue;
+            }
+            byte[] rawBytes = frame.rawUtf8Bytes();
+            long recvTs = frame.recvTs();
+            if (rawBytes == null || rawBytes.length == 0 || recvTs <= 0L) {
+                continue;
+            }
+            double twap = applyBinanceAggTradeBytes(rawBytes, recvTs);
+            if (!Double.isNaN(twap)) {
+                anyApplied = true;
+                latestTwap60sUsd = twap;
+                if (recvTs > latestRecvTs) {
+                    latestRecvTs = recvTs;
+                }
+            }
+        }
+
+        if (anyApplied && strategy != null) {
+            double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+            long effectiveTsMs = resolveEffectiveTimestampMs(latestRecvTs);
+            if (spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
+                strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, latestTwap60sUsd);
+            }
+        }
+    }
+
+    private double applyBinanceAggTradeBytes(byte[] rawUtf8Bytes, long recvTimestampMs) {
         try (JsonParser parser = objectMapper.createParser(rawUtf8Bytes)) {
             if (parser.nextToken() != JsonToken.START_OBJECT) {
-                return;
+                return Double.NaN;
             }
             double price = 0.0;
             double quantity = 1.0;
@@ -137,16 +198,12 @@ public class CalculatedSpotStreamProcessor {
             }
 
             if (price <= 0.0 || Double.isNaN(price)) {
-                return;
+                return Double.NaN;
             }
-            double twap60sUsd = calculatedSpotTwapEngine.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
-            double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
-            long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-            if (strategy != null && spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
-                strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, twap60sUsd);
-            }
+            return calculatedSpotTwapEngine.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
         } catch (Exception e) {
             Log.warnf("Failed to parse Binance SPOT_AGG_TRADES frame: %s", e.getMessage());
+            return Double.NaN;
         }
     }
 

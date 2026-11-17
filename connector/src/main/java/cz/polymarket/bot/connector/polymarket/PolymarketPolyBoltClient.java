@@ -1,15 +1,13 @@
 package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.quarkus.logging.Log;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -22,21 +20,16 @@ import java.util.function.Supplier;
 
 /**
  * Resilient WebSocket client for Polymarket PolyBolt v2 ({@code wss://ws-live-v2.polymarket.com/ws}).
- * Manages dedicated authenticated streams for {@code price.crypto.twap} (60-second TWAP) and
- * {@code price.crypto} (spot reference price) on an isolated 1-thread Netty EventLoop
- * ({@code polybolt-ws-io-reader}), performing the mandatory {@code op: "auth"} ->
- * {@code op: "authed"} -> {@code op: "subscribe"} handshake before subscribing to any channel and
+ * Manages single-stream authenticated connections for {@code price.crypto.twap} (60-second TWAP) and
+ * {@code price.crypto} (spot reference price) on the consolidated {@link MarketWebSocketRuntime}
+ * ({@code market-ws-io-reader} on {@code CPU #1}), performing the mandatory {@code op: "auth"} -&gt;
+ * {@code op: "authed"} -&gt; {@code op: "subscribe"} handshake before subscribing to any channel and
  * forwarding raw WebSocket JSON messages without parsing overhead.
  */
 @ApplicationScoped
 public class PolymarketPolyBoltClient {
 
-    /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing PolyBolt v2 oracle streams.
-     */
-    public static final String DEDICATED_POLYBOLT_IO_THREAD_NAME = "polybolt-ws-io-reader";
-
-    private final Vertx polyBoltVertx;
+    private final MarketWebSocketRuntime marketWsRuntime;
     private final String wsUrl;
     private volatile String apiKey;
     private volatile String secret;
@@ -51,7 +44,7 @@ public class PolymarketPolyBoltClient {
     /**
      * CDI constructor for the Polymarket PolyBolt WebSocket client.
      *
-     * @param vertx            shared Vert.x runtime instance
+     * @param marketWsRuntime  consolidated 1-EventLoop market WebSocket runtime
      * @param wsUrl            Polymarket PolyBolt v2 WebSocket endpoint URL
      * @param apiKey           Polymarket CLOB API key required for gated PolyBolt channels
      * @param secret           Polymarket CLOB API secret required for gated PolyBolt channels
@@ -61,7 +54,7 @@ public class PolymarketPolyBoltClient {
      */
     @Inject
     public PolymarketPolyBoltClient(
-            Vertx vertx,
+            MarketWebSocketRuntime marketWsRuntime,
             @ConfigProperty(name = "polymarket.connector.polybolt.ws-url", defaultValue = "wss://ws-live-v2.polymarket.com/ws")
             String wsUrl,
             @ConfigProperty(name = "polymarket.connector.api-key")
@@ -74,17 +67,10 @@ public class PolymarketPolyBoltClient {
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
-        this.polyBoltVertx = Vertx.vertx(new VertxOptions()
-                .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true)
-                .setAddressResolverOptions(new AddressResolverOptions()
-                        .setRoundRobinInetAddress(true)
-                        .setRotateServers(true)
-                        .setCacheMaxTimeToLive(60)));
-        if (!this.polyBoltVertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on polyBoltVertx (os=%s); falling back to JDK NIO EventLoop",
-                    System.getProperty("os.name", "unknown"));
+        if (marketWsRuntime == null) {
+            throw new IllegalArgumentException("marketWsRuntime cannot be null");
         }
+        this.marketWsRuntime = marketWsRuntime;
         this.wsUrl = wsUrl;
         this.apiKey = apiKey.map(String::trim).orElse("");
         this.secret = secret.map(String::trim).orElse("");
@@ -96,10 +82,6 @@ public class PolymarketPolyBoltClient {
     @PreDestroy
     void destroy() {
         stop();
-        try {
-            polyBoltVertx.close();
-        } catch (Exception ignored) {
-        }
     }
 
     /**
@@ -133,9 +115,7 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
-     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream for the given asset symbol,
-     * performing the {@code auth} -> {@code authed} -> {@code subscribe} handshake and forwarding raw messages
-     * directly to the listener without parsing.
+     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream for the given asset symbol.
      *
      * @param symbol   trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
@@ -146,7 +126,7 @@ public class PolymarketPolyBoltClient {
 
     /**
      * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream bound to an optional
-     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     * external dedicated worker thread (e.g. {@code market-strategy-worker}).
      *
      * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
      * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
@@ -171,9 +151,7 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
-     * Starts the PolyBolt {@code price.crypto} WebSocket stream for the given asset symbol,
-     * performing the {@code auth} -> {@code authed} -> {@code subscribe} handshake and forwarding raw messages
-     * directly to the listener without parsing.
+     * Starts the PolyBolt {@code price.crypto} WebSocket stream for the given asset symbol.
      *
      * @param symbol   trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
      * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
@@ -184,7 +162,7 @@ public class PolymarketPolyBoltClient {
 
     /**
      * Starts the PolyBolt {@code price.crypto} WebSocket stream bound to an optional
-     * external dedicated worker thread (e.g. {@code strategy-calculator-worker}).
+     * external dedicated worker thread (e.g. {@code market-strategy-worker}).
      *
      * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
      * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
@@ -210,7 +188,7 @@ public class PolymarketPolyBoltClient {
 
     /**
      * Drains all currently queued frames from both PolyBolt streams ({@code TWAP} and {@code CRYPTO-PRICE})
-     * into {@code scratchBatch}. Called on the dedicated {@code strategy-calculator-worker} thread.
+     * into {@code scratchBatch}.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained across both streams
@@ -240,6 +218,21 @@ public class PolymarketPolyBoltClient {
         }
         ReconnectingWebSocketStream spot = this.cryptoPriceStream;
         return spot != null && spot.hasQueuedFrames();
+    }
+
+    /**
+     * Marks active PolyBolt streams as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * if frames arrived concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public boolean prepareStreamsToPark() {
+        ReconnectingWebSocketStream twap = this.twapStream;
+        if (twap != null && twap.prepareToParkAndCheckQueuedFrames()) {
+            return true;
+        }
+        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
+        return spot != null && spot.prepareToParkAndCheckQueuedFrames();
     }
 
     /**
@@ -311,17 +304,12 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
-     * Returns the Netty I/O reader thread observed by either active PolyBolt stream, or {@code null}.
+     * Returns the consolidated Netty I/O reader thread ({@code market-ws-io-reader}).
      *
      * @return Netty I/O reader thread
      */
     public Thread getIoReaderThread() {
-        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
-        if (spot != null && spot.getIoReaderThread() != null) {
-            return spot.getIoReaderThread();
-        }
-        ReconnectingWebSocketStream twap = this.twapStream;
-        return twap != null ? twap.getIoReaderThread() : null;
+        return marketWsRuntime.getIoReaderThread();
     }
 
     /**
@@ -386,8 +374,8 @@ public class PolymarketPolyBoltClient {
             }
         };
 
-        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                polyBoltVertx,
+        return new ReconnectingWebSocketStream(
+                marketWsRuntime.vertx(),
                 streamName,
                 wsUrl,
                 () -> List.of(initialMessage),
@@ -396,8 +384,6 @@ public class PolymarketPolyBoltClient {
                 pingIntervalMs,
                 "{\"op\":\"ping\"}"
         );
-        stream.setDedicatedIoThreadName(DEDICATED_POLYBOLT_IO_THREAD_NAME);
-        return stream;
     }
 
     private void handleControlFrame(

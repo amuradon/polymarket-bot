@@ -779,4 +779,131 @@ class ReconnectingWebSocketStreamTest {
             streamLogger.removeHandler(testHandler);
         }
     }
+
+    @Test
+    void shouldForceReconnectViaReadIdleWatchdogWhenServerStopsRespondingAndDeduplicateDisconnectCallback() throws Exception {
+        AtomicInteger connectionCount = new AtomicInteger(0);
+        List<WebSocketStreamTelemetry> disconnects = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    int attempt = connectionCount.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        if ("{\"action\":\"subscribe\"}".equals(msg)) {
+                            ws.writeTextMessage("{\"conn\":" + attempt + "}");
+                        }
+                        // Attempt 1 intentionally ignores PING (silent half-dead socket); Attempt 2 replies PONG
+                        if (attempt >= 2 && "PING".equals(msg)) {
+                            ws.writeTextMessage("PONG");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://127.0.0.1:" + port + "/ws/watchdog-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "WATCHDOG-TEST-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> {
+                },
+                80L,
+                60L,
+                "PING"
+        );
+        stream.setDisconnectListener(disconnects::add);
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(connectionCount.get()).isGreaterThanOrEqualTo(2);
+                    assertThat(disconnects).hasSize(1);
+                    assertThat(disconnects.getFirst().lastCloseCode()).isEqualTo(-1);
+                    assertThat(disconnects.getFirst().lastCloseReason()).contains("Read-idle watchdog timeout");
+                    assertThat(stream.getState()).isEqualTo(ConnectionState.CONNECTED);
+                    assertThat(stream.getTelemetrySnapshot().lastCloseCode()).isZero();
+                });
+
+        stream.stop();
+    }
+
+    @Test
+    void shouldSendOnlyTextPingWhenConfiguredAndProtocolPingOtherwise() throws Exception {
+        AtomicInteger textPingsReceived = new AtomicInteger(0);
+        AtomicInteger protocolPingsReceived = new AtomicInteger(0);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    ws.textMessageHandler(msg -> {
+                        if ("PING".equals(msg)) {
+                            textPingsReceived.incrementAndGet();
+                            ws.writeTextMessage("PONG");
+                        }
+                    });
+                    ws.frameHandler(frame -> {
+                        if (frame.isPing()) {
+                            protocolPingsReceived.incrementAndGet();
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://127.0.0.1:" + port + "/ws/single-ping-test";
+
+        ReconnectingWebSocketStream textPingStream = new ReconnectingWebSocketStream(
+                vertx,
+                "TEXT-PING-ONLY-WS",
+                wsUrl,
+                List::of,
+                (rawJson, recvTs) -> {
+                },
+                500L,
+                40L,
+                "PING"
+        );
+        textPingStream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(3))
+                .untilAsserted(() -> assertThat(textPingsReceived.get()).isGreaterThanOrEqualTo(2));
+        assertThat(protocolPingsReceived.get()).isZero();
+        textPingStream.stop();
+
+        ReconnectingWebSocketStream protocolPingStream = new ReconnectingWebSocketStream(
+                vertx,
+                "PROTOCOL-PING-ONLY-WS",
+                wsUrl,
+                List::of,
+                (rawJson, recvTs) -> {
+                },
+                500L,
+                40L
+        );
+        protocolPingStream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(3))
+                .untilAsserted(() -> assertThat(protocolPingsReceived.get()).isGreaterThanOrEqualTo(2));
+        protocolPingStream.stop();
+    }
+
+    @Test
+    void shouldSelectDeterministicDistinctIpv4AddressesPerSlotAndParseLinuxCpuRanges() {
+        List<String> pool = List.of("3.162.140.12", "3.162.140.46", "3.162.140.82", "3.162.140.91");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 0, 0)).isEqualTo("3.162.140.12");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 1, 0)).isEqualTo("3.162.140.46");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 0, 1)).isEqualTo("3.162.140.46");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 1, 1)).isEqualTo("3.162.140.82");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(List.of(), 0, 0)).isNull();
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, -1, 0)).isNull();
+
+        assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0-3")).isEqualTo(4);
+        assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0-1\n")).isEqualTo(2);
+        assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0,2-5")).isEqualTo(5);
+        assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("")).isZero();
+        assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount(null)).isZero();
+    }
 }

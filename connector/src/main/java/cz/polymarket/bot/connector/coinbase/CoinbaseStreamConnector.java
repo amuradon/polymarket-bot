@@ -1,16 +1,12 @@
 package cz.polymarket.bot.connector.coinbase;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import io.netty.handler.ssl.OpenSsl;
-import io.quarkus.logging.Log;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -23,27 +19,20 @@ import java.util.Locale;
 /**
  * Manages a resilient WebSocket connection to Coinbase Exchange / Coinbase Pro
  * ({@code wss://ws-feed.exchange.coinbase.com}) for real-time Spot {@code matches} (trades) streams
- * (e.g. {@code BTCUSD} / {@code BTC-USD}, {@code ETHUSD} / {@code ETH-USD}).
- * <p>
- * Isolates the Coinbase stream onto a dedicated single-thread Netty EventLoop ({@code coinbase-ws-io-reader})
- * with native Linux Epoll transport and BoringSSL ({@code netty-tcnative}), filtering out
+ * (e.g. {@code BTCUSD} / {@code BTC-USD}, {@code ETHUSD} / {@code ETH-USD}) on the consolidated
+ * {@link MarketWebSocketRuntime} ({@code market-ws-io-reader} on {@code CPU #1}), filtering out
  * {@code subscriptions} and initial {@code last_match} frames directly on raw {@code byte[]} without
  * {@link String} allocation overhead.
  */
 @ApplicationScoped
 public class CoinbaseStreamConnector {
 
-    /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing the Coinbase Spot WebSocket stream.
-     */
-    public static final String DEDICATED_COINBASE_IO_THREAD_NAME = "coinbase-ws-io-reader";
-
     private static final byte[] TYPE_MATCH_COMPACT =
             "\"type\":\"match\"".getBytes(StandardCharsets.UTF_8);
     private static final byte[] TYPE_MATCH_SPACED =
             "\"type\": \"match\"".getBytes(StandardCharsets.UTF_8);
 
-    private final Vertx coinbaseVertx;
+    private final MarketWebSocketRuntime marketWsRuntime;
     private final String spotWsUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
@@ -53,57 +42,46 @@ public class CoinbaseStreamConnector {
     private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Coinbase Spot WebSocket connector with an isolated 1-thread Vert.x instance.
+     * Constructs the Coinbase Spot WebSocket connector backed by {@link MarketWebSocketRuntime}.
      *
-     * @param vertx            shared Quarkus Vert.x instance
+     * @param marketWsRuntime  consolidated 1-EventLoop market WebSocket runtime
      * @param spotWsUrl        Coinbase Exchange WebSocket feed URL
      * @param reconnectDelayMs delay in ms before reconnecting a dropped stream
      * @param pingIntervalMs   interval in ms for sending WebSocket ping frames
      */
     @Inject
     public CoinbaseStreamConnector(
-            Vertx vertx,
+            MarketWebSocketRuntime marketWsRuntime,
             @ConfigProperty(name = "polymarket.connector.coinbase.spot-ws-url", defaultValue = "wss://ws-feed.exchange.coinbase.com")
             String spotWsUrl,
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "15000")
             long pingIntervalMs) {
-        this.coinbaseVertx = Vertx.vertx(new VertxOptions()
-                .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true)
-                .setAddressResolverOptions(new AddressResolverOptions()
-                        .setRoundRobinInetAddress(true)
-                        .setRotateServers(true)
-                        .setCacheMaxTimeToLive(60)));
-        if (!this.coinbaseVertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on coinbaseVertx (os=%s); falling back to JDK NIO EventLoop",
-                    System.getProperty("os.name", "unknown"));
-        } else {
-            Log.infof("Initialized dedicated coinbaseVertx with native Linux Epoll transport (openSslAvailable=%b)",
-                    OpenSsl.isAvailable());
+        if (marketWsRuntime == null) {
+            throw new IllegalArgumentException("marketWsRuntime cannot be null");
         }
+        this.marketWsRuntime = marketWsRuntime;
         this.spotWsUrl = spotWsUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
     }
 
+    /**
+     * Stops the Coinbase stream on bean destruction.
+     */
     @PreDestroy
     public void destroy() {
         stop();
-        try {
-            coinbaseVertx.close();
-        } catch (Exception ignored) {
-        }
     }
 
     /**
-     * Returns whether native Linux Epoll transport is active on the dedicated Coinbase Vert.x instance.
+     * Returns whether native Linux Epoll transport is active on the consolidated market WebSocket runtime.
      *
      * @return {@code true} if native transport is enabled
      */
     public boolean isNativeTransportEnabled() {
-        return coinbaseVertx.isNativeTransportEnabled();
+        return marketWsRuntime.isNativeTransportEnabled();
     }
 
     /**
@@ -112,7 +90,7 @@ public class CoinbaseStreamConnector {
      * @return {@code true} if native OpenSSL/BoringSSL is available
      */
     public boolean isOpenSslAvailable() {
-        return OpenSsl.isAvailable();
+        return marketWsRuntime.isOpenSslAvailable();
     }
 
     /**
@@ -182,7 +160,7 @@ public class CoinbaseStreamConnector {
         };
 
         ReconnectingWebSocketStream newStream = new ReconnectingWebSocketStream(
-                coinbaseVertx,
+                marketWsRuntime.vertx(),
                 streamName,
                 spotWsUrl,
                 () -> List.of(subscribeMsg),
@@ -190,7 +168,6 @@ public class CoinbaseStreamConnector {
                 reconnectDelayMs,
                 pingIntervalMs
         );
-        newStream.setDedicatedIoThreadName(DEDICATED_COINBASE_IO_THREAD_NAME);
         newStream.setDisconnectListener(this.disconnectListener);
         if (externalWorker != null) {
             newStream.bindExternalWorker(externalWorker);
@@ -218,6 +195,17 @@ public class CoinbaseStreamConnector {
     public boolean hasQueuedFrames() {
         ReconnectingWebSocketStream current = this.stream;
         return current != null && current.hasQueuedFrames();
+    }
+
+    /**
+     * Marks the Coinbase stream as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * if frames arrived concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public boolean prepareStreamToPark() {
+        ReconnectingWebSocketStream current = this.stream;
+        return current != null && current.prepareToParkAndCheckQueuedFrames();
     }
 
     /**
@@ -270,13 +258,12 @@ public class CoinbaseStreamConnector {
     }
 
     /**
-     * Returns the dedicated Netty I/O reader thread observed by the active Coinbase stream, or {@code null}.
+     * Returns the consolidated Netty I/O reader thread ({@code market-ws-io-reader}).
      *
      * @return Netty I/O reader thread
      */
     public Thread getIoReaderThread() {
-        ReconnectingWebSocketStream current = this.stream;
-        return current != null ? current.getIoReaderThread() : null;
+        return marketWsRuntime.getIoReaderThread();
     }
 
     /**

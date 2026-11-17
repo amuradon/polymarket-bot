@@ -2,8 +2,12 @@
 
 ## Compute & Runtime Profile
 - **Instance**: Dedicated non-throttled **`c8gn.xlarge`** (4 vCPU Graviton4 ARM64, 8 GiB RAM, 30 Gbps Enhanced Networking / Nitro v5).
-- **Core Mapping**: 4 physical Neoverse-V2 cores mapped to dedicated lock-free threads: `clob-ws-io-reader`, `clob-book-worker`, `strategy-calculator-worker`, `order-execution-io-worker`.
-- **JVM**: Java 25 Generational ZGC (`-XX:+UseZGC -XX:+AlwaysPreTouch -XX:+UseTransparentHugePages -XX:+UseThreadPriorities -Xms6g -Xmx6g`).
+- **Core Mapping**: 4 physical Neoverse-V2 cores strictly isolated via `CPUAffinity=0` + Java 25 FFM `sched_setaffinity`:
+  - `CPU 0`: ENA NIC IRQs (`rx-usecs 25`, `tx-usecs 64`), ZGC, Quarkus `:443`, `telemetry-maintenance-worker`, and `clob-user-worker` (`POLYMARKET-CLOB-USER`).
+  - `CPU 1`: Consolidated single-EventLoop native `epoll` + BoringSSL `market-ws-io-reader` (`MarketWebSocketRuntime`).
+  - `CPU 2`: Fused lock-free L1-cache `market-strategy-worker` (`PolymarketLocalBook` + `PolyBolt` + `CalculatedSpotTwapEngine` + `TradingStrategy`).
+  - `CPU 3`: Dedicated isolated `order-execution-io-worker` (EIP-712 signing + `POST /order`).
+- **JVM**: Java 25 Generational ZGC (`-XX:+UseZGC -XX:+AlwaysPreTouch -XX:+UseTransparentHugePages -XX:+UseThreadPriorities -XX:ActiveProcessorCount=4 -XX:ConcGCThreads=1 -XX:ParallelGCThreads=2 -Xms4g -Xmx4g -Djava.net.preferIPv4Stack=true -Djava.net.preferIPv6Addresses=false`).
 - **Service & Logs**: `/etc/systemd/system/polymarket-live.service` deployed via `/usr/local/bin/deploy-polymarket-live.sh`; logs written to `/var/log/polymarket-live/live-trading.log` and streamed by CloudWatch Agent to `/polymarket-bot/polymarket-bot-live-base/live-trading`.
 
 ---

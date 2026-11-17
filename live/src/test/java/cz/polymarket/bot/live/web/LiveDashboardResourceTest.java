@@ -36,10 +36,10 @@ class LiveDashboardResourceTest {
                 .body(containsString("Disconnect &amp; Slow-Consumer Forensics"))
                 .body(containsString("Recent Telemetry History"))
                 .body(containsString("OS TCP Rx Buffer"))
-                .body(containsString("vCPU #1: I/O Reader"))
-                .body(containsString("vCPU #2: CLOB Book Worker"))
-                .body(containsString("vCPU #3: Strategy Calculator"))
-                .body(containsString("vCPU #4: Order &amp; I/O Worker"));
+                .body(containsString("vCPU #0: User WS &amp; Control"))
+                .body(containsString("vCPU #1: Market WS I/O"))
+                .body(containsString("vCPU #2: Book &amp; Strategy"))
+                .body(containsString("vCPU #3: Order Execution"));
     }
 
     @Test
@@ -88,10 +88,10 @@ class LiveDashboardResourceTest {
                 .body("nativeTransportEnabled", notNullValue())
                 .body("openSslAvailable", notNullValue())
                 .body("threads", hasSize(4))
-                .body("threads[0].role", equalTo("vCPU #1: I/O Reader"))
-                .body("threads[1].role", equalTo("vCPU #2: CLOB Book Worker"))
-                .body("threads[2].role", equalTo("vCPU #3: Strategy Calculator"))
-                .body("threads[3].role", equalTo("vCPU #4: Order & I/O Worker"))
+                .body("threads[0].role", equalTo("vCPU #0: User WS & Control"))
+                .body("threads[1].role", equalTo("vCPU #1: Market WS I/O"))
+                .body("threads[2].role", equalTo("vCPU #2: Book & Strategy"))
+                .body("threads[3].role", equalTo("vCPU #3: Order Execution"))
                 .body("history", hasSize(greaterThanOrEqualTo(1)))
                 .body("disconnectEvents", hasSize(greaterThanOrEqualTo(1)))
                 .body("disconnectEvents[0].streamName", equalTo("POLYMARKET-CLOB-btc-updown-15m-1794207600"))

@@ -1,16 +1,12 @@
 package cz.polymarket.bot.connector.kraken;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import io.netty.handler.ssl.OpenSsl;
-import io.quarkus.logging.Log;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -29,19 +25,12 @@ import java.util.Set;
 /**
  * Manages resilient WebSocket v2 connections ({@code wss://ws.kraken.com/v2}) for Kraken Spot trade streams:
  * {@code USDTUSD} ({@code USDT/USD}) and the configured cryptocurrency symbol (e.g. {@code BTCUSD} / {@code BTC/USD},
- * {@code ETHUSD} / {@code ETH/USD}).
- * <p>
- * Isolates Kraken Spot streams onto a dedicated single-thread Netty EventLoop ({@code kraken-ws-io-reader})
- * with native Linux Epoll transport and BoringSSL ({@code netty-tcnative}), filtering control, heartbeat,
- * and snapshot frames directly on raw {@code byte[]} without {@link String} allocation overhead.
+ * {@code ETHUSD} / {@code ETH/USD}) on the consolidated {@link MarketWebSocketRuntime}
+ * ({@code market-ws-io-reader} on {@code CPU #1}), filtering control, heartbeat, and snapshot frames directly
+ * on raw {@code byte[]} without {@link String} allocation overhead.
  */
 @ApplicationScoped
 public class KrakenStreamConnector {
-
-    /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing Kraken Spot WebSocket streams.
-     */
-    public static final String DEDICATED_KRAKEN_IO_THREAD_NAME = "kraken-ws-io-reader";
 
     /**
      * Canonical symbol identifier for the Kraken Spot USDT/USD stream.
@@ -61,7 +50,7 @@ public class KrakenStreamConnector {
     private static final byte[] METHOD_SUBSCRIBE_SPACED =
             "\"method\": \"subscribe\"".getBytes(StandardCharsets.UTF_8);
 
-    private final Vertx krakenVertx;
+    private final MarketWebSocketRuntime marketWsRuntime;
     private final String spotWsUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
@@ -69,57 +58,46 @@ public class KrakenStreamConnector {
     private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Kraken Spot multi-stream WebSocket connector with an isolated 1-thread Vert.x instance.
+     * Constructs the Kraken Spot multi-stream WebSocket connector backed by {@link MarketWebSocketRuntime}.
      *
-     * @param vertx            shared Quarkus Vert.x instance
+     * @param marketWsRuntime  consolidated 1-EventLoop market WebSocket runtime
      * @param spotWsUrl        Kraken Spot WebSocket v2 endpoint URL
      * @param reconnectDelayMs delay in ms before reconnecting a dropped stream
      * @param pingIntervalMs   interval in ms for sending WebSocket ping frames
      */
     @Inject
     public KrakenStreamConnector(
-            Vertx vertx,
+            MarketWebSocketRuntime marketWsRuntime,
             @ConfigProperty(name = "polymarket.connector.kraken.spot-ws-url", defaultValue = "wss://ws.kraken.com/v2")
             String spotWsUrl,
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "15000")
             long pingIntervalMs) {
-        this.krakenVertx = Vertx.vertx(new VertxOptions()
-                .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true)
-                .setAddressResolverOptions(new AddressResolverOptions()
-                        .setRoundRobinInetAddress(true)
-                        .setRotateServers(true)
-                        .setCacheMaxTimeToLive(60)));
-        if (!this.krakenVertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on krakenVertx (os=%s); falling back to JDK NIO EventLoop",
-                    System.getProperty("os.name", "unknown"));
-        } else {
-            Log.infof("Initialized dedicated krakenVertx with native Linux Epoll transport (openSslAvailable=%b)",
-                    OpenSsl.isAvailable());
+        if (marketWsRuntime == null) {
+            throw new IllegalArgumentException("marketWsRuntime cannot be null");
         }
+        this.marketWsRuntime = marketWsRuntime;
         this.spotWsUrl = spotWsUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
     }
 
+    /**
+     * Stops active Kraken streams on bean destruction.
+     */
     @PreDestroy
     public void destroy() {
         stop();
-        try {
-            krakenVertx.close();
-        } catch (Exception ignored) {
-        }
     }
 
     /**
-     * Returns whether native Linux Epoll transport is active on the dedicated Kraken Vert.x instance.
+     * Returns whether native Linux Epoll transport is active on the consolidated market WebSocket runtime.
      *
      * @return {@code true} if native transport is enabled
      */
     public boolean isNativeTransportEnabled() {
-        return krakenVertx.isNativeTransportEnabled();
+        return marketWsRuntime.isNativeTransportEnabled();
     }
 
     /**
@@ -128,7 +106,7 @@ public class KrakenStreamConnector {
      * @return {@code true} if native OpenSSL/BoringSSL is available
      */
     public boolean isOpenSslAvailable() {
-        return OpenSsl.isAvailable();
+        return marketWsRuntime.isOpenSslAvailable();
     }
 
     /**
@@ -219,7 +197,7 @@ public class KrakenStreamConnector {
             };
 
             ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                    krakenVertx,
+                    marketWsRuntime.vertx(),
                     streamName,
                     spotWsUrl,
                     () -> List.of(subscribeMsg),
@@ -227,7 +205,6 @@ public class KrakenStreamConnector {
                     reconnectDelayMs,
                     pingIntervalMs
             );
-            stream.setDedicatedIoThreadName(DEDICATED_KRAKEN_IO_THREAD_NAME);
             stream.setDisconnectListener(this.disconnectListener);
             if (externalWorker != null) {
                 stream.bindExternalWorker(externalWorker);
@@ -259,6 +236,21 @@ public class KrakenStreamConnector {
     public synchronized boolean hasQueuedFrames() {
         for (ReconnectingWebSocketStream stream : streams.values()) {
             if (stream.hasQueuedFrames()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Marks all active Kraken streams as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * if frames arrived concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public synchronized boolean prepareStreamsToPark() {
+        for (ReconnectingWebSocketStream stream : streams.values()) {
+            if (stream.prepareToParkAndCheckQueuedFrames()) {
                 return true;
             }
         }
@@ -302,18 +294,12 @@ public class KrakenStreamConnector {
     }
 
     /**
-     * Returns the dedicated Netty I/O reader thread observed by any active Kraken stream, or {@code null}.
+     * Returns the consolidated Netty I/O reader thread ({@code market-ws-io-reader}).
      *
      * @return Netty I/O reader thread
      */
-    public synchronized Thread getIoReaderThread() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            Thread t = stream.getIoReaderThread();
-            if (t != null) {
-                return t;
-            }
-        }
-        return null;
+    public Thread getIoReaderThread() {
+        return marketWsRuntime.getIoReaderThread();
     }
 
     /**

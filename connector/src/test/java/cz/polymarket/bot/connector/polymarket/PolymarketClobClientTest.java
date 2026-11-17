@@ -2,6 +2,8 @@ package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.vertx.core.Vertx;
@@ -27,15 +29,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PolymarketClobClientTest {
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
+        }
         if (server != null) {
             server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -67,6 +74,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 200L,
                 5000L
@@ -114,6 +122,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 80L,
                 5000L
@@ -169,6 +178,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 60L,
                 5000L
@@ -226,6 +236,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 200L,
                 5000L
@@ -295,6 +306,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 3000L,
                 0L
@@ -333,18 +345,18 @@ class PolymarketClobClientTest {
         assertThat(totalCoalescedOrDeduped).isGreaterThanOrEqualTo(1L);
 
         // Verify peer redundancy lookup while BACKUP is CONNECTED
-        PolymarketClobClient.MarketStreamRedundancyStatus primaryRedundancy =
+        StreamRedundancyStatus primaryRedundancy =
                 client.describeMarketStreamRedundancy("POLYMARKET-CLOB-" + slug);
-        assertThat(primaryRedundancy.dualMarketStream()).isTrue();
+        assertThat(primaryRedundancy.dualStream()).isTrue();
         assertThat(primaryRedundancy.peerStreamName()).isEqualTo("POLYMARKET-CLOB-" + slug + "-BACKUP");
         assertThat(primaryRedundancy.peerState()).isEqualTo(ConnectionState.CONNECTED);
         assertThat(primaryRedundancy.peerRemoteAddress()).contains(":" + port);
         assertThat(primaryRedundancy.failoverActive()).isTrue();
 
         assertThat(client.describeMarketStreamRedundancy("POLYMARKET-CLOB-USER"))
-                .isEqualTo(PolymarketClobClient.MarketStreamRedundancyStatus.NONE);
+                .isEqualTo(StreamRedundancyStatus.NONE);
         assertThat(client.describeMarketStreamRedundancy("POLYMARKET-POLYBOLT-TWAP"))
-                .isEqualTo(PolymarketClobClient.MarketStreamRedundancyStatus.NONE);
+                .isEqualTo(StreamRedundancyStatus.NONE);
 
         // Closing the market stream and opening a new market must not leak reconnectCount into the new market
         client.closeMarketStream(slug);
@@ -421,6 +433,7 @@ class PolymarketClobClientTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketClobClient client = new PolymarketClobClient(
                 vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
                 3000L,
                 0L

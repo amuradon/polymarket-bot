@@ -3,6 +3,7 @@ package cz.polymarket.bot.trading.stream;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.ExecutionRouter;
@@ -250,5 +251,46 @@ class CalculatedSpotStreamProcessorTest {
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
         assertThat(submittedOrders.getFirst().side()).isEqualTo("BUY");
+    }
+
+    @Test
+    @DisplayName("Should process a batch of Binance aggTrade frames and invoke strategy once with final state")
+    void shouldProcessBinanceFrameBatchAndInvokeStrategyOncePerBatch() {
+        List<double[]> callbacks = new ArrayList<>();
+        TradingStrategy recordingStrategy = new TradingStrategy() {
+            @Override
+            public void init(StrategyContext context) {
+            }
+
+            @Override
+            public void onExecutionReport(ExecutionReport report) {
+            }
+
+            @Override
+            public void onCalculatedSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
+                callbacks.add(new double[]{timestampMs, spotPrice, twap60sPrice});
+            }
+        };
+
+        List<TimestampedFrame> batch = List.of(
+                new TimestampedFrame("{\"e\":\"aggTrade\",\"a\":101,\"p\":\"85000.00\",\"q\":\"1.0\"}".getBytes(StandardCharsets.UTF_8), 10_000L),
+                new TimestampedFrame("{\"e\":\"aggTrade\",\"a\":102,\"p\":\"85010.00\",\"q\":\"1.0\"}".getBytes(StandardCharsets.UTF_8), 10_005L),
+                new TimestampedFrame("{\"e\":\"aggTrade\",\"a\":103,\"p\":\"85030.00\",\"q\":\"2.0\"}".getBytes(StandardCharsets.UTF_8), 10_010L)
+        );
+
+        processor.processBinanceFrameBatch(batch, recordingStrategy);
+
+        CalculatedSpotTwapEngine expectedEngine = new CalculatedSpotTwapEngine();
+        CalculatedSpotStreamProcessor referenceProcessor =
+                new CalculatedSpotStreamProcessor(objectMapper, expectedEngine, "BTCUSDT");
+        for (TimestampedFrame frame : batch) {
+            referenceProcessor.processBinanceFrameBytes(
+                    BinanceStreamType.SPOT_AGG_TRADES, frame.rawUtf8Bytes(), frame.recvTs(), null);
+        }
+
+        assertThat(callbacks).hasSize(1);
+        assertThat((long) callbacks.getFirst()[0]).isEqualTo(10_010L);
+        assertThat(callbacks.getFirst()[1]).isCloseTo(expectedEngine.getLastSpotPriceUsd(), within(1e-8));
+        assertThat(callbacks.getFirst()[2]).isCloseTo(expectedEngine.getLastTwap60sPriceUsd(), within(1e-8));
     }
 }

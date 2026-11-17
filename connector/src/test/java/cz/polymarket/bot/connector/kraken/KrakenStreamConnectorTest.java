@@ -1,6 +1,7 @@
 package cz.polymarket.bot.connector.kraken;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.vertx.core.Vertx;
@@ -32,15 +33,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class KrakenStreamConnectorTest {
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
+        }
         if (server != null) {
             server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -98,7 +104,7 @@ class KrakenStreamConnectorTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         String wsUrl = "ws://localhost:" + port + "/v2";
 
-        KrakenStreamConnector connector = new KrakenStreamConnector(vertx, wsUrl, 200L, 5000L);
+        KrakenStreamConnector connector = new KrakenStreamConnector(marketWsRuntime, wsUrl, 200L, 5000L);
 
         Map<String, List<String>> receivedBySymbol = new ConcurrentHashMap<>();
         Map<String, Long> timestampsBySymbol = new ConcurrentHashMap<>();
@@ -128,7 +134,7 @@ class KrakenStreamConnectorTest {
                             .containsEntry("BTCUSD", ConnectionState.CONNECTED);
                     assertThat(connector.getIoReaderThread()).isNotNull();
                     assertThat(connector.getIoReaderThread().getName())
-                            .isEqualTo(KrakenStreamConnector.DEDICATED_KRAKEN_IO_THREAD_NAME);
+                            .isEqualTo(MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME);
                     assertThat(connector.getIoReaderThread().getPriority()).isEqualTo(Thread.MAX_PRIORITY);
                 });
 
@@ -152,7 +158,7 @@ class KrakenStreamConnectorTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         String wsUrl = "ws://localhost:" + port + "/v2";
 
-        KrakenStreamConnector connector = new KrakenStreamConnector(vertx, wsUrl, 200L, 5000L);
+        KrakenStreamConnector connector = new KrakenStreamConnector(marketWsRuntime, wsUrl, 200L, 5000L);
         Map<String, String> receivedBySymbol = new ConcurrentHashMap<>();
 
         connector.start("ETHUSDT", false, (symbol, rawJson, recvTs) -> receivedBySymbol.put(symbol, rawJson));
@@ -188,7 +194,7 @@ class KrakenStreamConnectorTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         String wsUrl = "ws://localhost:" + port + "/v2";
 
-        KrakenStreamConnector connector = new KrakenStreamConnector(vertx, wsUrl, 200L, 0L);
+        KrakenStreamConnector connector = new KrakenStreamConnector(marketWsRuntime, wsUrl, 200L, 0L);
         connector.setDisconnectListener(disconnectEvents::add);
 
         Map<String, String> decodedFromBytes = new ConcurrentHashMap<>();

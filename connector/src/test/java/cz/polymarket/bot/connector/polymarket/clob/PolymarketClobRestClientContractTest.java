@@ -224,6 +224,68 @@ class PolymarketClobRestClientContractTest {
         assertThat(client.pingKeepalive()).isTrue();
     }
 
+    @Test
+    void shouldNotLogSevereOnExpectedFakLiquidityMissHttp400WhileStillLoggingSevereOnHttp500() throws Exception {
+        List<java.util.logging.LogRecord> captured = new java.util.concurrent.CopyOnWriteArrayList<>();
+        java.util.logging.Logger restLogger = java.util.logging.Logger.getLogger(PolymarketClobRestClient.class.getName());
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record != null) {
+                    captured.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        restLogger.addHandler(handler);
+
+        try {
+            AtomicReference<Integer> statusToReturn = new AtomicReference<>(400);
+            AtomicReference<String> bodyToReturn = new AtomicReference<>(
+                    "{\"error\":\"no orders found to match with FAK order. FAK orders are partially filled or killed if no match is found.\"}"
+            );
+
+            server = vertx.createHttpServer()
+                    .requestHandler(req -> req.bodyHandler(buf -> req.response()
+                            .setStatusCode(statusToReturn.get())
+                            .putHeader("Content-Type", "application/json")
+                            .end(bodyToReturn.get())));
+
+            int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+            PolymarketClobRestClient client = createClient(port);
+            PolymarketEip712Signer signer = new PolymarketEip712Signer(TEST_PRIVATE_KEY_HEX);
+            ClobOrderEnvelope buyEnvelope = signer.buildSignedBuyOrder(
+                    TEST_MAKER_ADDR, TEST_API_KEY, TEST_TOKEN_ID_NO, 690, 5L, "FAK", 5423363231144297L, 1792741778193L
+            );
+
+            ClobOrderResponse fakMissResp = client.submitOrder(buyEnvelope);
+            assertThat(fakMissResp.success()).isFalse();
+            assertThat(fakMissResp.errorMsg()).contains("no orders found to match with FAK order");
+            assertThat(captured)
+                    .noneMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue());
+
+            captured.clear();
+            statusToReturn.set(500);
+            bodyToReturn.set("{\"error\":\"upstream matching engine internal error\"}");
+
+            ClobOrderResponse serverErrResp = client.submitOrder(buyEnvelope);
+            assertThat(serverErrResp.success()).isFalse();
+            assertThat(captured)
+                    .anyMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue()
+                            && r.getMessage() != null
+                            && r.getMessage().contains("HTTP 500"));
+        } finally {
+            restLogger.removeHandler(handler);
+        }
+    }
+
     private PolymarketClobRestClient createClient(int port) {
         PolymarketSecretsResolver resolver = new PolymarketSecretsResolver(
                 Optional.of(TEST_PRIVATE_KEY_HEX),

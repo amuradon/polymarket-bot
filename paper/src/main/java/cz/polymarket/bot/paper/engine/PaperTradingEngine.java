@@ -1,12 +1,11 @@
 package cz.polymarket.bot.paper.engine;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
-import cz.polymarket.bot.connector.binance.BinanceStreamListener;
-import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.MarketCandle;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
@@ -167,17 +166,7 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
      */
     public synchronized void startSpotStreams() {
         Log.infof("Starting PaperTradingEngine Binance, Kraken, and Coinbase spot WebSocket streams for symbol=%s...", symbol);
-        binanceConnector.startSpotAggTrades(symbol, new BinanceStreamListener() {
-            @Override
-            public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-                onRawBinanceFrame(streamType, rawJson, recvTimestampMs);
-            }
-
-            @Override
-            public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                onRawBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs);
-            }
-        });
+        binanceConnector.startSpotAggTradesBatch(symbol, this::onRawBinanceFrameBatch, null);
         krakenConnector.start(symbol, true, new KrakenStreamListener() {
             @Override
             public void onStreamMessage(String normSymbol, String rawJson, long recvTimestampMs) {
@@ -541,28 +530,13 @@ public class PaperTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Processes a raw JSON text frame from the Binance Spot {@code aggTrades} WebSocket stream,
-     * updating {@link CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
-     * to the active strategy.
+     * Processes a batch of forward-progressing Binance Spot {@code aggTrades} frames into
+     * {@link CalculatedSpotTwapEngine} and forwards the final spot/TWAP state to the active strategy.
      *
-     * @param streamType      Binance stream type
-     * @param rawJson         raw Binance JSON frame
-     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param batch chronological batch of Binance {@code aggTrade} frames
      */
-    public synchronized void onRawBinanceFrame(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-        spotStreamProcessor.processBinanceFrame(streamType, rawJson, recvTimestampMs, activeStrategy);
-    }
-
-    /**
-     * Processes a raw UTF-8 {@code byte[]} frame from the Binance Spot {@code aggTrades} WebSocket stream
-     * without intermediate {@link String} allocation.
-     *
-     * @param streamType      Binance stream type
-     * @param rawUtf8Bytes    raw UTF-8 JSON bytes
-     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
-     */
-    public synchronized void onRawBinanceFrameBytes(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-        spotStreamProcessor.processBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+    public synchronized void onRawBinanceFrameBatch(List<TimestampedFrame> batch) {
+        spotStreamProcessor.processBinanceFrameBatch(batch, activeStrategy);
     }
 
     /**

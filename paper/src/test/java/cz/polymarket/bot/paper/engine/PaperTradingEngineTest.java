@@ -4,9 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
-import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TradeRecord;
@@ -26,8 +27,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -40,6 +43,7 @@ class PaperTradingEngineTest {
     Path tempDir;
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer mockServer;
     private int port;
     private ObjectMapper objectMapper;
@@ -54,6 +58,7 @@ class PaperTradingEngineTest {
     @BeforeEach
     void setUp() throws Exception {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
         objectMapper = new ObjectMapper();
         PerformanceMetricsCalculator metricsCalculator = new PerformanceMetricsCalculator();
         repository = new PaperTradeRepository(tempDir.toString(), 10000.0, objectMapper, metricsCalculator);
@@ -88,20 +93,20 @@ class PaperTradingEngineTest {
         port = mockServer.actualPort();
 
         binanceConnector = new BinanceStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/binance/spot",
                 "ws://localhost:" + port + "/binance/futures",
                 1000L,
                 10000L
         );
         krakenConnector = new KrakenStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/kraken/ws/v2",
                 1000L,
                 10000L
         );
         coinbaseConnector = new CoinbaseStreamConnector(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/coinbase/ws",
                 1000L,
                 10000L
@@ -120,6 +125,9 @@ class PaperTradingEngineTest {
         }
         if (coinbaseConnector != null) {
             coinbaseConnector.destroy();
+        }
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
         }
         if (mockServer != null) {
             mockServer.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -399,11 +407,10 @@ class PaperTradingEngineTest {
             long ts = windowStartMs + s * 1_000L;
             double osc = (s % 2 == 0) ? 0.75 : -0.75;
             double spot = 89_995.00 + osc;
-            engine.onRawBinanceFrame(
-                    BinanceStreamType.SPOT_AGG_TRADES,
-                    "{\"e\":\"aggTrade\",\"p\":\"" + spot + "\",\"q\":\"1.0\",\"m\":false}",
+            engine.onRawBinanceFrameBatch(List.of(new TimestampedFrame(
+                    ("{\"e\":\"aggTrade\",\"p\":\"" + spot + "\",\"q\":\"1.0\",\"m\":false}").getBytes(StandardCharsets.UTF_8),
                     ts - 240L
-            );
+            )));
             engine.onRawCoinbaseFrame(
                     "BTCUSD",
                     "{\"type\":\"match\",\"price\":\"" + spot + "\",\"size\":\"1.0\"}",
@@ -425,11 +432,10 @@ class PaperTradingEngineTest {
 
         // 3. Breakout across Binance, Coinbase, and Kraken before Chainlink updates -> triggers virtual paper fill!
         long breakoutTs = tau46Ms + 400L;
-        engine.onRawBinanceFrame(
-                BinanceStreamType.SPOT_AGG_TRADES,
-                "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.0\",\"m\":false}",
+        engine.onRawBinanceFrameBatch(List.of(new TimestampedFrame(
+                "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.0\",\"m\":false}".getBytes(StandardCharsets.UTF_8),
                 breakoutTs
-        );
+        )));
         engine.onRawCoinbaseFrame(
                 "BTCUSD",
                 "{\"type\":\"match\",\"price\":\"90018.00\",\"size\":\"2.0\"}",

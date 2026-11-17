@@ -2,6 +2,7 @@ package cz.polymarket.bot.connector.ws;
 
 import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -9,6 +10,7 @@ import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketConnectOptions;
 import io.vertx.core.net.OpenSSLEngineOptions;
+import io.vertx.core.net.SocketAddress;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 
 import java.net.URI;
@@ -26,18 +28,32 @@ import java.util.function.Supplier;
 
 /**
  * Resilient, non-blocking Vert.x WebSocket stream client with connection state monitoring,
- * periodic ping frames, automatic reconnection on disconnect or failure, immediate local timestamping
- * on the network I/O reader thread, zero-decode raw {@code byte[]} frame handoff, and lock-free batch draining
- * over a cache-line-padded JCTools queue with real-time queue and latency telemetry.
+ * periodic ping frames, read-idle/pong watchdog detection, automatic reconnection with optional
+ * edge IPv4 slot diversity, immediate local timestamping on the network I/O reader thread,
+ * zero-decode raw {@code byte[]} frame handoff, and lock-free batch draining with adaptive
+ * user-space micro-spinning to eliminate {@code futex} context-switch storms during bursts.
  */
 public class ReconnectingWebSocketStream {
 
+    /**
+     * User-space {@link Thread#onSpinWait()} duration in nanoseconds ({@code 300 us}) after active work
+     * before entering kernel {@code futex} park, absorbing burst inter-arrival gaps with zero context switches.
+     */
+    public static final long HOT_SPIN_WINDOW_NS = 300_000L;
+
+    /**
+     * Fallback park timeout in nanoseconds ({@code 500 ms}) when idle, minimizing background timer wakeups.
+     */
+    public static final long IDLE_PARK_TIMEOUT_NS = 500_000_000L;
+
+    private static final int SPIN_CLOCK_CHECK_STRIDE = 64;
     private static final int MAX_FRAME_SIZE_BYTES = 4 * 1024 * 1024;
     private static final int INITIAL_QUEUE_CHUNK_SIZE = 1024;
     private static final int MAX_HEARTBEAT_FRAME_LENGTH = 64;
-    private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
     private static final int DEFAULT_BATCH_LIMIT = 512;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 500L;
+    private static final long MIN_READ_IDLE_TIMEOUT_MS = 150L;
+    private static final Buffer PROTOCOL_PING_BUFFER = Buffer.buffer("ping");
     static final long INITIAL_FAST_RECONNECT_DELAY_MS = 50L;
 
     private final Vertx vertx;
@@ -59,6 +75,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
+    private final AtomicLong lastInboundActivityMs = new AtomicLong(0L);
     private final AtomicLong reconnectCount = new AtomicLong(0L);
     private final AtomicInteger consecutiveReconnectAttempts = new AtomicInteger(0);
     private final AtomicLong debugReceivedFrameCounter = new AtomicLong(0L);
@@ -79,6 +96,8 @@ public class ReconnectingWebSocketStream {
     private final AtomicBoolean terminalCloseCompleted = new AtomicBoolean(false);
 
     private volatile String dedicatedIoThreadName;
+    private volatile MarketWebSocketRuntime addressSlotRuntime;
+    private volatile int preferredAddressSlot = -1;
     private volatile Thread ioReaderThread;
     private volatile Thread drainThread;
     private volatile Thread externalWorkerThread;
@@ -222,6 +241,19 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
+     * Configures deterministic edge IPv4 address slot selection (e.g. {@code 0} for {@code PRIMARY} and
+     * {@code 1} for {@code BACKUP}) via {@link MarketWebSocketRuntime} so redundant legs connect to distinct
+     * upstream CDN/exchange edge servers while preserving TLS SNI and HTTP {@code Host} headers.
+     *
+     * @param runtime shared market WebSocket runtime providing cached IPv4 pool resolution
+     * @param slot    0-based address slot index ({@code >= 0})
+     */
+    public void setPreferredAddressSlot(MarketWebSocketRuntime runtime, int slot) {
+        this.addressSlotRuntime = runtime;
+        this.preferredAddressSlot = slot;
+    }
+
+    /**
      * Registers an optional listener invoked whenever this WebSocket stream closes unexpectedly while running.
      *
      * @param disconnectListener listener receiving the stream telemetry snapshot at the moment of disconnect
@@ -234,8 +266,6 @@ public class ReconnectingWebSocketStream {
      * Registers an optional listener invoked when the remote WebSocket server cleanly terminates
      * the stream with {@code closeCode == 1000} (Normal Closure) or when the stream disconnects
      * while {@link #setShouldReconnectSupplier(BooleanSupplier)} evaluates to {@code false}.
-     * When triggered, the stream drains any remaining queued frames, stops without reconnecting,
-     * and does not trigger the unexpected {@link WebSocketDisconnectListener} or error logs.
      *
      * @param normalCloseListener listener receiving the final stream telemetry snapshot upon terminal closure
      */
@@ -245,9 +275,7 @@ public class ReconnectingWebSocketStream {
 
     /**
      * Registers an optional predicate evaluated upon WebSocket disconnection or reconnect timer expiration
-     * to determine whether the stream should attempt to reconnect. When it returns {@code false} (for example,
-     * after a market's interval has already ended), the stream stops without reconnecting, drains any remaining
-     * frames, and invokes the configured {@link #setNormalCloseListener(Consumer)}.
+     * to determine whether the stream should attempt to reconnect.
      *
      * @param shouldReconnectSupplier supplier returning {@code true} if reconnection is allowed, or {@code false} to finalize
      */
@@ -256,10 +284,9 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
-     * Configures an explicit thread name and {@link Thread#MAX_PRIORITY} for the isolated Netty EventLoop
-     * thread servicing this stream (e.g. {@code "clob-ws-io-reader"}).
+     * Configures an explicit thread name and {@link Thread#MAX_PRIORITY} for the EventLoop thread servicing this stream.
      *
-     * @param dedicatedIoThreadName thread name to assign to the isolated EventLoop thread
+     * @param dedicatedIoThreadName thread name to assign to the EventLoop thread
      */
     public void setDedicatedIoThreadName(String dedicatedIoThreadName) {
         this.dedicatedIoThreadName = dedicatedIoThreadName;
@@ -289,10 +316,36 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
-     * Binds this stream's lock-free {@code inboundQueue} wakeups to an externally managed dedicated platform thread
-     * (such as {@code clob-book-worker}, {@code strategy-calculator-worker}, or {@code order-execution-io-worker}).
-     * When bound, {@link #start()} will not spawn an internal drain thread; instead, the bound worker thread
-     * is unparked upon frame arrival when parked and drains batches via {@link #drainAvailableBatch(List)}.
+     * Computes the maximum allowed inbound silence duration in milliseconds before the read-idle/pong watchdog
+     * forces a reconnect for a stream with the given {@code pingIntervalMs}.
+     *
+     * @param pingIntervalMs configured ping interval in milliseconds ({@code > 0})
+     * @return read-idle watchdog threshold in milliseconds
+     */
+    static long computeReadIdleTimeoutMs(long pingIntervalMs) {
+        return Math.max(MIN_READ_IDLE_TIMEOUT_MS, Math.multiplyExact(pingIntervalMs, 3L));
+    }
+
+    /**
+     * Executes a bounded user-space {@link Thread#onSpinWait()} loop for up to {@link #HOT_SPIN_WINDOW_NS}
+     * while {@code abortSpinCondition} evaluates to {@code false}, checking {@link System#nanoTime()} only
+     * every {@code 64} iterations to avoid clock-read overhead.
+     *
+     * @param abortSpinCondition supplier returning {@code true} as soon as work arrives or shutdown is requested
+     */
+    public static void spinWaitBeforePark(BooleanSupplier abortSpinCondition) {
+        long deadlineNs = System.nanoTime() + HOT_SPIN_WINDOW_NS;
+        int iter = 0;
+        while (!abortSpinCondition.getAsBoolean()) {
+            Thread.onSpinWait();
+            if ((++iter & (SPIN_CLOCK_CHECK_STRIDE - 1)) == 0 && System.nanoTime() - deadlineNs >= 0L) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Binds this stream's lock-free {@code inboundQueue} wakeups to an externally managed dedicated platform thread.
      *
      * @param workerThread dedicated platform thread responsible for draining this stream
      */
@@ -385,13 +438,9 @@ public class ReconnectingWebSocketStream {
         scratchBatch.clear();
         int drainedCount = inboundQueue.drain(scratchBatch::add, DEFAULT_BATCH_LIMIT);
         if (drainedCount == 0) {
-            workerParked.set(true);
-            drainedCount = inboundQueue.drain(scratchBatch::add, DEFAULT_BATCH_LIMIT);
-            if (drainedCount == 0) {
-                return 0;
-            }
-            workerParked.set(false);
-        } else if (workerParked.get()) {
+            return 0;
+        }
+        if (workerParked.getOpaque()) {
             workerParked.set(false);
         }
 
@@ -430,6 +479,22 @@ public class ReconnectingWebSocketStream {
             scratchBatch.clear();
         }
         return drainedCount;
+    }
+
+    /**
+     * Marks the bound external worker as parked ({@code workerParked = true}) immediately prior to
+     * {@link LockSupport#parkNanos(Object, long)} and returns {@code true} if frames arrived concurrently
+     * during the transition (requiring an immediate drain rather than parking).
+     *
+     * @return {@code true} if {@code inboundQueue} is non-empty after arming {@code workerParked}
+     */
+    public boolean prepareToParkAndCheckQueuedFrames() {
+        workerParked.set(true);
+        if (!inboundQueue.isEmpty()) {
+            workerParked.set(false);
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -517,7 +582,7 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
-     * Returns the remote endpoint address ({@code IP:port}) of the current or most recent connection, or {@code ""}.
+     * Returns the resolved remote endpoint address ({@code IP:port}) of the current or most recent connection, or {@code ""}.
      *
      * @return remote socket address string
      */
@@ -574,143 +639,28 @@ public class ReconnectingWebSocketStream {
                     .setSsl(isSsl)
                     .setURI(path);
 
-            httpClient.webSocket(connectOptions)
-                    .onSuccess(ws -> {
-                        if (!running.get() || ws.isClosed()) {
-                            if (!ws.isClosed()) {
-                                ws.close();
-                            }
+            MarketWebSocketRuntime slotRuntime = this.addressSlotRuntime;
+            int slot = this.preferredAddressSlot;
+            Future<SocketAddress> serverAddrFuture = (slotRuntime != null && slot >= 0)
+                    ? slotRuntime.resolveDistinctIpv4Server(uri.getHost(), port, slot, consecutiveReconnectAttempts.get())
+                    : Future.succeededFuture(null);
+
+            serverAddrFuture
+                    .compose(serverAddr -> {
+                        if (!running.get()) {
+                            return Future.failedFuture("Stream stopped before connect");
+                        }
+                        if (serverAddr != null) {
+                            connectOptions.setServer(serverAddr);
+                        }
+                        return httpClient.webSocket(connectOptions);
+                    })
+                    .onSuccess(this::onWebSocketConnected)
+                    .onFailure(err -> {
+                        if (!running.get()) {
                             return;
                         }
-                        Thread currentThread = Thread.currentThread();
-                        applyDedicatedIoThreadTuning(currentThread);
-                        this.ioReaderThread = currentThread;
-                        this.currentWebSocket = ws;
-                        String remote = ws.remoteAddress() != null ? ws.remoteAddress().toString() : "";
-                        this.lastRemoteAddress.set(remote);
-                        this.state.set(ConnectionState.CONNECTED);
-                        Log.infof("[%s] WebSocket connected to %s (remote=%s) on thread %s (reconnectCount=%d)",
-                                streamName, wsUrl, remote.isEmpty() ? "unknown" : remote, currentThread.getName(), reconnectCount.get());
-
-                        final Buffer[] continuationBuffer = new Buffer[1];
-
-                        ws.frameHandler(frame -> {
-                            this.ioReaderThread = Thread.currentThread();
-                            long recvTs = System.currentTimeMillis();
-                            lastMessageTimestampMs.set(recvTs);
-
-                            if (frame.isText() || frame.isBinary()) {
-                                if (frame.isFinal()) {
-                                    continuationBuffer[0] = null;
-                                    handleInboundPayloadBuffer(frame.binaryData(), recvTs);
-                                } else {
-                                    Buffer partial = frame.binaryData();
-                                    Buffer acc = Buffer.buffer(Math.max(4096, partial != null ? partial.length() * 2 : 4096));
-                                    if (partial != null) {
-                                        acc.appendBuffer(partial);
-                                    }
-                                    continuationBuffer[0] = acc;
-                                }
-                            } else if (frame.isContinuation()) {
-                                Buffer acc = continuationBuffer[0];
-                                if (acc != null) {
-                                    Buffer partial = frame.binaryData();
-                                    if (partial != null) {
-                                        acc.appendBuffer(partial);
-                                    }
-                                    if (frame.isFinal()) {
-                                        continuationBuffer[0] = null;
-                                        handleInboundPayloadBuffer(acc, recvTs);
-                                    }
-                                }
-                            }
-                        });
-
-                        ws.pongHandler(buf -> {
-                            this.ioReaderThread = Thread.currentThread();
-                            long nowMs = System.currentTimeMillis();
-                            lastMessageTimestampMs.set(nowMs);
-                            if (Log.isTraceEnabled()) {
-                                Log.tracef("[%s] Received WebSocket PONG at %d ms", streamName, nowMs);
-                            }
-                        });
-
-                        ws.closeHandler(v -> {
-                            short closeCode = ws.closeStatusCode() != null ? ws.closeStatusCode() : -1;
-                            String closeReason = ws.closeReason() != null && !ws.closeReason().isEmpty() ? ws.closeReason() : "none";
-                            if (closeCode != -1 || lastCloseCode.get() == 0) {
-                                lastCloseCode.set(closeCode);
-                            }
-                            if (!"none".equals(closeReason) || lastCloseReason.get().isEmpty()) {
-                                lastCloseReason.set(closeReason);
-                            }
-                            if (running.get()) {
-                                String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
-                                if (this.normalCloseListener != null && (closeCode == 1000 || !shouldReconnect())) {
-                                    if (closeCode == 1000) {
-                                        Log.infof("[%s] WebSocket connection closed normally with code=1000 (remote=%s, reason=%s, totalFrames=%d); finalizing stream without reconnect",
-                                                streamName, remoteLabel, closeReason, totalFramesReceived.get());
-                                    } else {
-                                        Log.infof("[%s] WebSocket connection closed after market interval end (remote=%s, code=%d, reason=%s, totalFrames=%d); skipping reconnect and finalizing stream",
-                                                streamName, remoteLabel, closeCode, closeReason, totalFramesReceived.get());
-                                    }
-                                    triggerTerminalClose(closeCode, closeReason);
-                                    return;
-                                }
-                                long nextDelayMs = computeNextReconnectDelayMs(
-                                        consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
-                                WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
-                                Log.warnf("[%s] WebSocket connection closed (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
-                                        streamName, remoteLabel, closeCode, closeReason,
-                                        eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
-                                        eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
-                                        eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
-                                        eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
-                                        eventSnapshot.reconnectCount(), nextDelayMs);
-                                if (this.currentWebSocket == ws) {
-                                    notifyDisconnectListener(eventSnapshot);
-                                }
-                            } else if (Log.isDebugEnabled()) {
-                                Log.debugf("[%s] WebSocket connection closed cleanly on stop (code=%d)", streamName, closeCode);
-                            }
-                            onConnectionClosed(ws);
-                        });
-
-                        ws.exceptionHandler(err -> {
-                            String msg = err.getMessage() != null && !err.getMessage().isEmpty() ? err.getMessage() : "exception";
-                            lastCloseReason.set(msg);
-                            Log.warnf("[%s] WebSocket error: %s", streamName, msg);
-                            if (running.get() && this.currentWebSocket == ws) {
-                                int code = lastCloseCode.get() != 0 ? lastCloseCode.get() : -1;
-                                lastCloseCode.compareAndSet(0, -1);
-                                if (this.normalCloseListener != null && !shouldReconnect()) {
-                                    Log.infof("[%s] WebSocket error occurred after market interval end (reason=%s); skipping reconnect and finalizing stream",
-                                            streamName, msg);
-                                    triggerTerminalClose(code, msg);
-                                    return;
-                                }
-                                notifyDisconnectListener(buildTelemetrySnapshot(code, msg));
-                            }
-                            onConnectionClosed(ws);
-                        });
-
-                        if (subscriptionMessagesSupplier != null) {
-                            List<String> subs = subscriptionMessagesSupplier.get();
-                            if (subs != null) {
-                                for (String sub : subs) {
-                                    if (sub != null && !sub.isBlank()) {
-                                        if (Log.isTraceEnabled()) {
-                                            Log.tracef("[%s] Sending initial WebSocket subscription/auth message", streamName);
-                                        }
-                                        ws.writeTextMessage(sub);
-                                    }
-                                }
-                            }
-                        }
-
-                        startPingTimer();
-                    })
-                    .onFailure(err -> {
+                        lastCloseCode.set(-1);
                         lastCloseReason.set(err.getMessage() != null ? err.getMessage() : "connect_failed");
                         Log.errorf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
                         scheduleReconnect();
@@ -719,6 +669,180 @@ public class ReconnectingWebSocketStream {
             Log.errorf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
             scheduleReconnect();
         }
+    }
+
+    private void onWebSocketConnected(WebSocket ws) {
+        if (!running.get() || ws.isClosed()) {
+            if (!ws.isClosed()) {
+                ws.close();
+            }
+            return;
+        }
+        Thread currentThread = Thread.currentThread();
+        applyDedicatedIoThreadTuning(currentThread);
+        this.ioReaderThread = currentThread;
+        this.currentWebSocket = ws;
+
+        long connectedNowMs = System.currentTimeMillis();
+        this.lastInboundActivityMs.set(connectedNowMs);
+        this.lastCloseCode.set(0);
+        this.lastCloseReason.set("");
+
+        String remote = formatRemoteAddress(ws.remoteAddress());
+        this.lastRemoteAddress.set(remote);
+        this.state.set(ConnectionState.CONNECTED);
+        Log.infof("[%s] WebSocket connected to %s (remote=%s) on thread %s (reconnectCount=%d)",
+                streamName, wsUrl, remote.isEmpty() ? "unknown" : remote, currentThread.getName(), reconnectCount.get());
+
+        final Buffer[] continuationBuffer = new Buffer[1];
+        final AtomicBoolean disconnectHandled = new AtomicBoolean(false);
+
+        ws.frameHandler(frame -> {
+            this.ioReaderThread = Thread.currentThread();
+            long recvTs = System.currentTimeMillis();
+            lastMessageTimestampMs.set(recvTs);
+            lastInboundActivityMs.set(recvTs);
+
+            if (frame.isText() || frame.isBinary()) {
+                if (frame.isFinal()) {
+                    continuationBuffer[0] = null;
+                    handleInboundPayloadBuffer(frame.binaryData(), recvTs);
+                } else {
+                    Buffer partial = frame.binaryData();
+                    Buffer acc = Buffer.buffer(Math.max(4096, partial != null ? partial.length() * 2 : 4096));
+                    if (partial != null) {
+                        acc.appendBuffer(partial);
+                    }
+                    continuationBuffer[0] = acc;
+                }
+            } else if (frame.isContinuation()) {
+                Buffer acc = continuationBuffer[0];
+                if (acc != null) {
+                    Buffer partial = frame.binaryData();
+                    if (partial != null) {
+                        acc.appendBuffer(partial);
+                    }
+                    if (frame.isFinal()) {
+                        continuationBuffer[0] = null;
+                        handleInboundPayloadBuffer(acc, recvTs);
+                    }
+                }
+            }
+        });
+
+        ws.pongHandler(buf -> {
+            this.ioReaderThread = Thread.currentThread();
+            long nowMs = System.currentTimeMillis();
+            lastMessageTimestampMs.set(nowMs);
+            lastInboundActivityMs.set(nowMs);
+            if (Log.isTraceEnabled()) {
+                Log.tracef("[%s] Received WebSocket PONG at %d ms", streamName, nowMs);
+            }
+        });
+
+        ws.closeHandler(v -> {
+            if (!disconnectHandled.compareAndSet(false, true)) {
+                return;
+            }
+            short closeCode = ws.closeStatusCode() != null ? ws.closeStatusCode() : -1;
+            String closeReason = ws.closeReason() != null && !ws.closeReason().isEmpty() ? ws.closeReason() : "none";
+            lastCloseCode.set(closeCode);
+            lastCloseReason.set(closeReason);
+
+            if (running.get()) {
+                String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
+                if (this.normalCloseListener != null && (closeCode == 1000 || !shouldReconnect())) {
+                    if (closeCode == 1000) {
+                        Log.infof("[%s] WebSocket connection closed normally with code=1000 (remote=%s, reason=%s, totalFrames=%d); finalizing stream without reconnect",
+                                streamName, remoteLabel, closeReason, totalFramesReceived.get());
+                    } else {
+                        Log.infof("[%s] WebSocket connection closed after market interval end (remote=%s, code=%d, reason=%s, totalFrames=%d); skipping reconnect and finalizing stream",
+                                streamName, remoteLabel, closeCode, closeReason, totalFramesReceived.get());
+                    }
+                    triggerTerminalClose(closeCode, closeReason);
+                    return;
+                }
+                long nextDelayMs = computeNextReconnectDelayMs(
+                        consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
+                WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(closeCode, closeReason);
+                Log.warnf("[%s] WebSocket connection closed (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                        streamName, remoteLabel, closeCode, closeReason,
+                        eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
+                        eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
+                        eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
+                        eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
+                        eventSnapshot.reconnectCount(), nextDelayMs);
+                if (this.currentWebSocket == ws) {
+                    notifyDisconnectListener(eventSnapshot);
+                }
+            } else if (Log.isDebugEnabled()) {
+                Log.debugf("[%s] WebSocket connection closed cleanly on stop (code=%d)", streamName, closeCode);
+            }
+            onConnectionClosed(ws);
+        });
+
+        ws.exceptionHandler(err -> {
+            if (!disconnectHandled.compareAndSet(false, true)) {
+                return;
+            }
+            String msg = err.getMessage() != null && !err.getMessage().isEmpty() ? err.getMessage() : "exception";
+            int code = -1;
+            lastCloseCode.set(code);
+            lastCloseReason.set(msg);
+
+            if (running.get() && this.currentWebSocket == ws) {
+                String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
+                if (this.normalCloseListener != null && !shouldReconnect()) {
+                    Log.infof("[%s] WebSocket error occurred after market interval end (remote=%s, reason=%s); skipping reconnect and finalizing stream",
+                            streamName, remoteLabel, msg);
+                    triggerTerminalClose(code, msg);
+                    return;
+                }
+                long nextDelayMs = computeNextReconnectDelayMs(
+                        consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
+                WebSocketStreamTelemetry eventSnapshot = buildTelemetrySnapshot(code, msg);
+                Log.warnf("[%s] WebSocket connection aborted (remote=%s, code=%d, reason=%s, queueDepth=%d, maxQueueDepth=%d, lastQueueLagMs=%d, maxQueueLagMs=%d, lastProcessTimeUs=%d, maxProcessTimeUs=%d, totalFrames=%d, coalescedFrames=%d, reconnectCount=%d); scheduling reconnect in %d ms",
+                        streamName, remoteLabel, code, msg,
+                        eventSnapshot.queueDepth(), eventSnapshot.maxQueueDepth(),
+                        eventSnapshot.lastQueueLagMs(), eventSnapshot.maxQueueLagMs(),
+                        eventSnapshot.lastProcessTimeUs(), eventSnapshot.maxProcessTimeUs(),
+                        eventSnapshot.totalFramesReceived(), eventSnapshot.coalescedFramesCount(),
+                        eventSnapshot.reconnectCount(), nextDelayMs);
+                notifyDisconnectListener(eventSnapshot);
+            }
+            onConnectionClosed(ws);
+        });
+
+        if (subscriptionMessagesSupplier != null) {
+            List<String> subs = subscriptionMessagesSupplier.get();
+            if (subs != null) {
+                for (String sub : subs) {
+                    if (sub != null && !sub.isBlank()) {
+                        if (Log.isTraceEnabled()) {
+                            Log.tracef("[%s] Sending initial WebSocket subscription/auth message", streamName);
+                        }
+                        ws.writeTextMessage(sub);
+                    }
+                }
+            }
+        }
+
+        startPingTimer(ws, disconnectHandled);
+    }
+
+    static String formatRemoteAddress(SocketAddress addr) {
+        if (addr == null) {
+            return "";
+        }
+        String ip = addr.hostAddress();
+        if (ip != null && !ip.isBlank()) {
+            return ip + ":" + addr.port();
+        }
+        String host = addr.host();
+        if (host != null && !host.isBlank()) {
+            return host + ":" + addr.port();
+        }
+        return addr.toString();
     }
 
     private void notifyDisconnectListener(WebSocketStreamTelemetry snapshot) {
@@ -798,7 +922,7 @@ public class ReconnectingWebSocketStream {
             }
             totalFramesReceived.incrementAndGet();
 
-            if (workerParked.get() && workerParked.compareAndSet(true, false)) {
+            if (workerParked.getOpaque() && workerParked.compareAndSet(true, false)) {
                 Thread target = this.externalWorkerThread != null ? this.externalWorkerThread : this.drainThread;
                 if (target != null) {
                     LockSupport.unpark(target);
@@ -807,22 +931,59 @@ public class ReconnectingWebSocketStream {
         }
     }
 
-    private void startPingTimer() {
+    private void startPingTimer(WebSocket activeWs, AtomicBoolean disconnectHandled) {
         cancelPingTimer();
         if (pingIntervalMs > 0L && running.get()) {
+            final long idleTimeoutMs = computeReadIdleTimeoutMs(pingIntervalMs);
             pingTimerId = vertx.setPeriodic(pingIntervalMs, id -> {
                 WebSocket ws = this.currentWebSocket;
-                if (ws != null && !ws.isClosed() && running.get()) {
-                    if (textPingPayload != null && !textPingPayload.isBlank()) {
-                        if (Log.isTraceEnabled()) {
-                            Log.tracef("[%s] Sending WebSocket text ping: %s", streamName, textPingPayload);
+                if (ws != activeWs || ws == null || ws.isClosed() || !running.get()) {
+                    return;
+                }
+                long nowMs = System.currentTimeMillis();
+                long lastActivity = lastInboundActivityMs.get();
+                long silenceMs = lastActivity > 0L ? Math.max(0L, nowMs - lastActivity) : 0L;
+                if (silenceMs > idleTimeoutMs) {
+                    if (disconnectHandled.compareAndSet(false, true)) {
+                        String reason = "Read-idle watchdog timeout (" + silenceMs + " ms without inbound frame or PONG)";
+                        lastCloseCode.set(-1);
+                        lastCloseReason.set(reason);
+                        String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
+                        if (this.normalCloseListener != null && !shouldReconnect()) {
+                            Log.infof("[%s] WebSocket read-idle watchdog expired after market end (remote=%s, silenceMs=%d); finalizing stream",
+                                    streamName, remoteLabel, silenceMs);
+                            triggerTerminalClose(-1, reason);
+                            try {
+                                ws.close();
+                            } catch (Exception ignored) {
+                            }
+                            return;
                         }
-                        ws.writeTextMessage(textPingPayload);
+                        long nextDelayMs = computeNextReconnectDelayMs(
+                                consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
+                        WebSocketStreamTelemetry snapshot = buildTelemetrySnapshot(-1, reason);
+                        Log.warnf("[%s] WebSocket read-idle watchdog triggered (remote=%s, silenceMs=%d, timeoutMs=%d, reconnectCount=%d); forcing reconnect in %d ms",
+                                streamName, remoteLabel, silenceMs, idleTimeoutMs, snapshot.reconnectCount(), nextDelayMs);
+                        notifyDisconnectListener(snapshot);
+                        onConnectionClosed(ws);
+                        try {
+                            ws.close();
+                        } catch (Exception ignored) {
+                        }
                     }
+                    return;
+                }
+
+                if (textPingPayload != null && !textPingPayload.isBlank()) {
+                    if (Log.isTraceEnabled()) {
+                        Log.tracef("[%s] Sending WebSocket text ping: %s", streamName, textPingPayload);
+                    }
+                    ws.writeTextMessage(textPingPayload);
+                } else {
                     if (Log.isTraceEnabled()) {
                         Log.tracef("[%s] Sending WebSocket protocol PING frame", streamName);
                     }
-                    ws.writePing(Buffer.buffer("ping"));
+                    ws.writePing(PROTOCOL_PING_BUFFER);
                 }
             });
         }
@@ -919,15 +1080,15 @@ public class ReconnectingWebSocketStream {
             if (drained > 0) {
                 continue;
             }
-            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && running.get() && externalWorkerThread == null && inboundQueue.isEmpty(); spin++) {
-                Thread.onSpinWait();
-            }
+            spinWaitBeforePark(() -> !running.get() || externalWorkerThread != null || !inboundQueue.isEmpty());
             if (!running.get() || externalWorkerThread != null || !inboundQueue.isEmpty()) {
                 continue;
             }
-            workerParked.set(true);
-            if (running.get() && externalWorkerThread == null && inboundQueue.isEmpty()) {
-                LockSupport.park(this);
+            if (prepareToParkAndCheckQueuedFrames()) {
+                continue;
+            }
+            if (running.get() && externalWorkerThread == null) {
+                LockSupport.parkNanos(this, IDLE_PARK_TIMEOUT_NS);
             }
             workerParked.set(false);
         }

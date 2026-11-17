@@ -136,9 +136,16 @@ public class PolymarketClobRestClient {
                 Log.tracef("CLOB POST %s response (HTTP %d): %s", path, response.statusCode(), response.body());
             }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                Log.errorf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), response.body());
+                String respBody = response.body() != null ? response.body() : "";
+                if (response.statusCode() == 400 && respBody.contains("no orders found to match with FAK order")) {
+                    if (Log.isDebugEnabled()) {
+                        Log.debugf("CLOB POST /order FAK liquidity miss (HTTP 400): %s", respBody);
+                    }
+                } else {
+                    Log.errorf("CLOB POST /order returned HTTP %d: %s", response.statusCode(), respBody);
+                }
                 return new ClobOrderResponse(
-                        "HTTP " + response.statusCode() + ": " + response.body(),
+                        "HTTP " + response.statusCode() + ": " + respBody,
                         "",
                         "0",
                         "0",

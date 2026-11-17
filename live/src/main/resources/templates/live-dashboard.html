@@ -345,7 +345,7 @@
         <div class="metric-card">
             <span class="title">Quote Conflation</span>
             <span class="value text-blue">{telemetry.conflatedQuotesCount}</span>
-            <span class="subtitle">Superseded BBO snapshots coalesced on vCPU #2 → #3</span>
+            <span class="subtitle">Superseded BBO snapshots coalesced in vCPU #2 L1 loop</span>
         </div>
         <div class="metric-card">
             <span class="title">CLOB Orders</span>
@@ -515,7 +515,7 @@
                             <td>{d.lastQueueLagMs} ms / {d.maxQueueLagMs} ms</td>
                             <td>{d.lastProcessTimeUs} µs / {d.maxProcessTimeUs} µs</td>
                             <td>{d.tcpRxQueueBytes} B (collapsed: {d.tcpRcvCollapsed})</td>
-                            <td>{d.processCpuLoadPct}% / {d.ioReaderCpuPct}% / {d.clobBookWorkerCpuPct}%</td>
+                            <td>{d.processCpuLoadPct}% / {d.ioReaderCpuPct}% / {d.marketStrategyWorkerCpuPct}%</td>
                         </tr>
                     {/for}
                     </tbody>
@@ -541,10 +541,10 @@
                         <th>Timestamp (ms)</th>
                         <th>JVM CPU %</th>
                         <th>Host CPU %</th>
+                        <th>vCPU #0 (User) %</th>
                         <th>vCPU #1 (I/O) %</th>
-                        <th>vCPU #2 (Book) %</th>
-                        <th>vCPU #3 (Strat) %</th>
-                        <th>vCPU #4 (Order) %</th>
+                        <th>vCPU #2 (Book+Strat) %</th>
+                        <th>vCPU #3 (Order) %</th>
                         <th>TCP Rx Queue</th>
                         <th>CLOB Queue Depth</th>
                         <th>CLOB Max Lag</th>
@@ -558,9 +558,9 @@
                             <td>{h.timestampMs}</td>
                             <td>{h.processCpuLoadPct}%</td>
                             <td>{h.systemCpuLoadPct}%</td>
+                            <td>{h.userWorkerCpuPct}%</td>
                             <td class="{#if h.ioReaderCpuPct > 80}text-red{#else}text-green{/if}">{h.ioReaderCpuPct}%</td>
-                            <td>{h.clobBookWorkerCpuPct}%</td>
-                            <td>{h.strategyWorkerCpuPct}%</td>
+                            <td>{h.marketStrategyWorkerCpuPct}%</td>
                             <td>{h.orderWorkerCpuPct}%</td>
                             <td>{h.tcpRxQueueBytes} B</td>
                             <td>{h.clobQueueDepth}</td>

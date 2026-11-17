@@ -1,6 +1,7 @@
 package cz.polymarket.bot.connector.coinbase;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import io.vertx.core.Vertx;
@@ -32,15 +33,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class CoinbaseStreamConnectorTest {
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
+        }
         if (server != null) {
             server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -88,7 +94,7 @@ class CoinbaseStreamConnectorTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         String wsUrl = "ws://localhost:" + port;
 
-        CoinbaseStreamConnector connector = new CoinbaseStreamConnector(vertx, wsUrl, 200L, 5000L);
+        CoinbaseStreamConnector connector = new CoinbaseStreamConnector(marketWsRuntime, wsUrl, 200L, 5000L);
 
         Map<String, List<String>> receivedBySymbol = new ConcurrentHashMap<>();
         Map<String, Long> timestampsBySymbol = new ConcurrentHashMap<>();
@@ -117,7 +123,7 @@ class CoinbaseStreamConnectorTest {
                     assertThat(connector.getState()).isEqualTo(ConnectionState.CONNECTED);
                     assertThat(connector.getIoReaderThread()).isNotNull();
                     assertThat(connector.getIoReaderThread().getName())
-                            .isEqualTo(CoinbaseStreamConnector.DEDICATED_COINBASE_IO_THREAD_NAME);
+                            .isEqualTo(MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME);
                     assertThat(connector.getIoReaderThread().getPriority()).isEqualTo(Thread.MAX_PRIORITY);
                 });
 
@@ -141,7 +147,7 @@ class CoinbaseStreamConnectorTest {
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         String wsUrl = "ws://localhost:" + port;
 
-        CoinbaseStreamConnector connector = new CoinbaseStreamConnector(vertx, wsUrl, 200L, 0L);
+        CoinbaseStreamConnector connector = new CoinbaseStreamConnector(marketWsRuntime, wsUrl, 200L, 0L);
         connector.setDisconnectListener(disconnectEvents::add);
 
         Map<String, String> decodedFromBytes = new ConcurrentHashMap<>();

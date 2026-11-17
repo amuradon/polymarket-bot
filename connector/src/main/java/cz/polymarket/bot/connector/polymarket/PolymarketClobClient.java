@@ -2,17 +2,16 @@ package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import cz.polymarket.bot.connector.ws.RawWebSocketBatchListener;
 import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketDisconnectListener;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
-import io.netty.handler.ssl.OpenSsl;
 import io.quarkus.logging.Log;
 import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
-import io.vertx.core.dns.AddressResolverOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -35,9 +34,10 @@ import java.util.stream.Collectors;
  * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
  * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
  * <p>
- * Isolates high-frequency market orderbook streams onto a dedicated single-thread Netty EventLoop
- * ({@code clob-ws-io-reader}) so that TLS decryption and socket draining for orderbook bursts never contend
- * with the HTTP server, PolyBolt streams, or the authenticated User Channel stream.
+ * Routes high-frequency market orderbook streams onto the consolidated {@link MarketWebSocketRuntime}
+ * ({@code market-ws-io-reader} on {@code CPU #1}) with deterministic CloudFront edge IPv4 diversity
+ * ({@code slot 0} for {@code PRIMARY}, {@code slot 1} for {@code BACKUP}), while keeping the low-rate
+ * authenticated User Channel stream on the shared Quarkus {@link Vertx} runtime ({@code CPU #0}).
  */
 @ApplicationScoped
 public class PolymarketClobClient {
@@ -47,13 +47,8 @@ public class PolymarketClobClient {
      */
     public static final String USER_STREAM_KEY = "USER";
 
-    /**
-     * Dedicated thread name for the isolated Netty EventLoop servicing CLOB market orderbook streams.
-     */
-    public static final String DEDICATED_MARKET_IO_THREAD_NAME = "clob-ws-io-reader";
-
     private final Vertx sharedVertx;
-    private final Vertx clobMarketVertx;
+    private final MarketWebSocketRuntime marketWsRuntime;
     private final String wsUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
@@ -65,10 +60,10 @@ public class PolymarketClobClient {
     private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
-     * Constructs the Polymarket CLOB WebSocket client with a dedicated 1-thread Vert.x instance
-     * exclusively for market orderbook streams.
+     * Constructs the Polymarket CLOB WebSocket client.
      *
-     * @param vertx            shared Quarkus Vert.x runtime instance (used by the low-rate User stream)
+     * @param vertx            shared Quarkus Vert.x runtime instance (used by the low-rate User stream on {@code CPU #0})
+     * @param marketWsRuntime  shared 1-EventLoop market WebSocket runtime ({@code market-ws-io-reader} on {@code CPU #1})
      * @param wsUrl            Polymarket CLOB WebSocket URL
      * @param reconnectDelayMs delay in milliseconds before attempting reconnection
      * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
@@ -76,27 +71,21 @@ public class PolymarketClobClient {
     @Inject
     public PolymarketClobClient(
             Vertx vertx,
+            MarketWebSocketRuntime marketWsRuntime,
             @ConfigProperty(name = "polymarket.connector.clob.ws-url", defaultValue = "wss://ws-subscriptions-clob.polymarket.com/ws/market")
             String wsUrl,
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
             long pingIntervalMs) {
-        this.sharedVertx = vertx;
-        this.clobMarketVertx = Vertx.vertx(new VertxOptions()
-                .setEventLoopPoolSize(1)
-                .setPreferNativeTransport(true)
-                .setAddressResolverOptions(new AddressResolverOptions()
-                        .setRoundRobinInetAddress(true)
-                        .setRotateServers(true)
-                        .setCacheMaxTimeToLive(60)));
-        if (!this.clobMarketVertx.isNativeTransportEnabled()) {
-            Log.warnf("Native Linux Epoll transport is unavailable on clobMarketVertx (os=%s); falling back to JDK NIO EventLoop",
-                    System.getProperty("os.name", "unknown"));
-        } else {
-            Log.infof("Initialized dedicated clobMarketVertx with native Linux Epoll transport (openSslAvailable=%b)",
-                    OpenSsl.isAvailable());
+        if (vertx == null) {
+            throw new IllegalArgumentException("vertx cannot be null");
         }
+        if (marketWsRuntime == null) {
+            throw new IllegalArgumentException("marketWsRuntime cannot be null");
+        }
+        this.sharedVertx = vertx;
+        this.marketWsRuntime = marketWsRuntime;
         this.wsUrl = wsUrl;
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
@@ -105,19 +94,15 @@ public class PolymarketClobClient {
     @PreDestroy
     void destroy() {
         stopAll();
-        try {
-            clobMarketVertx.close();
-        } catch (Exception ignored) {
-        }
     }
 
     /**
-     * Returns whether native Linux Epoll transport is active on the dedicated CLOB market Vert.x instance.
+     * Returns whether native Linux Epoll transport is active on the consolidated market WebSocket runtime.
      *
      * @return {@code true} if native transport is enabled
      */
     public boolean isNativeTransportEnabled() {
-        return clobMarketVertx.isNativeTransportEnabled();
+        return marketWsRuntime.isNativeTransportEnabled();
     }
 
     /**
@@ -126,7 +111,7 @@ public class PolymarketClobClient {
      * @return {@code true} if native OpenSSL/BoringSSL is available
      */
     public boolean isOpenSslAvailable() {
-        return OpenSsl.isAvailable();
+        return marketWsRuntime.isOpenSslAvailable();
     }
 
     /**
@@ -157,7 +142,7 @@ public class PolymarketClobClient {
      * @param listener   listener receiving raw JSON frames and receipt timestamps
      */
     public synchronized void openMarketStream(String marketSlug, List<String> tokenIds, RawWebSocketListener listener) {
-        openMarketStream(marketSlug, tokenIds, listener, null);
+        openMarketStream(marketSlug, tokenIds, listener, null, null);
     }
 
     /**
@@ -219,7 +204,7 @@ public class PolymarketClobClient {
             }
         };
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                clobMarketVertx,
+                marketWsRuntime.vertx(),
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
@@ -228,7 +213,6 @@ public class PolymarketClobClient {
                 pingIntervalMs,
                 "PING"
         );
-        stream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
         stream.setDisconnectListener(this.disconnectListener);
         stream.setShouldReconnectSupplier(shouldReconnectSupplier);
         if (normalCloseListener != null) {
@@ -243,12 +227,10 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Opens a dual Active-Active pair of CLOB WebSocket connections ({@code PRIMARY} and {@code BACKUP})
-     * for a single market with pre-parse {@code rawUtf8Bytes} fingerprint deduplication and batch-draining
-     * listener support, optionally bound to an external dedicated worker thread (e.g. {@code clob-book-worker}).
-     * <p>
-     * Maintaining two independent WebSocket connections ensures {@code 0 ms} orderbook interruption if one
-     * connection experiences an upstream CDN/proxy micro-stall or {@code code=1013} disconnect.
+     * Opens a dual Active-Active pair of CLOB WebSocket connections ({@code PRIMARY} on edge IPv4 {@code slot 0}
+     * and {@code BACKUP} on edge IPv4 {@code slot 1}) for a single market with pre-parse {@code rawUtf8Bytes}
+     * fingerprint deduplication and batch-draining listener support, optionally bound to an external dedicated
+     * worker thread (e.g. {@code market-strategy-worker}).
      *
      * @param marketSlug     Polymarket market slug
      * @param tokenIds       CLOB asset token IDs belonging to the market
@@ -279,7 +261,7 @@ public class PolymarketClobClient {
                 dispatchDeduplicatedBatch(batch, backupHolder[0], deduplicator, batchListener);
 
         ReconnectingWebSocketStream primaryStream = new ReconnectingWebSocketStream(
-                clobMarketVertx,
+                marketWsRuntime.vertx(),
                 "POLYMARKET-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
@@ -290,11 +272,11 @@ public class PolymarketClobClient {
                 "PING"
         );
         primaryHolder[0] = primaryStream;
-        primaryStream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        primaryStream.setPreferredAddressSlot(marketWsRuntime, 0);
         primaryStream.setDisconnectListener(this.disconnectListener);
 
         ReconnectingWebSocketStream backupStream = new ReconnectingWebSocketStream(
-                clobMarketVertx,
+                marketWsRuntime.vertx(),
                 "POLYMARKET-CLOB-" + marketSlug + "-BACKUP",
                 wsUrl,
                 () -> List.of(subPayload),
@@ -305,7 +287,7 @@ public class PolymarketClobClient {
                 "PING"
         );
         backupHolder[0] = backupStream;
-        backupStream.setDedicatedIoThreadName(DEDICATED_MARKET_IO_THREAD_NAME);
+        backupStream.setPreferredAddressSlot(marketWsRuntime, 1);
         backupStream.setDisconnectListener(this.disconnectListener);
 
         if (externalWorker != null) {
@@ -314,7 +296,7 @@ public class PolymarketClobClient {
         }
         marketStreams.put(marketSlug, primaryStream);
         backupMarketStreams.put(marketSlug, backupStream);
-        Log.infof("Opening dual Active-Active Polymarket CLOB WebSocket streams for market %s (tokens=%d, batchMode=true)",
+        Log.infof("Opening dual Active-Active Polymarket CLOB WebSocket streams for market %s (tokens=%d, batchMode=true, edgeSlots=0/1)",
                 marketSlug, tokenIds.size());
         primaryStream.start();
         backupStream.start();
@@ -375,7 +357,7 @@ public class PolymarketClobClient {
 
     /**
      * Opens an authenticated CLOB User Channel WebSocket stream ({@code /ws/user}) bound to an optional
-     * external worker thread (e.g. {@code order-execution-io-worker}).
+     * external worker thread (e.g. {@code clob-user-worker} on {@code CPU #0}).
      *
      * @param credentials    Polymarket Level 2 API credentials
      * @param listener       listener receiving raw JSON frames and receipt timestamps
@@ -438,7 +420,6 @@ public class PolymarketClobClient {
 
     /**
      * Drains all currently queued frames across active primary and backup market CLOB streams into {@code scratchBatch}.
-     * Called on the dedicated {@code clob-book-worker} thread.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained
@@ -456,7 +437,6 @@ public class PolymarketClobClient {
 
     /**
      * Drains all currently queued frames from the authenticated CLOB User stream into {@code scratchBatch}.
-     * Called on the dedicated {@code order-execution-io-worker} thread.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return number of frames drained
@@ -486,6 +466,26 @@ public class PolymarketClobClient {
     }
 
     /**
+     * Marks all active primary and backup market streams as parked prior to {@code LockSupport.parkNanos}
+     * and returns {@code true} if any market stream received frames concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public boolean prepareMarketStreamsToPark() {
+        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
+            if (stream.prepareToParkAndCheckQueuedFrames()) {
+                return true;
+            }
+        }
+        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
+            if (backup.prepareToParkAndCheckQueuedFrames()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Returns whether the CLOB User stream currently has frames waiting in its inbound queue.
      *
      * @return {@code true} if the user stream queue is non-empty
@@ -493,6 +493,17 @@ public class PolymarketClobClient {
     public boolean hasQueuedUserFrames() {
         ReconnectingWebSocketStream current = this.userStream;
         return current != null && current.hasQueuedFrames();
+    }
+
+    /**
+     * Marks the CLOB User stream as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * if frames arrived concurrently.
+     *
+     * @return {@code true} if frames arrived concurrently and parking must be aborted
+     */
+    public boolean prepareUserStreamToPark() {
+        ReconnectingWebSocketStream current = this.userStream;
+        return current != null && current.prepareToParkAndCheckQueuedFrames();
     }
 
     /**
@@ -562,40 +573,15 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Describes the real-time failover state of the peer WebSocket connection when one leg of a dual
-     * Active-Active CLOB market stream disconnects.
-     *
-     * @param dualMarketStream  {@code true} if the stream belongs to a dual Active-Active market subscription
-     * @param peerStreamName    identifier of the peer stream (or {@code ""} if single-leg stream)
-     * @param peerState         current connection state of the peer stream
-     * @param peerRemoteAddress remote endpoint address ({@code IP:port}) of the peer stream
-     * @param failoverActive    {@code true} if the peer stream is currently {@link ConnectionState#CONNECTED}
-     */
-    public record MarketStreamRedundancyStatus(
-            boolean dualMarketStream,
-            String peerStreamName,
-            ConnectionState peerState,
-            String peerRemoteAddress,
-            boolean failoverActive
-    ) {
-        /**
-         * Sentinel status for single-leg streams (such as {@code USER} or PolyBolt streams) without a dual peer.
-         */
-        public static final MarketStreamRedundancyStatus NONE = new MarketStreamRedundancyStatus(
-                false, "", ConnectionState.DISCONNECTED, "", false
-        );
-    }
-
-    /**
      * Evaluates the live connection state of the peer leg for a dual Active-Active market WebSocket stream
      * (e.g. {@code POLYMARKET-CLOB-<slug>} vs {@code POLYMARKET-CLOB-<slug>-BACKUP}).
      *
      * @param streamName identifier of the stream that disconnected
-     * @return {@link MarketStreamRedundancyStatus} describing whether the peer stream is actively covering failover
+     * @return {@link StreamRedundancyStatus} describing whether the peer stream is actively covering failover
      */
-    public MarketStreamRedundancyStatus describeMarketStreamRedundancy(String streamName) {
+    public StreamRedundancyStatus describeMarketStreamRedundancy(String streamName) {
         if (streamName == null || !streamName.startsWith("POLYMARKET-CLOB-") || "POLYMARKET-CLOB-USER".equals(streamName)) {
-            return MarketStreamRedundancyStatus.NONE;
+            return StreamRedundancyStatus.NONE;
         }
         String suffix = streamName.substring("POLYMARKET-CLOB-".length());
         ReconnectingWebSocketStream peer;
@@ -606,10 +592,10 @@ public class PolymarketClobClient {
             peer = backupMarketStreams.get(suffix);
         }
         if (peer == null) {
-            return MarketStreamRedundancyStatus.NONE;
+            return StreamRedundancyStatus.NONE;
         }
         ConnectionState peerState = peer.getState();
-        return new MarketStreamRedundancyStatus(
+        return new StreamRedundancyStatus(
                 true,
                 peer.getStreamName(),
                 peerState,
@@ -619,26 +605,12 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns the dedicated Netty I/O reader thread observed by any active CLOB market stream,
-     * or falls back to the User stream I/O thread if no market stream is connected yet.
+     * Returns the dedicated Netty I/O reader thread ({@code market-ws-io-reader}) servicing market streams.
      *
      * @return Netty I/O reader thread
      */
     public Thread getIoReaderThread() {
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            Thread t = stream.getIoReaderThread();
-            if (t != null) {
-                return t;
-            }
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            Thread t = backup.getIoReaderThread();
-            if (t != null) {
-                return t;
-            }
-        }
-        ReconnectingWebSocketStream currentUser = this.userStream;
-        return currentUser != null ? currentUser.getIoReaderThread() : null;
+        return marketWsRuntime.getIoReaderThread();
     }
 
     private String buildSubscriptionPayload(List<String> tokenIds) {

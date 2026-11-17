@@ -1,6 +1,7 @@
 package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import org.awaitility.Awaitility;
@@ -24,15 +25,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PolymarketPolyBoltClientTest {
 
     private Vertx vertx;
+    private MarketWebSocketRuntime marketWsRuntime;
     private HttpServer server;
 
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
+        marketWsRuntime = new MarketWebSocketRuntime();
     }
 
     @AfterEach
     void tearDown() throws Exception {
+        if (marketWsRuntime != null) {
+            marketWsRuntime.destroy();
+        }
         if (server != null) {
             server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
@@ -78,7 +84,7 @@ class PolymarketPolyBoltClientTest {
 
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
         PolymarketPolyBoltClient client = new PolymarketPolyBoltClient(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:" + port + "/ws",
                  java.util.Optional.of("test-api-key"),
                 java.util.Optional.of("test-secret"),
@@ -107,7 +113,7 @@ class PolymarketPolyBoltClientTest {
     @Test
     void shouldFailFastWhenCredentialsAreMissing() {
         PolymarketPolyBoltClient clientWithoutCreds = new PolymarketPolyBoltClient(
-                vertx,
+                marketWsRuntime,
                 "ws://localhost:9999/ws",
                 java.util.Optional.empty(),
                 java.util.Optional.empty(),

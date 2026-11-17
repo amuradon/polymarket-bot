@@ -1,12 +1,11 @@
 package cz.polymarket.bot.live.engine;
 
 import cz.polymarket.bot.connector.binance.BinanceStreamConnector;
-import cz.polymarket.bot.connector.binance.BinanceStreamListener;
-import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamConnector;
 import cz.polymarket.bot.connector.coinbase.CoinbaseStreamListener;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.kraken.KrakenStreamListener;
+import cz.polymarket.bot.connector.os.LinuxCpuAffinity;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
@@ -23,6 +22,9 @@ import cz.polymarket.bot.connector.polymarket.stream.PolymarketBboQuote;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketLocalBook;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketUserTradeEvent;
+import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.ReconnectingWebSocketStream;
+import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.domain.MarketCandle;
@@ -68,13 +70,20 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * Core Live Trading Engine orchestrating real-money execution on Polymarket CLOB across a
- * 4-core dedicated lock-free pipeline designed for {@code c8gn.xlarge} (4 vCPU Graviton4):
+ * Core Live Trading Engine orchestrating real-money execution on Polymarket CLOB across a strict
+ * 4-core CPU-pinned lock-free pipeline designed for {@code c8gn.xlarge} (4 physical Graviton4 cores):
  * <ul>
- *   <li><b>vCPU #1 ({@code ws-io-reader})</b>: Single Netty I/O event-loop thread reading raw WebSocket frames into lock-free queues.</li>
- *   <li><b>vCPU #2 ({@code clob-book-worker})</b>: Dedicated platform thread batch-draining CLOB orderbook frames, fast-forwarding superseded snapshots, and updating {@link PolymarketLocalBook} lock-free.</li>
- *   <li><b>vCPU #3 ({@code strategy-calculator-worker})</b>: Dedicated platform thread draining PolyBolt ticks and the latest conflated {@link OrderBookQuote} to evaluate {@link TradingStrategy} lock-free.</li>
- *   <li><b>vCPU #4 ({@code order-execution-io-worker})</b>: Dedicated platform thread executing EIP-712 signing, blocking HTTP {@code POST /order} calls, in-memory User WS balance updates, and 1s OS/thread telemetry sampling.</li>
+ *   <li><b>vCPU #0 ({@code clob-user-worker} + housekeeping)</b>: OS/ENA interrupts, ZGC, Quarkus HTTP/scheduler,
+ *       1s telemetry maintenance, and authenticated {@code POLYMARKET-CLOB-USER} balance event draining
+ *       (completely isolated from blocking {@code POST /order} calls).</li>
+ *   <li><b>vCPU #1 ({@code market-ws-io-reader})</b>: Consolidated single-EventLoop native {@code epoll} + BoringSSL
+ *       reader ({@link MarketWebSocketRuntime}) servicing all 5 market connectors into lock-free MPSC queues.</li>
+ *   <li><b>vCPU #2 ({@code market-strategy-worker})</b>: Fused lock-free L1-cache loop batch-draining CLOB orderbook
+ *       deltas ({@link PolymarketLocalBook}), PolyBolt oracle ticks, and Binance/Kraken/Coinbase spot trades
+ *       ({@code CalculatedSpotTwapEngine}) and immediately evaluating {@link TradingStrategy} with zero cross-thread
+ *       quote handoff and adaptive user-space micro-spinning.</li>
+ *   <li><b>vCPU #3 ({@code order-execution-io-worker})</b>: Dedicated isolated core exclusively executing EIP-712
+ *       signing and HTTP {@code POST /order} / {@code DELETE /order} execution.</li>
  * </ul>
  */
 @ApplicationScoped
@@ -83,7 +92,6 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private static final double TAKER_FEE_RATE = 0.07;
     private static final long DEBUG_MESSAGE_LOG_INTERVAL = 100L;
     private static final int MAX_TRACKED_USER_TRADES = 1024;
-    private static final int SPIN_ITERATIONS_BEFORE_PARK = 64;
     private static final long REALTIME_CLOCK_WINDOW_MS = 3_600_000L;
     private static final long STALE_QUOTE_WARN_INTERVAL_MS = 1_000L;
     private static final long MARKET_PREFETCH_LOOKAHEAD_SEC = 60L;
@@ -125,19 +133,19 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     private final AtomicBoolean balanceSyncRequested = new AtomicBoolean(false);
     private final AtomicBoolean balanceSyncInFlight = new AtomicBoolean(false);
 
-    // 4-Core Pipeline Coordination Queues & Slots
+    // 4-Core Pipeline Coordination Queues & L1 Staged Quote Slot
     private final AtomicBoolean workersRunning = new AtomicBoolean(false);
-    private final AtomicReference<OrderBookQuote> latestQuoteSlot = new AtomicReference<>();
+    private final AtomicReference<OrderBookQuote> stagedQuoteSlot = new AtomicReference<>();
     private final ConcurrentLinkedQueue<OrderCommand> orderExecutionQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<ExecutionReport> executionReportQueue = new ConcurrentLinkedQueue<>();
 
-    // Dedicated Worker Threads (vCPU #2, #3, #4) & Busy Time Accumulators
-    private volatile Thread clobBookWorkerThread;
-    private volatile Thread strategyCalculatorThread;
+    // Dedicated Worker Threads (vCPU #0, #2, #3; vCPU #1 is owned by MarketWebSocketRuntime) & Busy Time Accumulators
+    private volatile Thread clobUserWorkerThread;
+    private volatile Thread marketStrategyThread;
     private volatile Thread orderExecutionWorkerThread;
     private volatile Thread telemetryMaintenanceThread;
-    private final AtomicLong clobBookWorkerBusyNs = new AtomicLong(0L);
-    private final AtomicLong strategyWorkerBusyNs = new AtomicLong(0L);
+    private final AtomicLong userWorkerBusyNs = new AtomicLong(0L);
+    private final AtomicLong marketStrategyWorkerBusyNs = new AtomicLong(0L);
     private final AtomicLong orderExecutionWorkerBusyNs = new AtomicLong(0L);
 
     // Real-time Execution & Freshness Telemetry Counters
@@ -316,8 +324,8 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         krakenConnector.stop();
         coinbaseConnector.stop();
         unparkAllWorkers();
-        clobBookWorkerThread = null;
-        strategyCalculatorThread = null;
+        clobUserWorkerThread = null;
+        marketStrategyThread = null;
         orderExecutionWorkerThread = null;
         telemetryMaintenanceThread = null;
     }
@@ -340,9 +348,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Starts the dedicated application worker threads ({@code clob-book-worker}, {@code strategy-calculator-worker},
-     * {@code order-execution-io-worker}, and low-priority {@code telemetry-maintenance-worker}), binds the authenticated
-     * PolyBolt v2 and CLOB User streams to their respective dedicated threads, and discovers/subscribes the current
+     * Starts the CPU-pinned 4-core worker threads ({@code clob-user-worker} on {@code CPU #0},
+     * {@code market-strategy-worker} on {@code CPU #2}, {@code order-execution-io-worker} on {@code CPU #3},
+     * and {@code telemetry-maintenance-worker} on {@code CPU #0}), binds market streams to {@code market-strategy-worker}
+     * and the authenticated CLOB User stream to {@code clob-user-worker}, and discovers/subscribes the current
      * Polymarket 15m market.
      *
      * @param nowEpochSec current epoch timestamp in seconds
@@ -350,16 +359,16 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     public synchronized void startLiveStreams(long nowEpochSec) {
         Log.infof("Starting 4-core live pipeline and WebSocket streams for symbol=%s, timeframe=%s...", symbol, timeframe);
         if (workersRunning.compareAndSet(false, true)) {
-            Thread bookThread = Thread.ofPlatform()
+            Thread userThread = Thread.ofPlatform()
                     .daemon(true)
-                    .priority(Thread.MAX_PRIORITY)
-                    .name("clob-book-worker")
-                    .unstarted(this::clobBookWorkerLoop);
+                    .priority(Thread.NORM_PRIORITY)
+                    .name("clob-user-worker")
+                    .unstarted(this::clobUserWorkerLoop);
             Thread stratThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MAX_PRIORITY)
-                    .name("strategy-calculator-worker")
-                    .unstarted(this::strategyCalculatorLoop);
+                    .name("market-strategy-worker")
+                    .unstarted(this::marketStrategyWorkerLoop);
             Thread execThread = Thread.ofPlatform()
                     .daemon(true)
                     .priority(Thread.MAX_PRIORITY)
@@ -370,29 +379,19 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     .priority(Thread.MIN_PRIORITY)
                     .name("telemetry-maintenance-worker")
                     .unstarted(this::telemetryMaintenanceLoop);
-            this.clobBookWorkerThread = bookThread;
-            this.strategyCalculatorThread = stratThread;
+            this.clobUserWorkerThread = userThread;
+            this.marketStrategyThread = stratThread;
             this.orderExecutionWorkerThread = execThread;
             this.telemetryMaintenanceThread = maintThread;
-            bookThread.start();
+            userThread.start();
             stratThread.start();
             execThread.start();
             maintThread.start();
         }
 
-        polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
-        polyBoltClient.startCryptoPriceStream(symbol, this::onRawPolyBoltFrame, this.strategyCalculatorThread);
-        binanceConnector.startSpotAggTrades(symbol, new BinanceStreamListener() {
-            @Override
-            public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-                onRawBinanceFrame(streamType, rawJson, recvTimestampMs);
-            }
-
-            @Override
-            public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                onRawBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs);
-            }
-        }, this.strategyCalculatorThread);
+        polyBoltClient.startTwapStream(symbol, this::onRawPolyBoltFrame, this.marketStrategyThread);
+        polyBoltClient.startCryptoPriceStream(symbol, this::onRawPolyBoltFrame, this.marketStrategyThread);
+        binanceConnector.startSpotAggTradesBatch(symbol, this::onRawBinanceFrameBatch, this.marketStrategyThread);
         krakenConnector.start(symbol, true, new KrakenStreamListener() {
             @Override
             public void onStreamMessage(String normSymbol, String rawJson, long recvTimestampMs) {
@@ -403,7 +402,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             public void onStreamFrame(String normSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
                 onRawKrakenFrameBytes(normSymbol, rawUtf8Bytes, recvTimestampMs);
             }
-        }, this.strategyCalculatorThread);
+        }, this.marketStrategyThread);
         coinbaseConnector.start(symbol, new CoinbaseStreamListener() {
             @Override
             public void onStreamMessage(String normSymbol, String rawJson, long recvTimestampMs) {
@@ -414,39 +413,49 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             public void onStreamFrame(String normSymbol, byte[] rawUtf8Bytes, long recvTimestampMs) {
                 onRawCoinbaseFrameBytes(normSymbol, rawUtf8Bytes, recvTimestampMs);
             }
-        }, this.strategyCalculatorThread);
+        }, this.marketStrategyThread);
         if (credentials != null && credentials.hasL2Credentials()) {
-            clobWsClient.openUserStream(credentials, this::onRawUserFrame, this.orderExecutionWorkerThread);
+            clobWsClient.openUserStream(credentials, this::onRawUserFrame, this.clobUserWorkerThread);
         }
         discoverAndRotateMarket(nowEpochSec);
     }
 
     /**
-     * Dedicated loop for vCPU #2 ({@code clob-book-worker}): drains CLOB market frames in batches
-     * and updates {@link PolymarketLocalBook} without lock contention.
+     * Dedicated loop for vCPU #0 ({@code clob-user-worker}): drains authenticated {@code POLYMARKET-CLOB-USER}
+     * trade balance updates without head-of-line blocking from synchronous {@code POST /order} HTTP execution.
      */
-    private void clobBookWorkerLoop() {
-        List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
+    private void clobUserWorkerLoop() {
+        LinuxCpuAffinity.pinCurrentThreadIfSupported(0, "vCPU #0: User WS & Control");
+        List<TimestampedFrame> scratchBatch = new ArrayList<>(32);
         while (workersRunning.get()) {
-            int drained = clobWsClient.drainMarketStreams(scratchBatch);
-            if (drained > 0) {
+            long startNs = System.nanoTime();
+            int userDrained = clobWsClient.drainUserStream(scratchBatch);
+            if (userDrained > 0) {
+                userWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
                 continue;
             }
-            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get() && !clobWsClient.hasQueuedMarketFrames(); spin++) {
-                Thread.onSpinWait();
-            }
-            if (!workersRunning.get() || clobWsClient.hasQueuedMarketFrames()) {
+            ReconnectingWebSocketStream.spinWaitBeforePark(
+                    () -> !workersRunning.get() || clobWsClient.hasQueuedUserFrames());
+            if (!workersRunning.get() || clobWsClient.hasQueuedUserFrames()) {
                 continue;
             }
-            LockSupport.parkNanos(this, 50_000_000L);
+            if (clobWsClient.prepareUserStreamToPark()) {
+                continue;
+            }
+            if (!workersRunning.get()) {
+                break;
+            }
+            LockSupport.parkNanos(this, ReconnectingWebSocketStream.IDLE_PARK_TIMEOUT_NS);
         }
     }
 
     /**
-     * Dedicated loop for vCPU #3 ({@code strategy-calculator-worker}): processes execution reports,
-     * PolyBolt oracle ticks, and the latest conflated {@link OrderBookQuote} from {@code latestQuoteSlot}.
+     * Fused single-core L1-cache loop for vCPU #2 ({@code market-strategy-worker}): processes execution reports,
+     * CLOB L2 orderbook batches, PolyBolt oracle ticks, and Binance/Kraken/Coinbase spot trades, then immediately
+     * evaluates the latest conflated {@link OrderBookQuote} on {@link TradingStrategy} without cross-thread handoff.
      */
-    private void strategyCalculatorLoop() {
+    private void marketStrategyWorkerLoop() {
+        LinuxCpuAffinity.pinCurrentThreadIfSupported(2, "vCPU #2: Book & Strategy");
         List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
         while (workersRunning.get()) {
             boolean didWork = false;
@@ -460,66 +469,77 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 }
             }
 
-            int polyDrained = polyBoltClient.drainStreams(scratchBatch);
-            if (polyDrained > 0) {
+            if (clobWsClient.drainMarketStreams(scratchBatch) > 0) {
                 didWork = true;
             }
 
-            int binanceDrained = binanceConnector.drainStreams(scratchBatch);
-            if (binanceDrained > 0) {
+            if (polyBoltClient.drainStreams(scratchBatch) > 0) {
                 didWork = true;
             }
 
-            int krakenDrained = krakenConnector.drainStreams(scratchBatch);
-            if (krakenDrained > 0) {
+            if (binanceConnector.drainStreams(scratchBatch) > 0) {
                 didWork = true;
             }
 
-            int coinbaseDrained = coinbaseConnector.drainStream(scratchBatch);
-            if (coinbaseDrained > 0) {
+            if (krakenConnector.drainStreams(scratchBatch) > 0) {
                 didWork = true;
             }
 
-            OrderBookQuote quote = latestQuoteSlot.getAndSet(null);
+            if (coinbaseConnector.drainStream(scratchBatch) > 0) {
+                didWork = true;
+            }
+
+            OrderBookQuote quote = stagedQuoteSlot.getAndSet(null);
             if (quote != null) {
                 didWork = true;
                 evaluateQuoteWithFreshnessGuard(quote, true);
             }
 
             if (didWork) {
-                strategyWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
+                marketStrategyWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
                 continue;
             }
 
-            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get()
-                    && executionReportQueue.isEmpty()
-                    && !polyBoltClient.hasQueuedFrames()
-                    && !binanceConnector.hasQueuedFrames()
-                    && !krakenConnector.hasQueuedFrames()
-                    && !coinbaseConnector.hasQueuedFrames()
-                    && latestQuoteSlot.get() == null; spin++) {
-                Thread.onSpinWait();
-            }
-            if (!workersRunning.get()
+            ReconnectingWebSocketStream.spinWaitBeforePark(() -> !workersRunning.get()
                     || !executionReportQueue.isEmpty()
+                    || clobWsClient.hasQueuedMarketFrames()
                     || polyBoltClient.hasQueuedFrames()
                     || binanceConnector.hasQueuedFrames()
                     || krakenConnector.hasQueuedFrames()
                     || coinbaseConnector.hasQueuedFrames()
-                    || latestQuoteSlot.get() != null) {
+                    || stagedQuoteSlot.get() != null);
+            if (!workersRunning.get()
+                    || !executionReportQueue.isEmpty()
+                    || clobWsClient.hasQueuedMarketFrames()
+                    || polyBoltClient.hasQueuedFrames()
+                    || binanceConnector.hasQueuedFrames()
+                    || krakenConnector.hasQueuedFrames()
+                    || coinbaseConnector.hasQueuedFrames()
+                    || stagedQuoteSlot.get() != null) {
                 continue;
             }
-            LockSupport.parkNanos(this, 50_000_000L);
+            if (clobWsClient.prepareMarketStreamsToPark()
+                    || polyBoltClient.prepareStreamsToPark()
+                    || binanceConnector.prepareStreamsToPark()
+                    || krakenConnector.prepareStreamsToPark()
+                    || coinbaseConnector.prepareStreamToPark()) {
+                continue;
+            }
+            if (!workersRunning.get()
+                    || !executionReportQueue.isEmpty()
+                    || stagedQuoteSlot.get() != null) {
+                continue;
+            }
+            LockSupport.parkNanos(this, ReconnectingWebSocketStream.IDLE_PARK_TIMEOUT_NS);
         }
     }
 
     /**
-     * Dedicated loop for vCPU #4 ({@code order-execution-io-worker}): exclusively executes EIP-712 signing,
-     * HTTP {@code POST /order} calls, and in-memory CLOB User channel trade balance updates without
-     * head-of-line blocking from `/proc/net/tcp` telemetry or REST balance queries.
+     * Dedicated isolated loop for vCPU #3 ({@code order-execution-io-worker}): exclusively executes EIP-712 signing
+     * and HTTP {@code POST /order} / {@code DELETE /order} calls without interference from WebSocket streams, GC, or IRQs.
      */
     private void orderExecutionWorkerLoop() {
-        List<TimestampedFrame> scratchBatch = new ArrayList<>(32);
+        LinuxCpuAffinity.pinCurrentThreadIfSupported(3, "vCPU #3: Order Execution");
         while (workersRunning.get()) {
             boolean didWork = false;
             long startNs = System.nanoTime();
@@ -530,35 +550,26 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 executeOrderCommandInternal(cmd, true);
             }
 
-            int userDrained = clobWsClient.drainUserStream(scratchBatch);
-            if (userDrained > 0) {
-                didWork = true;
-            }
-
             if (didWork) {
                 orderExecutionWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
                 continue;
             }
 
-            for (int spin = 0; spin < SPIN_ITERATIONS_BEFORE_PARK && workersRunning.get()
-                    && orderExecutionQueue.isEmpty()
-                    && !clobWsClient.hasQueuedUserFrames(); spin++) {
-                Thread.onSpinWait();
-            }
-            if (!workersRunning.get()
-                    || !orderExecutionQueue.isEmpty()
-                    || clobWsClient.hasQueuedUserFrames()) {
+            ReconnectingWebSocketStream.spinWaitBeforePark(
+                    () -> !workersRunning.get() || !orderExecutionQueue.isEmpty());
+            if (!workersRunning.get() || !orderExecutionQueue.isEmpty()) {
                 continue;
             }
-            LockSupport.parkNanos(this, 50_000_000L);
+            LockSupport.parkNanos(this, ReconnectingWebSocketStream.IDLE_PARK_TIMEOUT_NS);
         }
     }
 
     /**
-     * Low-priority background maintenance loop for 1s `/proc/net/tcp` telemetry sampling and
-     * pre-activation `GET /balance-allowance` REST synchronization, isolated from `order-execution-io-worker`.
+     * Low-priority background maintenance loop on vCPU #0 for 1s `/proc/net/tcp` telemetry sampling and
+     * pre-activation `GET /balance-allowance` REST synchronization.
      */
     private void telemetryMaintenanceLoop() {
+        LinuxCpuAffinity.pinCurrentThreadIfSupported(0, "vCPU #0: Telemetry Maintenance");
         long lastTelemetrySampleNs = 0L;
         long lastHistoryRecordNs = 0L;
         while (workersRunning.get()) {
@@ -588,17 +599,17 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private void unparkAllWorkers() {
-        Thread t2 = this.clobBookWorkerThread;
+        Thread t0 = this.clobUserWorkerThread;
+        if (t0 != null) {
+            LockSupport.unpark(t0);
+        }
+        Thread t2 = this.marketStrategyThread;
         if (t2 != null) {
             LockSupport.unpark(t2);
         }
-        Thread t3 = this.strategyCalculatorThread;
+        Thread t3 = this.orderExecutionWorkerThread;
         if (t3 != null) {
             LockSupport.unpark(t3);
-        }
-        Thread t4 = this.orderExecutionWorkerThread;
-        if (t4 != null) {
-            LockSupport.unpark(t4);
         }
         Thread tm = this.telemetryMaintenanceThread;
         if (tm != null) {
@@ -750,7 +761,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     @Scheduled(every = "${polymarket.live.discovery-interval:5s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledMarketRollover() {
-        if (!streamsEnabled || !workersRunning.get() || this.clobBookWorkerThread == null) {
+        if (!streamsEnabled || !workersRunning.get() || this.marketStrategyThread == null) {
             return;
         }
         discoverAndRotateMarket(Instant.now().getEpochSecond());
@@ -761,7 +772,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
      */
     @Scheduled(every = "${polymarket.live.keepalive-interval:15s}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void scheduledKeepalive() {
-        if (!streamsEnabled || !workersRunning.get() || this.clobBookWorkerThread == null) {
+        if (!streamsEnabled || !workersRunning.get() || this.marketStrategyThread == null) {
             return;
         }
         clobRestClient.pingKeepalive();
@@ -824,7 +835,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             }
             activeLocalBook.set(new PolymarketLocalBook(nextMarket.yesTokenId(), nextMarket.noTokenId()));
             this.latestQuote = null;
-            this.latestQuoteSlot.set(null);
+            this.stagedQuoteSlot.set(null);
         }
         if (previousSlugToClose != null) {
             clobWsClient.closeMarketStream(previousSlugToClose);
@@ -833,11 +844,11 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 nextMarket.slug(),
                 nextMarket.clobTokenIds(),
                 this::onRawClobFrameBatch,
-                this.clobBookWorkerThread
+                this.marketStrategyThread
         );
-        Thread bookWorker = this.clobBookWorkerThread;
-        if (bookWorker != null) {
-            LockSupport.unpark(bookWorker);
+        Thread stratWorker = this.marketStrategyThread;
+        if (stratWorker != null) {
+            LockSupport.unpark(stratWorker);
         }
 
         long nextCycleStartSec = cycleStartSec + durationSeconds;
@@ -954,9 +965,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Processes a batch of raw CLOB JSON frames on the dedicated {@code clob-book-worker} thread (vCPU #2),
-     * fast-forwarding past superseded snapshots, mutating {@link PolymarketLocalBook} lock-free, and publishing
-     * only the single final {@link OrderBookQuote} to {@code latestQuoteSlot} for {@code strategy-calculator-worker} (vCPU #3).
+     * Processes a batch of raw CLOB JSON frames on the fused {@code market-strategy-worker} thread ({@code CPU #2}),
+     * fast-forwarding past superseded snapshots, mutating {@link PolymarketLocalBook} lock-free, and staging
+     * only the single final {@link OrderBookQuote} in {@code stagedQuoteSlot} for immediate same-core strategy evaluation.
      *
      * @param batch chronological batch of CLOB frames drained from the inbound queue
      */
@@ -964,36 +975,31 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         if (batch == null || batch.isEmpty()) {
             return;
         }
-        long startNs = System.nanoTime();
-        try {
-            PolymarketLocalBook localBook = activeLocalBook.get();
-            if (localBook == null) {
-                localBook = new PolymarketLocalBook("", "");
-                activeLocalBook.compareAndSet(null, localBook);
+        PolymarketLocalBook localBook = activeLocalBook.get();
+        if (localBook == null) {
+            localBook = new PolymarketLocalBook("", "");
+            activeLocalBook.compareAndSet(null, localBook);
+        }
+        PolymarketStreamParser.ClobBatchResult result = streamParser.applyClobFrameBatch(batch, localBook);
+        if (result.fastForwardedFramesCount() > 0) {
+            PolymarketMarketInfo info = activeMarketInfo.get();
+            if (info != null) {
+                clobWsClient.addMarketCoalescedFrames(info.slug(), result.fastForwardedFramesCount());
             }
-            PolymarketStreamParser.ClobBatchResult result = streamParser.applyClobFrameBatch(batch, localBook);
-            if (result.fastForwardedFramesCount() > 0) {
-                PolymarketMarketInfo info = activeMarketInfo.get();
-                if (info != null) {
-                    clobWsClient.addMarketCoalescedFrames(info.slug(), result.fastForwardedFramesCount());
-                }
-            }
-            if (result.appliedFramesCount() > 0) {
-                long marketTotal = clobMarketMsgCount.addAndGet(result.appliedFramesCount());
-                if (result.quote().isPresent()) {
-                    PolymarketBboQuote bbo = result.quote().get();
-                    if (Log.isDebugEnabled()) {
-                        long debugCount = debugClobBatchCounter.incrementAndGet();
-                        if (debugCount % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
-                            Log.debugf("Processed %d CLOB WS batches (marketMessages=%d, bestBidUp=%.3f, bestAskUp=%.3f, bestBidDown=%.3f, bestAskDown=%.3f)",
-                                    debugCount, marketTotal, bbo.bestBidUp(), bbo.bestAskUp(), bbo.bestBidDown(), bbo.bestAskDown());
-                        }
+        }
+        if (result.appliedFramesCount() > 0) {
+            long marketTotal = clobMarketMsgCount.addAndGet(result.appliedFramesCount());
+            if (result.quote().isPresent()) {
+                PolymarketBboQuote bbo = result.quote().get();
+                if (Log.isDebugEnabled()) {
+                    long debugCount = debugClobBatchCounter.incrementAndGet();
+                    if (debugCount % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
+                        Log.debugf("Processed %d CLOB WS batches (marketMessages=%d, bestBidUp=%.3f, bestAskUp=%.3f, bestBidDown=%.3f, bestAskDown=%.3f)",
+                                debugCount, marketTotal, bbo.bestBidUp(), bbo.bestAskUp(), bbo.bestBidDown(), bbo.bestAskDown());
                     }
-                    publishUpdatedBboIfChanged(bbo);
                 }
+                publishUpdatedBboIfChanged(bbo);
             }
-        } finally {
-            clobBookWorkerBusyNs.addAndGet(Math.max(0L, System.nanoTime() - startNs));
         }
     }
 
@@ -1038,13 +1044,12 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
         this.latestQuote = nextQuote;
         updatePositionObservation(nextQuote);
 
-        Thread stratWorker = this.strategyCalculatorThread;
-        if (workersRunning.get() && stratWorker != null) {
-            OrderBookQuote overwritten = latestQuoteSlot.getAndSet(nextQuote);
+        Thread stratWorker = this.marketStrategyThread;
+        if (workersRunning.get() && stratWorker != null && Thread.currentThread() == stratWorker) {
+            OrderBookQuote overwritten = stagedQuoteSlot.getAndSet(nextQuote);
             if (overwritten != null) {
                 conflatedQuotesCount.incrementAndGet();
             }
-            LockSupport.unpark(stratWorker);
         } else {
             evaluateQuoteWithFreshnessGuard(nextQuote, false);
         }
@@ -1081,7 +1086,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     command.clientOrderId(), command.side(), command.token(), command.price(), command.size());
         }
         Thread ioWorker = this.orderExecutionWorkerThread;
-        if (workersRunning.get() && ioWorker != null && Thread.currentThread() == this.strategyCalculatorThread) {
+        if (workersRunning.get() && ioWorker != null && Thread.currentThread() == this.marketStrategyThread) {
             orderExecutionQueue.offer(command);
             LockSupport.unpark(ioWorker);
         } else {
@@ -1098,7 +1103,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private void deliverExecutionReport(ExecutionReport report, boolean asyncReportDelivery) {
-        Thread stratWorker = this.strategyCalculatorThread;
+        Thread stratWorker = this.marketStrategyThread;
         if (asyncReportDelivery && workersRunning.get() && stratWorker != null && Thread.currentThread() != stratWorker) {
             executionReportQueue.offer(report);
             LockSupport.unpark(stratWorker);
@@ -1562,37 +1567,21 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     /**
-     * Processes a raw JSON text frame from the Binance Spot {@code aggTrades} WebSocket stream,
-     * updating {@code CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
-     * to the active strategy.
+     * Processes a batch of forward-progressing Binance Spot {@code aggTrades} frames into
+     * {@code CalculatedSpotTwapEngine} and invokes {@code activeStrategy.onCalculatedSpotTwap} once for the batch.
      *
-     * @param streamType      Binance stream type
-     * @param rawJson         raw Binance JSON frame
-     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
+     * @param batch chronological batch of fast-forwarded Binance {@code aggTrade} frames
      */
-    public void onRawBinanceFrame(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-        if (recvTimestampMs > latestOracleRecvTimestampMs) {
-            latestOracleRecvTimestampMs = recvTimestampMs;
+    public void onRawBinanceFrameBatch(List<TimestampedFrame> batch) {
+        if (batch == null || batch.isEmpty()) {
+            return;
+        }
+        long lastRecvTs = batch.getLast().recvTs();
+        if (lastRecvTs > latestOracleRecvTimestampMs) {
+            latestOracleRecvTimestampMs = lastRecvTs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processBinanceFrame(streamType, rawJson, recvTimestampMs, activeStrategy);
-        }
-    }
-
-    /**
-     * Processes a raw UTF-8 {@code byte[]} frame from the Binance Spot {@code aggTrades} WebSocket stream
-     * without intermediate {@link String} allocation.
-     *
-     * @param streamType      Binance stream type
-     * @param rawUtf8Bytes    raw UTF-8 JSON bytes
-     * @param recvTimestampMs local receipt timestamp in epoch milliseconds
-     */
-    public void onRawBinanceFrameBytes(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-        if (recvTimestampMs > latestOracleRecvTimestampMs) {
-            latestOracleRecvTimestampMs = recvTimestampMs;
-        }
-        synchronized (strategyLock) {
-            spotStreamProcessor.processBinanceFrameBytes(streamType, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+            spotStreamProcessor.processBinanceFrameBatch(batch, activeStrategy);
         }
     }
 
@@ -1751,7 +1740,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             currentTimestampSec = 0L;
             latestOracleRecvTimestampMs = 0L;
             latestQuote = null;
-            latestQuoteSlot.set(null);
+            stagedQuoteSlot.set(null);
             prefetchedNextMarketInfo.set(null);
             orderExecutionQueue.clear();
             executionReportQueue.clear();
@@ -1836,14 +1825,17 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             return;
         }
         SystemTelemetrySnapshot sys = telemetryMonitor.getLatestOrSample(buildMonitoredThreadSpecs());
-        double ioReaderCpu = extractThreadCpuPct(sys.threads(), 0);
-        double clobWorkerCpu = extractThreadCpuPct(sys.threads(), 1);
-        PolymarketClobClient.MarketStreamRedundancyStatus redundancy =
+        double ioReaderCpu = extractThreadCpuPct(sys.threads(), 1);
+        double marketStrategyWorkerCpu = extractThreadCpuPct(sys.threads(), 2);
+        StreamRedundancyStatus redundancy =
                 clobWsClient.describeMarketStreamRedundancy(streamSnap.streamName());
+        if (!redundancy.dualStream()) {
+            redundancy = binanceConnector.describeStreamRedundancy(streamSnap.streamName());
+        }
         String remoteLabel = streamSnap.remoteAddress() != null && !streamSnap.remoteAddress().isEmpty()
                 ? streamSnap.remoteAddress()
                 : "unknown";
-        String peerStateLabel = redundancy.dualMarketStream() ? redundancy.peerState().name() : "SINGLE_STREAM";
+        String peerStateLabel = redundancy.dualStream() ? redundancy.peerState().name() : "SINGLE_STREAM";
 
         WebSocketDisconnectEvent event = new WebSocketDisconnectEvent(
                 System.currentTimeMillis(),
@@ -1865,12 +1857,12 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                 sys.tcpRcvCollapsed(),
                 sys.processCpuLoadPct(),
                 ioReaderCpu,
-                clobWorkerCpu
+                marketStrategyWorkerCpu
         );
         telemetryMonitor.recordDisconnectEvent(event);
-        if (redundancy.dualMarketStream() && redundancy.failoverActive()) {
+        if (redundancy.dualStream() && redundancy.failoverActive()) {
             String peerRemote = redundancy.peerRemoteAddress().isEmpty() ? "unknown" : redundancy.peerRemoteAddress();
-            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, FAILOVER ACTIVE: peerStream=%s is %s @ %s — 0 ms stream outage, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, FAILOVER ACTIVE: peerStream=%s is %s @ %s — 0 ms stream outage, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, marketStrategyCpu=%.1f%%)",
                     event.streamName(),
                     remoteLabel,
                     event.closeCode(),
@@ -1888,9 +1880,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     event.tcpRcvCollapsed(),
                     event.processCpuLoadPct(),
                     event.ioReaderCpuPct(),
-                    event.clobBookWorkerCpuPct());
-        } else if (redundancy.dualMarketStream()) {
-            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, BOTH CLOB STREAMS DOWN: peerStream=%s is %s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+                    event.marketStrategyWorkerCpuPct());
+        } else if (redundancy.dualStream()) {
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, BOTH STREAMS DOWN: peerStream=%s is %s, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, marketStrategyCpu=%.1f%%)",
                     event.streamName(),
                     remoteLabel,
                     event.closeCode(),
@@ -1907,9 +1899,9 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     event.tcpRcvCollapsed(),
                     event.processCpuLoadPct(),
                     event.ioReaderCpuPct(),
-                    event.clobBookWorkerCpuPct());
+                    event.marketStrategyWorkerCpuPct());
         } else {
-            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, mode=SINGLE_STREAM, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, clobWorkerCpu=%.1f%%)",
+            Log.warnf("[%s] Recorded WebSocket disconnect forensics (remote=%s, code=%d, reason=%s, mode=SINGLE_STREAM, queueDepth=%d/%d, queueLagMs=%d/%d, processUs=%d/%d, tcpRxBytes=%d, tcpCollapsed=%d, procCpu=%.1f%%, ioReaderCpu=%.1f%%, marketStrategyCpu=%.1f%%)",
                     event.streamName(),
                     remoteLabel,
                     event.closeCode(),
@@ -1924,7 +1916,7 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
                     event.tcpRcvCollapsed(),
                     event.processCpuLoadPct(),
                     event.ioReaderCpuPct(),
-                    event.clobBookWorkerCpuPct());
+                    event.marketStrategyWorkerCpuPct());
         }
     }
 
@@ -1972,10 +1964,10 @@ public class LiveTradingEngine implements StrategyContext, ExecutionRouter {
             ioReader = polyBoltClient.getIoReaderThread();
         }
         return List.of(
-                new MonitoredThreadSpec("vCPU #1: I/O Reader", PolymarketClobClient.DEDICATED_MARKET_IO_THREAD_NAME, ioReader, -1L),
-                new MonitoredThreadSpec("vCPU #2: CLOB Book Worker", "clob-book-worker", clobBookWorkerThread, clobBookWorkerBusyNs.get()),
-                new MonitoredThreadSpec("vCPU #3: Strategy Calculator", "strategy-calculator-worker", strategyCalculatorThread, strategyWorkerBusyNs.get()),
-                new MonitoredThreadSpec("vCPU #4: Order & I/O Worker", "order-execution-io-worker", orderExecutionWorkerThread, orderExecutionWorkerBusyNs.get())
+                new MonitoredThreadSpec("vCPU #0: User WS & Control", "clob-user-worker", clobUserWorkerThread, userWorkerBusyNs.get()),
+                new MonitoredThreadSpec("vCPU #1: Market WS I/O", MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME, ioReader, -1L),
+                new MonitoredThreadSpec("vCPU #2: Book & Strategy", "market-strategy-worker", marketStrategyThread, marketStrategyWorkerBusyNs.get()),
+                new MonitoredThreadSpec("vCPU #3: Order Execution", "order-execution-io-worker", orderExecutionWorkerThread, orderExecutionWorkerBusyNs.get())
         );
     }
 

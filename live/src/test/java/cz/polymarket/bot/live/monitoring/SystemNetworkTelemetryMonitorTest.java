@@ -55,10 +55,10 @@ class SystemNetworkTelemetryMonitorTest {
         Thread current = Thread.currentThread();
 
         List<MonitoredThreadSpec> initialSpecs = List.of(
-                new MonitoredThreadSpec("vCPU #1: I/O Reader", "vert.x-eventloop-thread-0", current, -1L),
-                new MonitoredThreadSpec("vCPU #2: CLOB Book Worker", "clob-book-worker", current, 10_000_000L),
-                new MonitoredThreadSpec("vCPU #3: Strategy Calculator", "strategy-calculator-worker", null, 0L),
-                new MonitoredThreadSpec("vCPU #4: Order & I/O Worker", "order-execution-io-worker", current, 20_000_000L)
+                new MonitoredThreadSpec("vCPU #0: User WS & Control", "clob-user-worker", current, 10_000_000L),
+                new MonitoredThreadSpec("vCPU #1: Market WS I/O", "market-ws-io-reader", current, -1L),
+                new MonitoredThreadSpec("vCPU #2: Book & Strategy", "market-strategy-worker", null, 0L),
+                new MonitoredThreadSpec("vCPU #3: Order Execution", "order-execution-io-worker", current, 20_000_000L)
         );
 
         SystemTelemetrySnapshot first = monitor.sample(initialSpecs);
@@ -69,16 +69,16 @@ class SystemNetworkTelemetryMonitorTest {
         Thread.sleep(65L);
 
         List<MonitoredThreadSpec> secondSpecs = List.of(
-                new MonitoredThreadSpec("vCPU #1: I/O Reader", "vert.x-eventloop-thread-0", current, -1L),
-                new MonitoredThreadSpec("vCPU #2: CLOB Book Worker", "clob-book-worker", current, 40_000_000L),
-                new MonitoredThreadSpec("vCPU #3: Strategy Calculator", "strategy-calculator-worker", null, 0L),
-                new MonitoredThreadSpec("vCPU #4: Order & I/O Worker", "order-execution-io-worker", current, 50_000_000L)
+                new MonitoredThreadSpec("vCPU #0: User WS & Control", "clob-user-worker", current, 40_000_000L),
+                new MonitoredThreadSpec("vCPU #1: Market WS I/O", "market-ws-io-reader", current, -1L),
+                new MonitoredThreadSpec("vCPU #2: Book & Strategy", "market-strategy-worker", null, 0L),
+                new MonitoredThreadSpec("vCPU #3: Order Execution", "order-execution-io-worker", current, 50_000_000L)
         );
 
         SystemTelemetrySnapshot second = monitor.sample(secondSpecs);
         assertThat(second.threads()).hasSize(4);
-        assertThat(second.threads().get(1).busyDutyCyclePct()).isGreaterThan(0.0);
-        assertThat(second.threads().get(1).maxBusyDutyCyclePct()).isGreaterThanOrEqualTo(second.threads().get(1).busyDutyCyclePct());
+        assertThat(second.threads().get(0).busyDutyCyclePct()).isGreaterThan(0.0);
+        assertThat(second.threads().get(0).maxBusyDutyCyclePct()).isGreaterThanOrEqualTo(second.threads().get(0).busyDutyCyclePct());
     }
 
     @Test
