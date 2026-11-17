@@ -211,19 +211,6 @@ public class CollectorParquetDatasetService {
     }
 
     /**
-     * Resolves the daily Binance Futures {@code aggTrades} Parquet file for the given symbol and UTC date.
-     *
-     * @param symbol trading symbol
-     * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return Parquet file path
-     */
-    public Path getBinanceFuturesAggTradesFile(String symbol, String dateStr) {
-        String pair = extractBaseAsset(symbol) + "USDT";
-        return collectorRootDir.resolve("binance").resolve("futures").resolve(pair)
-                .resolve("aggTrades").resolve(pair + "-aggTrades-" + dateStr + ".parquet");
-    }
-
-    /**
      * Discovers all 15-minute Polymarket market archives for the requested symbol and date range,
      * sorted chronologically by candle start timestamp {@code tStart} ascending.
      * <p>

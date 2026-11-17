@@ -10,7 +10,6 @@ import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExecutionReport;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -32,7 +31,6 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -61,13 +59,11 @@ class BacktestEngineTest {
         Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
         Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
         Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", "2026-08-01");
-        Path futFile = datasetService.getBinanceFuturesAggTradesFile("BTCUSDT", "2026-08-01");
 
         Files.createDirectories(pmDir);
         Files.createDirectories(cryptoPriceFile.getParent());
         Files.createDirectories(twap60sFile.getParent());
         Files.createDirectories(spotFile.getParent());
-        Files.createDirectories(futFile.getParent());
 
         Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
         Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet");
@@ -104,15 +100,7 @@ class BacktestEngineTest {
                     "(NULL::UBIGINT, 6::BIGINT, 'BTCUSDT'::VARCHAR, 59850.0::DOUBLE, 20.0::DOUBLE, 6::BIGINT, 6::BIGINT, " + ((c3Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN, true::BOOLEAN)" +
                     ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
-            // 4. Binance Futures aggTrades (new schema without ts: event_time + trade_time)
-            String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
-            stmt.execute("COPY (SELECT * FROM (VALUES " +
-                    "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN), " +
-                    "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 60160.0::DOUBLE, 18.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + ((c2Start + 60L) * 1000L) + "::UBIGINT, false::BOOLEAN), " +
-                    "(NULL::UBIGINT, 3::BIGINT, 'BTCUSDT'::VARCHAR, 59840.0::DOUBLE, 25.0::DOUBLE, 3::BIGINT, 3::BIGINT, " + ((c3Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN)" +
-                    ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
-
-            // 5. Polymarket 15m typed CLOB market files
+            // 4. Polymarket 15m typed CLOB market files
             TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
                     ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
                     ClobRow.bookLevel((c1Start + 60L) * 1000L + 10L, (c1Start + 60L) * 1000L, 4, true, true, 4900, 300.0),
@@ -142,11 +130,6 @@ class BacktestEngineTest {
             @Override
             public String getName() {
                 return "PolymarketOnlyStrategy";
-            }
-
-            @Override
-            public Set<ExternalStreamType> getRequiredExternalStreams() {
-                return Set.of();
             }
 
             @Override
@@ -261,8 +244,8 @@ class BacktestEngineTest {
     }
 
     @Test
-    @DisplayName("Should skip all external exchange files when strategy requires no external streams")
-    void shouldSkipExternalFilesForPolymarketOnlyStrategy(@TempDir Path tempDir) {
+    @DisplayName("Should execute Polymarket-only batch strategy across multiple markets")
+    void shouldExecutePolymarketOnlyBatchStrategy(@TempDir Path tempDir) {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);
 

@@ -12,7 +12,6 @@ import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionReport;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
@@ -32,7 +31,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -259,11 +257,7 @@ public class BacktestEngine {
             throw new IllegalArgumentException(msg);
         }
 
-        Set<ExternalStreamType> requiredExternalStreams = strategy.getRequiredExternalStreams() != null
-                ? strategy.getRequiredExternalStreams()
-                : Set.of();
-
-        // Group markets by UTC day so shared daily streams (PolyBolt, Binance) are loaded strictly once per day
+        // Group markets by UTC day so shared daily Polymarket streams are loaded strictly once per day
         Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
         for (CollectorMarketMetadata market : markets) {
             String dayKey = market.dateStr() != null ? market.dateStr() : "";
@@ -290,8 +284,7 @@ public class BacktestEngine {
 
             // 1. Load shared daily streams strictly ONCE for this UTC day
             BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
-                    ? ChronologicalEventStreamer.loadSharedDailyStreams(
-                            datasetService, sym, dateStr, requiredExternalStreams, binanceDelayMs)
+                    ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr)
                     : new BacktestEvent[0];
 
             // 2. Process the day's 15-minute Polymarket markets across the dedicated worker pool
@@ -512,10 +505,6 @@ public class BacktestEngine {
                             context.setLastReferencePrice(e.twapPrice());
                             activeStrategy.onPolymarketCryptoTwap60s(
                                     evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
-                        }
-                        case BacktestEvent.BinanceSpotTradeEvent e ->
-                                context.setLastReferencePrice(e.price());
-                        case BacktestEvent.BinanceFuturesTradeEvent e -> {
                         }
                         case BacktestEvent.PendingOrderExecutionEvent e -> {
                             ExecutionReport report = matchingEngine.executePendingOrder(e);

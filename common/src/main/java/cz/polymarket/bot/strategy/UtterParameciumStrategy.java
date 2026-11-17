@@ -7,7 +7,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.math.BigDecimal;
-import java.util.Set;
 
 /**
  * Reconstructed {@code Utter-Paramecium} final-minute 60s TWAP settlement strategy for 15-minute
@@ -312,11 +311,6 @@ public class UtterParameciumStrategy implements TradingStrategy {
     @Override
     public String getName() {
         return "UtterParameciumStrategy";
-    }
-
-    @Override
-    public Set<ExternalStreamType> getRequiredExternalStreams() {
-        return Set.of();
     }
 
     @Override

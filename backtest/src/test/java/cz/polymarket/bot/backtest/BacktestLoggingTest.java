@@ -15,7 +15,6 @@ import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.strategy.ExecutionReport;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -45,7 +44,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
-import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -328,11 +326,6 @@ class BacktestLoggingTest {
             @Override
             public String getName() {
                 return "TestBatchStrategy";
-            }
-
-            @Override
-            public Set<ExternalStreamType> getRequiredExternalStreams() {
-                return Set.of();
             }
 
             @Override

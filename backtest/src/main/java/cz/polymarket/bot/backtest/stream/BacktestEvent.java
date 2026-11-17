@@ -184,50 +184,6 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     }
 
     /**
-     * Aggressive spot trade execution event on Binance Spot.
-     *
-     * @param timestampMs simulated arrival timestamp ({@code server_ts + backtest.binance.delay-ms}) in milliseconds UTC
-     * @param sequenceNumber capture sequence / aggregate trade ID tiebreaker
-     * @param price trade execution price
-     * @param quantity trade volume in base asset
-     * @param isBuyerMaker true if maker was buyer (aggressive sell), false if aggressive buy
-     */
-    record BinanceSpotTradeEvent(
-            long timestampMs,
-            long sequenceNumber,
-            double price,
-            double quantity,
-            boolean isBuyerMaker
-    ) implements BacktestEvent {
-        @Override
-        public int priority() {
-            return 10;
-        }
-    }
-
-    /**
-     * Aggressive futures trade execution event on Binance Futures.
-     *
-     * @param timestampMs simulated arrival timestamp ({@code server_ts + backtest.binance.delay-ms}) in milliseconds UTC
-     * @param sequenceNumber capture sequence / aggregate trade ID tiebreaker
-     * @param price futures execution price
-     * @param quantity trade volume in contracts/base asset
-     * @param isBuyerMaker true if maker was buyer, false if aggressive buy
-     */
-    record BinanceFuturesTradeEvent(
-            long timestampMs,
-            long sequenceNumber,
-            double price,
-            double quantity,
-            boolean isBuyerMaker
-    ) implements BacktestEvent {
-        @Override
-        public int priority() {
-            return 10;
-        }
-    }
-
-    /**
      * Lifecycle milestones marking candle open and settlement close.
      *
      * @param timestampMs milestone timestamp in milliseconds UTC

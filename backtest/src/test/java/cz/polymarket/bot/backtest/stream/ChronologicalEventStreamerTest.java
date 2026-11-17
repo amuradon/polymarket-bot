@@ -6,7 +6,6 @@ import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.domain.Timeframe;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.TradeDirection;
 import org.junit.jupiter.api.DisplayName;
@@ -20,7 +19,6 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -32,9 +30,9 @@ class ChronologicalEventStreamerTest {
     void shouldPopEventsInAscendingOrder() {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
              ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-            streamer.scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(3000L, 1L, 60200.0, 1.0, false));
-            streamer.scheduleEvent(new BacktestEvent.BinanceSpotTradeEvent(1000L, 2L, 60000.0, 1.0, false));
-            streamer.scheduleEvent(new BacktestEvent.BinanceFuturesTradeEvent(2000L, 3L, 60100.0, 1.0, false));
+            streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(3000L, 1L, "btcusd", "chainlink", 60200.0, 2995L));
+            streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(1000L, 2L, "btcusd", "chainlink", 60000.0, 995L));
+            streamer.scheduleEvent(new BacktestEvent.CalculatedSpotTwapEvent(2000L, 3L, "btcusd", 60100.0, 60050.0));
 
             List<Long> timestamps = new ArrayList<>();
             while (streamer.hasNext()) {
@@ -46,8 +44,8 @@ class ChronologicalEventStreamerTest {
     }
 
     @Test
-    @DisplayName("Should stream typed Polymarket CLOB frames, price_crypto, and price_crypto_twap_60s while skipping unrequested external streams")
-    void shouldStreamPolymarketAndSkipUnrequestedExternalStreams(@TempDir Path tempDir) throws Exception {
+    @DisplayName("Should stream typed Polymarket CLOB frames, price_crypto, price_crypto_twap_60s, and CalculatedSpotTwapEvents")
+    void shouldStreamPolymarketAndCalculatedSpotTwapStreams(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
@@ -60,14 +58,12 @@ class ChronologicalEventStreamerTest {
             Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
             Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
             Path krakenFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
-            Path futFile = datasetService.getBinanceFuturesAggTradesFile("BTCUSDT", dateStr);
 
             Files.createDirectories(pmDir);
             Files.createDirectories(cryptoPriceFile.getParent());
             Files.createDirectories(twap60sFile.getParent());
             Files.createDirectories(spotFile.getParent());
             Files.createDirectories(krakenFile.getParent());
-            Files.createDirectories(futFile.getParent());
 
             Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
 
@@ -100,11 +96,6 @@ class ChronologicalEventStreamerTest {
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
                         "(" + (tStart * 1000L + 900L) + "::UBIGINT, 'USDT/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 0.9990::DOUBLE, 1000.0::DOUBLE, '2026-08-01T00:00:00.900000Z'::VARCHAR)" +
                         ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKraken + "' (FORMAT PARQUET)");
-
-                String normFut = futFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60010.0::DOUBLE, 1.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (tStart * 1000L + 1500L) + "::UBIGINT, false::BOOLEAN)" +
-                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker)) TO '" + normFut + "' (FORMAT PARQUET)");
             }
 
             CollectorMarketMetadata metadata = new CollectorMarketMetadata(
@@ -112,20 +103,16 @@ class ChronologicalEventStreamerTest {
                     "1001", "1002", 60000.0, 60120.0, TradeDirection.UP
             );
 
-            // Case 1: Strategy requires NO external streams -> CalculatedSpotTwapEvent IS streamed when datasetService is passed,
-            // while raw Binance Spot/Futures events must NOT be loaded
-            BacktestEvent[] noExtDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
-                    datasetService, "BTCUSDT", dateStr, Set.of(), 100L);
+            BacktestEvent[] sharedDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
+                    datasetService, "BTCUSDT", dateStr);
             try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-                streamer.loadCandleEvents(metadata, noExtDaily, datasetService, "BTCUSDT", Long.MAX_VALUE);
+                streamer.loadCandleEvents(metadata, sharedDaily, datasetService, "BTCUSDT", Long.MAX_VALUE);
 
                 int clobCount = 0;
                 int clobLevelSum = 0;
                 int calcSpotTwapCount = 0;
                 int cryptoPriceCount = 0;
                 int twap60sCount = 0;
-                int spotCount = 0;
-                int futCount = 0;
 
                 while (streamer.hasNext()) {
                     BacktestEvent event = streamer.next();
@@ -141,8 +128,6 @@ class ChronologicalEventStreamerTest {
                     }
                     if (event instanceof BacktestEvent.PolymarketCryptoPriceEvent) cryptoPriceCount++;
                     if (event instanceof BacktestEvent.PolymarketCryptoTwap60sEvent) twap60sCount++;
-                    if (event instanceof BacktestEvent.BinanceSpotTradeEvent) spotCount++;
-                    if (event instanceof BacktestEvent.BinanceFuturesTradeEvent) futCount++;
                 }
 
                 assertThat(clobCount).isEqualTo(1);
@@ -150,38 +135,6 @@ class ChronologicalEventStreamerTest {
                 assertThat(calcSpotTwapCount).isEqualTo(1);
                 assertThat(cryptoPriceCount).isEqualTo(1);
                 assertThat(twap60sCount).isEqualTo(1);
-                assertThat(spotCount).isZero();
-                assertThat(futCount).isZero();
-            }
-
-            // Case 2: Strategy requests Binance Spot and Futures aggTrades -> all streams loaded and ordered by delayed ts
-            BacktestEvent[] withExtDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
-                    datasetService, "BTCUSDT", dateStr, Set.of(
-                            ExternalStreamType.BINANCE_SPOT_AGG_TRADES,
-                            ExternalStreamType.BINANCE_FUTURES_AGG_TRADES
-                    ), 100L);
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-                streamer.loadCandleEvents(metadata, withExtDaily, Long.MAX_VALUE);
-
-                long prevTs = 0L;
-                int spotCount = 0;
-                int futCount = 0;
-                while (streamer.hasNext()) {
-                    BacktestEvent event = streamer.next();
-                    assertThat(event.timestampMs()).isGreaterThanOrEqualTo(prevTs);
-                    prevTs = event.timestampMs();
-                    if (event instanceof BacktestEvent.BinanceSpotTradeEvent spotEv) {
-                        spotCount++;
-                        assertThat(spotEv.timestampMs()).isEqualTo(tStart * 1000L + 1100L);
-                    }
-                    if (event instanceof BacktestEvent.BinanceFuturesTradeEvent futEv) {
-                        futCount++;
-                        assertThat(futEv.timestampMs()).isEqualTo(tStart * 1000L + 1600L);
-                    }
-                }
-
-                assertThat(spotCount).isEqualTo(1);
-                assertThat(futCount).isEqualTo(1);
             }
         }
     }

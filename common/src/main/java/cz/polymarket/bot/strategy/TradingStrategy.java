@@ -2,8 +2,6 @@ package cz.polymarket.bot.strategy;
 
 import cz.polymarket.bot.domain.OrderBookQuote;
 
-import java.util.Set;
-
 /**
  * Standard contract for trading strategies.
  * Implemented once in common/strategy layer, executing identically across
@@ -16,19 +14,6 @@ public interface TradingStrategy {
      */
     default String getName() {
         return getClass().getSimpleName();
-    }
-
-    /**
-     * Declares the set of external exchange market data streams required by this strategy.
-     * <p>
-     * If a strategy returns an empty set, the backtesting engine skips loading all external
-     * Parquet files, streaming exclusively Polymarket CLOB, {@code polymarket/price_crypto},
-     * and {@code polymarket/price_crypto_twap_60s} data.
-     *
-     * @return the set of required external stream types (empty by default)
-     */
-    default Set<ExternalStreamType> getRequiredExternalStreams() {
-        return Set.of();
     }
 
     /**

@@ -16,7 +16,6 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -134,7 +133,7 @@ class CollectorParquetDatasetServiceTest {
             assertThat(discovered).hasSize(6);
 
             BacktestEvent[] sharedDailyEvents = ChronologicalEventStreamer.loadSharedDailyStreams(
-                    service, "BTCUSDT", "2026-08-01", Set.of(), 100L);
+                    service, "BTCUSDT", "2026-08-01");
 
             Optional<CollectorMarketMetadata> loaded1 = service.loadMarketMetadata(discovered.get(0), sharedDailyEvents);
             assertThat(loaded1).isPresent();

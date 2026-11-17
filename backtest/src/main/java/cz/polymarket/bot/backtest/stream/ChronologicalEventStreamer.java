@@ -4,7 +4,6 @@ import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
-import cz.polymarket.bot.strategy.ExternalStreamType;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
 
@@ -20,7 +19,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.PriorityQueue;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
@@ -284,40 +282,28 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Loads all shared daily stream events ({@code polymarket/price_crypto}, {@code polymarket/price_crypto_twap_60s},
-     * and any strategy-requested external Binance streams) for a single UTC day into a sorted,
+     * Loads all shared daily Polymarket stream events ({@code polymarket/price_crypto} and
+     * {@code polymarket/price_crypto_twap_60s}) for a single UTC day into a sorted,
      * immutable array shared read-only across all parallel 15-minute market workers of that day.
-     * <p>
-     * External Binance aggTrades timestamps are shifted forward by {@code binanceDelayMs} relative to
-     * the server timestamp ({@code COALESCE(event_time, trade_time)}) to simulate feed delivery latency.
      *
      * @param datasetService collector Parquet dataset service
      * @param symbol trading asset symbol
      * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @param requiredExternalStreams set of external streams required by the strategy
-     * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
      * @return sorted array of daily stream events
      */
     public static BacktestEvent[] loadSharedDailyStreams(
             CollectorParquetDatasetService datasetService,
             String symbol,
-            String dateStr,
-            Set<ExternalStreamType> requiredExternalStreams,
-            long binanceDelayMs) {
+            String dateStr) {
 
-        if (binanceDelayMs < 0L) {
-            Log.error("Invalid argument in loadSharedDailyStreams: binanceDelayMs must be non-negative");
-            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
-        }
         if (datasetService == null || dateStr == null || dateStr.isBlank()) {
             return EMPTY_EVENTS;
         }
 
         DuckDbSessionManager sessionManager = datasetService.getDuckDbSessionManager();
-        Set<ExternalStreamType> extStreams = requiredExternalStreams != null ? requiredExternalStreams : Set.of();
 
         record DailyLoaderTask(Path file, BiConsumer<Statement, List<BacktestEvent>> loader) {}
-        List<DailyLoaderTask> tasks = new ArrayList<>(4);
+        List<DailyLoaderTask> tasks = new ArrayList<>(2);
 
         Path priceFile = datasetService.getPolymarketCryptoPriceFile(symbol, dateStr);
         if (priceFile != null && Files.exists(priceFile)) {
@@ -327,19 +313,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         Path twapFile = datasetService.getPolymarketCryptoTwap60sFile(symbol, dateStr);
         if (twapFile != null && Files.exists(twapFile)) {
             tasks.add(new DailyLoaderTask(twapFile, (stmt, out) -> loadDailyPolymarketCryptoTwap60s(stmt, twapFile, out)));
-        }
-
-        if (extStreams.contains(ExternalStreamType.BINANCE_SPOT_AGG_TRADES)) {
-            Path f = datasetService.getBinanceSpotAggTradesFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceTrades(stmt, f, binanceDelayMs, true, out)));
-            }
-        }
-        if (extStreams.contains(ExternalStreamType.BINANCE_FUTURES_AGG_TRADES)) {
-            Path f = datasetService.getBinanceFuturesAggTradesFile(symbol, dateStr);
-            if (f != null && Files.exists(f)) {
-                tasks.add(new DailyLoaderTask(f, (stmt, out) -> loadDailyBinanceTrades(stmt, f, binanceDelayMs, false, out)));
-            }
         }
 
         if (tasks.isEmpty()) {
@@ -1053,37 +1026,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             }
         } catch (SQLException e) {
             Log.warnf("Could not load Polymarket price_crypto_twap_60s file %s: %s", file, e.getMessage());
-        }
-    }
-
-    private static void loadDailyBinanceTrades(
-            Statement stmt,
-            Path file,
-            long binanceDelayMs,
-            boolean spot,
-            List<BacktestEvent> out) {
-        if (file == null || !Files.exists(file)) {
-            return;
-        }
-        String norm = file.toAbsolutePath().toString().replace('\\', '/').replace("'", "''");
-        String sql = "SELECT (CAST(COALESCE(event_time, trade_time) AS BIGINT) + " + binanceDelayMs + "), " +
-                "COALESCE(aggregate_trade_id, 0), price, quantity, is_buyer_maker " +
-                "FROM read_parquet('" + norm + "') " +
-                "WHERE price IS NOT NULL AND COALESCE(event_time, trade_time) IS NOT NULL";
-        try (ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                long effTs = rs.getLong(1);
-                long seq = rs.getLong(2);
-                double price = rs.getDouble(3);
-                double qty = rs.getDouble(4);
-                boolean isBuyerMaker = rs.getBoolean(5);
-                out.add(spot
-                        ? new BacktestEvent.BinanceSpotTradeEvent(effTs, seq, price, qty, isBuyerMaker)
-                        : new BacktestEvent.BinanceFuturesTradeEvent(effTs, seq, price, qty, isBuyerMaker));
-            }
-        } catch (SQLException e) {
-            Log.warnf("Could not load Binance %s aggTrades file %s: %s",
-                    spot ? "Spot" : "Futures", file, e.getMessage());
         }
     }
 
