@@ -174,13 +174,11 @@ class BacktestEngineTest {
             @Override
             public void onPolymarketCryptoPrice(long timestampMs, String symbol, String source, double price, long priceTimestampMs) {
                 polymarketCryptoPriceCount.incrementAndGet();
-                assertThat(ctx.getIndicatorValue(IndicatorType.CVD)).isZero();
             }
 
             @Override
             public void onPolymarketCryptoTwap60s(long timestampMs, String symbol, String source, double twapPrice, int windowSeconds, long twapTimestampMs) {
                 polymarketTwap60sCount.incrementAndGet();
-                assertThat(ctx.getIndicatorValue(IndicatorType.CVD)).isZero();
             }
 
             @Override

@@ -29,7 +29,6 @@ class DynamicIndicatorEngineTest {
 
         // CVD: +1.0 - 2.0 = -1.0
         assertThat(engine.getIndicatorValue(IndicatorType.CVD)).isCloseTo(-1.0, within(0.01));
-        assertThat(engine.getAllIndicators()).containsEntry(IndicatorType.CVD, -1.0);
         assertThat(engine.getCurrentSpotPrice()).isCloseTo(60200.0, within(0.01));
 
         // Resetting active candle clears intra-candle CVD and spot price

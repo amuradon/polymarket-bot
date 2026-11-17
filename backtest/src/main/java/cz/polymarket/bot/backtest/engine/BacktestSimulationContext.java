@@ -5,13 +5,11 @@ import cz.polymarket.bot.backtest.stream.DynamicIndicatorEngine;
 import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.strategy.ExecutionRouter;
-import cz.polymarket.bot.strategy.IndicatorType;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.TradeDirection;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Strategy execution context simulating order fills, fees, and settlements during backtests,
@@ -72,27 +70,6 @@ public class BacktestSimulationContext implements StrategyContext, ExecutionRout
     @Override
     public ExecutionRouter getExecutionRouter() {
         return this;
-    }
-
-    /**
-     * Returns the on-the-fly calculated indicator value.
-     *
-     * @param type indicator type
-     * @return current indicator value, or {@link Double#NaN} if not available
-     */
-    @Override
-    public double getIndicatorValue(IndicatorType type) {
-        return (indicatorEngine != null) ? indicatorEngine.getIndicatorValue(type) : Double.NaN;
-    }
-
-    /**
-     * Returns a snapshot of all currently calculated indicators.
-     *
-     * @return map of indicator types to current values
-     */
-    @Override
-    public Map<IndicatorType, Double> getIndicators() {
-        return (indicatorEngine != null) ? indicatorEngine.getAllIndicators() : Map.of();
     }
 
     /**

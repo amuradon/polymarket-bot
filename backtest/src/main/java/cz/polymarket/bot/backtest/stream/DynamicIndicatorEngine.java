@@ -3,10 +3,7 @@ package cz.polymarket.bot.backtest.stream;
 import cz.polymarket.bot.strategy.IndicatorType;
 
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.EnumMap;
 import java.util.EnumSet;
-import java.util.Map;
 import java.util.Set;
 
 /**
@@ -100,22 +97,6 @@ public class DynamicIndicatorEngine {
      */
     public double getIndicatorValue(IndicatorType type) {
         return type != null ? currentValues[type.ordinal()] : Double.NaN;
-    }
-
-    /**
-     * Returns an unmodifiable snapshot of all currently computed indicators.
-     *
-     * @return map of indicator types to values
-     */
-    public Map<IndicatorType, Double> getAllIndicators() {
-        Map<IndicatorType, Double> map = new EnumMap<>(IndicatorType.class);
-        for (IndicatorType type : requiredIndicators) {
-            double v = currentValues[type.ordinal()];
-            if (!Double.isNaN(v)) {
-                map.put(type, v);
-            }
-        }
-        return Collections.unmodifiableMap(map);
     }
 
     /**
