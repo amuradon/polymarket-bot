@@ -166,8 +166,6 @@ cat << EOF > "${TEMP_PARAMS}"
   "commands": [
     "set -euxo pipefail",
     "export AWS_REGION=${REGION}",
-    "if command -v docker >/dev/null 2>&1; then sudo docker rm -f polymarket-live 2>/dev/null || true; sudo systemctl disable --now docker 2>/dev/null || true; fi",
-    "if command -v iptables >/dev/null 2>&1; then sudo iptables -t nat -F 2>/dev/null || true; fi",
     "sudo /usr/local/bin/deploy-polymarket-live.sh \"${S3_ARTIFACT_URI}\"",
     "sleep 3",
     "sudo systemctl status polymarket-live --no-pager"

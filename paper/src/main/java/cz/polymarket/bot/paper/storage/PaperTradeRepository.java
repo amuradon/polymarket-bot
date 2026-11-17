@@ -23,7 +23,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /**
  * Crash-resilient, append-only repository for paper trading trades and continuous metrics.
  * Persists trade executions to line-delimited JSON (trades.jsonl) and maintains atomic metrics snapshots (metrics.json).
- * Restores full trading history and performance statistics upon container restarts or upgrades.
+ * Restores full trading history and performance statistics upon application restarts or upgrades.
  */
 @ApplicationScoped
 public class PaperTradeRepository {
