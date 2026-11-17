@@ -148,7 +148,7 @@ function Get-StreamType {
     if ($normalized -like "*-updown-*") {
         return "polymarket-clob-market"
     }
-    return "generic"
+    return $null
 }
 
 function Get-TypedClobSelectQuery {
@@ -508,6 +508,11 @@ try {
         }
 
         $streamType = Get-StreamType -FilePath $srcPath
+        if (-not $streamType) {
+            Write-Host "  [$index/$fileCount] [WARN] Skipping unknown stream type: $relPath ($sizeMb MB)" -ForegroundColor Yellow
+            $skippedCount++
+            continue
+        }
         if ($DryRun) {
             Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $([System.IO.Path]::GetFileName($destPath))" -ForegroundColor Yellow
             $successCount++

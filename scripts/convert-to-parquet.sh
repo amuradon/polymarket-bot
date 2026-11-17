@@ -176,7 +176,7 @@ get_stream_type() {
     elif [[ "$path_lower" =~ -updown- ]]; then
         echo "polymarket-clob-market"
     else
-        echo "generic"
+        echo ""
     fi
 }
 
@@ -551,6 +551,11 @@ while IFS=$'\t' read -r src_path src_size; do
     fi
 
     stream_type=$(get_stream_type "$src_path")
+    if [ -z "$stream_type" ]; then
+        log_warn "  [$CURRENT_INDEX/$TOTAL_ARCHIVES] [WARN] Skipping unknown stream type: $rel_path ($size_mb MB)"
+        SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
+        continue
+    fi
 
     if [ "$DRY_RUN" = true ]; then
         dest_base=$(basename "$dest_path")
