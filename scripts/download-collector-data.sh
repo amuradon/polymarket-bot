@@ -48,10 +48,10 @@ Modes:
 Options:
   -o, --destination-dir <path>  Local root directory for collector data.
                                 (Default: /data/polymarket/collector or ./collector)
-  -h, --ec2-host <alias>        EC2 SSH host alias configured in ~/.ssh/config.
-                                (Default: i-0e826b5eb507d87be)
+  -h, --ec2-host <alias>        EC2 SSH host alias / Instance ID configured in ~/.ssh/config.
+                                (Default: resolved from stack polymarket-bot-ec2 in eu-west-1)
   -r, --remote-base-dir <path>  Root directory of collector data on EC2.
-                                (Default: /mnt/ebs/polymarket-data/collector)
+                                (Default: /mnt/ebs/polymarket-bot/collector)
   -n, --dry-run                 Preview matching files and operations without downloading or deleting.
   -k, --keep-remote-files       Retain files on EC2 after successful download and verification.
       --help                    Display this help message.
@@ -70,8 +70,8 @@ TARGET_DATE=""
 STREAM_FILTER=""
 CLEAN_ALREADY_DOWNLOADED=false
 DESTINATION_DIR=""
-EC2_HOST="i-0e826b5eb507d87be"
-REMOTE_BASE_DIR="/mnt/ebs/polymarket-data/collector"
+EC2_HOST=""
+REMOTE_BASE_DIR="/mnt/ebs/polymarket-bot/collector"
 DRY_RUN=false
 KEEP_REMOTE_FILES=false
 
@@ -138,6 +138,23 @@ done
 # Check session manager plugin path if present
 if [ -d "/usr/local/sessionmanagerplugin/bin" ] && [[ ":$PATH:" != *":/usr/local/sessionmanagerplugin/bin:"* ]]; then
     export PATH="/usr/local/sessionmanagerplugin/bin:$PATH"
+fi
+
+if [ -z "$EC2_HOST" ]; then
+    if command -v aws >/dev/null 2>&1; then
+        EC2_HOST=$(aws cloudformation describe-stacks \
+            --stack-name "polymarket-bot-ec2" \
+            --region "eu-west-1" \
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+            --output text 2>/dev/null || true)
+        if [ "$EC2_HOST" = "None" ]; then
+            EC2_HOST=""
+        fi
+    fi
+    if [ -z "$EC2_HOST" ]; then
+        log_error "Could not resolve EC2 Instance ID from stack 'polymarket-bot-ec2' in eu-west-1. Specify -h|--ec2-host explicitly."
+        exit 1
+    fi
 fi
 
 # ==============================================================================

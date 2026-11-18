@@ -12,22 +12,34 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jctools.queues.MpscUnboundedArrayQueue;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Supplier;
 
 /**
  * Resilient WebSocket client for Polymarket PolyBolt v2 ({@code wss://ws-live-v2.polymarket.com/ws}).
- * Manages single-stream authenticated connections for {@code price.crypto.twap} (60-second TWAP) and
- * {@code price.crypto} (spot reference price) on the consolidated {@link MarketWebSocketRuntime}
- * ({@code market-ws-io-reader} on {@code CPU #1}), performing the mandatory {@code op: "auth"} -&gt;
- * {@code op: "authed"} -&gt; {@code op: "subscribe"} handshake before subscribing to any channel and
- * forwarding raw WebSocket JSON messages without parsing overhead.
+ * <p>
+ * Maintains single-stream authenticated connections for {@code price.crypto.twap} (60-second TWAP) and
+ * {@code price.crypto} (spot reference price) on {@link MarketWebSocketRuntime} ({@code CPU #1}),
+ * delivering raw frames continuously to the Data Collector ({@code CPU #0}) while optionally fanning out
+ * to a dedicated lock-free Strategy {@link MpscUnboundedArrayQueue} ({@code CPU #2}) strictly when a
+ * strategy consumer is attached. When the strategy consumer is detached ({@code OFF} mode), the strategy
+ * queue is cleared and receives zero frames.
  */
 @ApplicationScoped
 public class PolymarketPolyBoltClient {
+
+    private static final int STRATEGY_QUEUE_CHUNK_SIZE = 256;
+    private static final int STRATEGY_DRAIN_BATCH_LIMIT = 256;
+
+    private record StrategyBinding(RawWebSocketListener listener, Thread worker) {
+    }
 
     private final MarketWebSocketRuntime marketWsRuntime;
     private final String wsUrl;
@@ -36,6 +48,11 @@ public class PolymarketPolyBoltClient {
     private volatile String passphrase;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
+
+    private final MpscUnboundedArrayQueue<TimestampedFrame> strategyQueue =
+            new MpscUnboundedArrayQueue<>(STRATEGY_QUEUE_CHUNK_SIZE);
+    private final AtomicBoolean strategyWorkerParked = new AtomicBoolean(true);
+    private volatile StrategyBinding strategyBinding;
 
     private volatile ReconnectingWebSocketStream twapStream;
     private volatile ReconnectingWebSocketStream cryptoPriceStream;
@@ -115,154 +132,166 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
-     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream for the given asset symbol.
+     * Starts both authenticated PolyBolt streams ({@code price.crypto} and {@code price.crypto.twap}) for
+     * continuous Data Collector recording on {@code CPU #0}.
      *
-     * @param symbol   trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
-     * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
+     * @param symbol              trading symbol (e.g. {@code BTCUSDT}), normalized to PolyBolt symbol (e.g. {@code btcusd})
+     * @param cryptoPriceListener collector listener receiving {@code price.crypto} frames
+     * @param twapListener        collector listener receiving {@code price.crypto.twap} frames
      */
-    public synchronized void startTwapStream(String symbol, RawWebSocketListener listener) {
-        startTwapStream(symbol, listener, null);
-    }
-
-    /**
-     * Starts the PolyBolt {@code price.crypto.twap} (60s window) WebSocket stream bound to an optional
-     * external dedicated worker thread (e.g. {@code market-strategy-worker}).
-     *
-     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
-     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
-     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
-     */
-    public synchronized void startTwapStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
-        stopTwapStream();
+    public synchronized void startCollectorStreams(
+            String symbol,
+            RawWebSocketListener cryptoPriceListener,
+            RawWebSocketListener twapListener) {
+        stopCollectorStreams();
         String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
-        String subscribeMsg = buildTwapSubscribeMessage(polyBoltSymbol);
-        ReconnectingWebSocketStream newStream = createAuthenticatedStream(
-                "POLYMARKET-POLYBOLT-TWAP",
-                subscribeMsg,
-                () -> this.twapStream,
-                listener
-        );
-        newStream.setDisconnectListener(this.disconnectListener);
-        if (externalWorker != null) {
-            newStream.bindExternalWorker(externalWorker);
-        }
-        this.twapStream = newStream;
-        newStream.start();
-    }
 
-    /**
-     * Starts the PolyBolt {@code price.crypto} WebSocket stream for the given asset symbol.
-     *
-     * @param symbol   trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
-     * @param listener raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
-     */
-    public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener) {
-        startCryptoPriceStream(symbol, listener, null);
-    }
-
-    /**
-     * Starts the PolyBolt {@code price.crypto} WebSocket stream bound to an optional
-     * external dedicated worker thread (e.g. {@code market-strategy-worker}).
-     *
-     * @param symbol         trading symbol (e.g. BTCUSDT or BTC), normalized to PolyBolt symbol (e.g. btcusd)
-     * @param listener       raw WebSocket listener receiving unparsed JSON frames and local receipt timestamps
-     * @param externalWorker optional dedicated platform worker thread responsible for draining this stream
-     */
-    public synchronized void startCryptoPriceStream(String symbol, RawWebSocketListener listener, Thread externalWorker) {
-        stopCryptoPriceStream();
-        String polyBoltSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
-        String subscribeMsg = buildCryptoPriceSubscribeMessage(polyBoltSymbol);
-        ReconnectingWebSocketStream newStream = createAuthenticatedStream(
+        ReconnectingWebSocketStream newCryptoStream = createAuthenticatedStream(
                 "POLYMARKET-POLYBOLT-CRYPTO-PRICE",
-                subscribeMsg,
+                buildCryptoPriceSubscribeMessage(polyBoltSymbol),
                 () -> this.cryptoPriceStream,
-                listener
+                cryptoPriceListener
         );
-        newStream.setDisconnectListener(this.disconnectListener);
-        if (externalWorker != null) {
-            newStream.bindExternalWorker(externalWorker);
-        }
-        this.cryptoPriceStream = newStream;
-        newStream.start();
+        newCryptoStream.setDisconnectListener(this.disconnectListener);
+
+        ReconnectingWebSocketStream newTwapStream = createAuthenticatedStream(
+                "POLYMARKET-POLYBOLT-TWAP",
+                buildTwapSubscribeMessage(polyBoltSymbol),
+                () -> this.twapStream,
+                twapListener
+        );
+        newTwapStream.setDisconnectListener(this.disconnectListener);
+
+        this.cryptoPriceStream = newCryptoStream;
+        this.twapStream = newTwapStream;
+        newCryptoStream.start();
+        newTwapStream.start();
     }
 
     /**
-     * Drains all currently queued frames from both PolyBolt streams ({@code TWAP} and {@code CRYPTO-PRICE})
-     * into {@code scratchBatch}.
+     * Attaches the Strategy consumer and optional dedicated {@code market-strategy-worker} thread ({@code CPU #2})
+     * so incoming PolyBolt data frames are offered lock-free to the Strategy queue prior to collector disk I/O.
+     *
+     * @param strategyListener listener invoked when {@link #drainStreams(List)} runs on {@code CPU #2}
+     * @param externalWorker   optional dedicated worker thread to unpark upon frame arrival
+     */
+    public synchronized void attachStrategyConsumer(RawWebSocketListener strategyListener, Thread externalWorker) {
+        if (strategyListener == null) {
+            detachStrategyConsumer();
+            return;
+        }
+        strategyQueue.clear();
+        strategyWorkerParked.set(true);
+        this.strategyBinding = new StrategyBinding(strategyListener, externalWorker);
+    }
+
+    /**
+     * Detaches the Strategy consumer (used when switching Strategy to {@code OFF} or shutting down) and immediately
+     * clears the Strategy queue so zero PolyBolt frames accumulate in memory while Data Collector remains active.
+     */
+    public synchronized void detachStrategyConsumer() {
+        StrategyBinding prev = this.strategyBinding;
+        this.strategyBinding = null;
+        strategyQueue.clear();
+        strategyWorkerParked.set(false);
+        if (prev != null && prev.worker() != null) {
+            LockSupport.unpark(prev.worker());
+        }
+    }
+
+    /**
+     * Drains all currently queued Strategy PolyBolt frames ({@code TWAP} and {@code CRYPTO-PRICE})
+     * into {@code scratchBatch} and invokes the attached Strategy listener.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
-     * @return total number of frames drained across both streams
+     * @return total number of frames drained
      */
     public int drainStreams(List<TimestampedFrame> scratchBatch) {
-        int total = 0;
-        ReconnectingWebSocketStream twap = this.twapStream;
-        if (twap != null) {
-            total += twap.drainAvailableBatch(scratchBatch);
+        StrategyBinding binding = this.strategyBinding;
+        if (binding == null) {
+            strategyQueue.clear();
+            return 0;
         }
-        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
-        if (spot != null) {
-            total += spot.drainAvailableBatch(scratchBatch);
+        scratchBatch.clear();
+        int drained = strategyQueue.drain(scratchBatch::add, STRATEGY_DRAIN_BATCH_LIMIT);
+        if (drained == 0) {
+            return 0;
         }
-        return total;
+        if (strategyWorkerParked.getOpaque()) {
+            strategyWorkerParked.set(false);
+        }
+        try {
+            RawWebSocketListener listener = binding.listener();
+            for (int i = 0; i < drained; i++) {
+                TimestampedFrame frame = scratchBatch.get(i);
+                if (frame != null) {
+                    listener.onMessageBytes(frame);
+                }
+            }
+        } finally {
+            scratchBatch.clear();
+        }
+        return drained;
     }
 
     /**
-     * Returns whether either PolyBolt stream currently has frames waiting in its inbound queue.
+     * Returns whether the Strategy PolyBolt queue currently has frames waiting to be drained.
      *
-     * @return {@code true} if either PolyBolt queue is non-empty
+     * @return {@code true} if a strategy consumer is attached and {@code strategyQueue} is non-empty
      */
     public boolean hasQueuedFrames() {
-        ReconnectingWebSocketStream twap = this.twapStream;
-        if (twap != null && twap.hasQueuedFrames()) {
-            return true;
-        }
-        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
-        return spot != null && spot.hasQueuedFrames();
+        return this.strategyBinding != null && !strategyQueue.isEmpty();
     }
 
     /**
-     * Marks active PolyBolt streams as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
+     * Returns the current number of frames queued in the Strategy PolyBolt queue (always {@code 0} in {@code OFF} mode).
+     *
+     * @return strategy queue depth
+     */
+    public int getStrategyQueueDepth() {
+        return Math.max(0, strategyQueue.size());
+    }
+
+    /**
+     * Marks the Strategy PolyBolt queue as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
      * if frames arrived concurrently.
      *
      * @return {@code true} if frames arrived concurrently and parking must be aborted
      */
     public boolean prepareStreamsToPark() {
-        ReconnectingWebSocketStream twap = this.twapStream;
-        if (twap != null && twap.prepareToParkAndCheckQueuedFrames()) {
+        if (this.strategyBinding == null) {
+            return false;
+        }
+        strategyWorkerParked.set(true);
+        if (!strategyQueue.isEmpty()) {
+            strategyWorkerParked.set(false);
             return true;
         }
-        ReconnectingWebSocketStream spot = this.cryptoPriceStream;
-        return spot != null && spot.prepareToParkAndCheckQueuedFrames();
+        return false;
     }
 
     /**
-     * Stops the PolyBolt {@code price.crypto.twap} WebSocket connection.
+     * Stops only the underlying PolyBolt WebSocket streams.
      */
-    public synchronized void stopTwapStream() {
-        ReconnectingWebSocketStream current = this.twapStream;
+    public synchronized void stopCollectorStreams() {
+        ReconnectingWebSocketStream currentTwap = this.twapStream;
         this.twapStream = null;
-        if (current != null) {
-            current.stop();
+        if (currentTwap != null) {
+            currentTwap.stop();
         }
-    }
-
-    /**
-     * Stops the PolyBolt {@code price.crypto} WebSocket connection.
-     */
-    public synchronized void stopCryptoPriceStream() {
-        ReconnectingWebSocketStream current = this.cryptoPriceStream;
+        ReconnectingWebSocketStream currentSpot = this.cryptoPriceStream;
         this.cryptoPriceStream = null;
-        if (current != null) {
-            current.stop();
+        if (currentSpot != null) {
+            currentSpot.stop();
         }
     }
 
     /**
-     * Stops all active PolyBolt WebSocket connections.
+     * Detaches the Strategy consumer and stops all active PolyBolt WebSocket connections.
      */
     public synchronized void stop() {
-        stopTwapStream();
-        stopCryptoPriceStream();
+        detachStrategyConsumer();
+        stopCollectorStreams();
     }
 
     /**
@@ -313,20 +342,48 @@ public class PolymarketPolyBoltClient {
     }
 
     /**
+     * Returns whether the underlying PolyBolt WebSocket streams are currently active.
+     *
+     * @return {@code true} if either {@code twapStream} or {@code cryptoPriceStream} is initialized
+     */
+    public boolean isStreamsActive() {
+        return this.twapStream != null || this.cryptoPriceStream != null;
+    }
+
+    /**
      * Checks whether all required Polymarket CLOB API credentials ({@code apiKey}, {@code secret}, {@code passphrase})
      * are configured and non-blank.
      *
-     * @return true if all three credentials are present
+     * @return {@code true} if all three credentials are present
      */
     public boolean hasCredentials() {
         return !apiKey.isEmpty() && !secret.isEmpty() && !passphrase.isEmpty();
+    }
+
+    private void enqueueForStrategyIfAttached(TimestampedFrame frame) {
+        StrategyBinding binding = this.strategyBinding;
+        if (binding == null || frame == null) {
+            return;
+        }
+        strategyQueue.offer(frame);
+        // Re-check binding in case detachStrategyConsumer() ran concurrently right after offer
+        if (this.strategyBinding == null) {
+            strategyQueue.clear();
+            return;
+        }
+        if (strategyWorkerParked.getOpaque() && strategyWorkerParked.compareAndSet(true, false)) {
+            Thread worker = binding.worker();
+            if (worker != null) {
+                LockSupport.unpark(worker);
+            }
+        }
     }
 
     private ReconnectingWebSocketStream createAuthenticatedStream(
             String streamName,
             String subscribeMsg,
             Supplier<ReconnectingWebSocketStream> streamRef,
-            RawWebSocketListener listener) {
+            RawWebSocketListener collectorListener) {
         if (!hasCredentials()) {
             String errorMsg = String.format(
                     "[%s] Missing required Polymarket CLOB API credentials (POLYMARKET_API_KEY, POLYMARKET_SECRET, POLYMARKET_PASSPHRASE). All streams must be recorded; aborting startup.",
@@ -344,12 +401,13 @@ public class PolymarketPolyBoltClient {
                     return;
                 }
                 if (!rawJson.contains("\"op\"")) {
-                    if (listener != null) {
-                        listener.onMessage(rawJson, recvTs);
+                    enqueueForStrategyIfAttached(new TimestampedFrame(rawJson.getBytes(StandardCharsets.UTF_8), recvTs));
+                    if (collectorListener != null) {
+                        collectorListener.onMessage(rawJson, recvTs);
                     }
                     return;
                 }
-                handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, recvTs);
+                handleControlFrame(streamName, subscribeMsg, streamRef, collectorListener, rawJson, recvTs);
             }
 
             @Override
@@ -362,14 +420,16 @@ public class PolymarketPolyBoltClient {
                     return;
                 }
                 if (!containsOpFieldBytes(rawBytes)) {
-                    if (listener != null) {
-                        listener.onMessageBytes(frame);
+                    // Offer to Strategy queue & unpark CPU #2 FIRST so Collector Zstd disk I/O never delays Strategy
+                    enqueueForStrategyIfAttached(frame);
+                    if (collectorListener != null) {
+                        collectorListener.onMessageBytes(frame);
                     }
                     return;
                 }
                 String rawJson = frame.rawText();
                 if (rawJson != null && !rawJson.isBlank()) {
-                    handleControlFrame(streamName, subscribeMsg, streamRef, listener, rawJson, frame.recvTs());
+                    handleControlFrame(streamName, subscribeMsg, streamRef, collectorListener, rawJson, frame.recvTs());
                 }
             }
         };
@@ -390,7 +450,7 @@ public class PolymarketPolyBoltClient {
             String streamName,
             String subscribeMsg,
             Supplier<ReconnectingWebSocketStream> streamRef,
-            RawWebSocketListener listener,
+            RawWebSocketListener collectorListener,
             String rawJson,
             long recvTs) {
         if (isAuthedConfirmation(rawJson)) {
@@ -421,8 +481,9 @@ public class PolymarketPolyBoltClient {
             }
             return;
         }
-        if (listener != null) {
-            listener.onMessage(rawJson, recvTs);
+        enqueueForStrategyIfAttached(new TimestampedFrame(rawJson.getBytes(StandardCharsets.UTF_8), recvTs));
+        if (collectorListener != null) {
+            collectorListener.onMessage(rawJson, recvTs);
         }
     }
 

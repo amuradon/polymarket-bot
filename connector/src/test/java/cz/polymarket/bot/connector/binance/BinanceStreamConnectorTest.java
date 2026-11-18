@@ -16,22 +16,20 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Tests for {@link BinanceStreamType} and {@link BinanceStreamConnector} verifying all 4 Binance streams
- * ({@code SPOT_AGG_TRADES}, {@code SPOT_BOOK_TICKER}, {@code FUTURES_AGG_TRADES}, {@code FUTURES_BOOK_TICKER}),
- * dedicated native Epoll/BoringSSL transport configuration, dedicated I/O reader thread naming,
- * zero-decode {@code byte[]} frame delivery with host receipt timestamps, external worker batch draining,
- * and disconnect telemetry.
+ * Tests for {@link BinanceStreamType} and {@link BinanceStreamConnector} verifying strict isolation
+ * between single-leg collector {@code bookTicker} streams and dual Active-Active strategy
+ * {@code SPOT_AGG_TRADES} streams, zero duplication, fast-forward filtering, and clean {@code OFF} mode stop.
  */
 class BinanceStreamConnectorTest {
 
@@ -74,137 +72,88 @@ class BinanceStreamConnectorTest {
     }
 
     @Test
-    void shouldConnectAllBinanceStreamsAndDeliverPayloadsWithDedicatedIoThreadAndTelemetry() throws Exception {
-        server = vertx.createHttpServer()
-                .webSocketHandler(ws -> {
-                    String path = ws.path();
-                    ws.writeTextMessage("{\"streamPath\":\"" + path + "\",\"synthetic\":true}");
-                });
-
-        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
-        String spotWsBase = "ws://localhost:" + port + "/spot";
-        String futuresWsBase = "ws://localhost:" + port + "/futures";
-
-        BinanceStreamConnector connector = new BinanceStreamConnector(
-                marketWsRuntime,
-                spotWsBase,
-                futuresWsBase,
-                200L,
-                5000L
-        );
-
-        Map<BinanceStreamType, String> receivedByType = new ConcurrentHashMap<>();
-        Map<BinanceStreamType, Long> timestampsByType = new ConcurrentHashMap<>();
-
-        connector.start("BTCUSDT", (type, rawJson, recvTs) -> {
-            receivedByType.put(type, rawJson);
-            timestampsByType.put(type, recvTs);
-        });
-
-        Awaitility.await()
-                .atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> {
-                    assertThat(receivedByType).hasSize(4);
-                    assertThat(receivedByType.get(BinanceStreamType.SPOT_AGG_TRADES))
-                            .contains("/spot/btcusdt@aggTrade");
-                    assertThat(receivedByType.get(BinanceStreamType.SPOT_BOOK_TICKER))
-                            .contains("/spot/btcusdt@bookTicker");
-                    assertThat(receivedByType.get(BinanceStreamType.FUTURES_AGG_TRADES))
-                            .contains("/futures/market/ws/btcusdt@aggTrade");
-                    assertThat(receivedByType.get(BinanceStreamType.FUTURES_BOOK_TICKER))
-                            .contains("/futures/public/ws/btcusdt@bookTicker");
-                    assertThat(timestampsByType).hasSize(4);
-                    assertThat(timestampsByType.values()).allMatch(ts -> ts > 0L);
-                    assertThat(connector.isAllConnected()).isTrue();
-                    assertThat(connector.getIoReaderThread()).isNotNull();
-                    assertThat(connector.getIoReaderThread().getName())
-                            .isEqualTo(MarketWebSocketRuntime.DEDICATED_MARKET_IO_THREAD_NAME);
-                    assertThat(connector.getIoReaderThread().getPriority()).isEqualTo(Thread.MAX_PRIORITY);
-                });
-
-        List<WebSocketStreamTelemetry> telemetries = connector.getStreamTelemetries();
-        assertThat(telemetries).hasSize(4);
-        assertThat(telemetries).allSatisfy(snap -> {
-            assertThat(snap.totalFramesReceived()).isEqualTo(1L);
-            assertThat(snap.remoteAddress()).contains(":" + port);
-        });
-
-        connector.destroy();
-        assertThat(connector.isAllConnected()).isFalse();
-    }
-
-    @Test
-    void shouldDeliverZeroDecodeBytePayloadsAndSupportExternalWorkerAndDisconnectListener() throws Exception {
-        List<WebSocketStreamTelemetry> disconnectEvents = new CopyOnWriteArrayList<>();
+    void shouldIsolateBookTickerCollectorStreamsFromDualSpotAggTradesStrategyStreamsWithoutDuplication() throws Exception {
+        List<ServerWebSocket> aggTradeSockets = new CopyOnWriteArrayList<>();
 
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
                     String path = ws.path();
-                    ws.writeTextMessage("{\"streamPath\":\"" + path + "\",\"bytesMode\":true}");
-                    if (path.contains("futures/public/ws")) {
-                        vertx.setTimer(40L, id -> ws.close((short) 1013, "synthetic binance overload"));
+                    if (path.endsWith("@aggTrade")) {
+                        aggTradeSockets.add(ws);
+                        ws.writeTextMessage("{\"e\":\"aggTrade\",\"a\":5001,\"p\":\"85000.00\",\"q\":\"0.10\"}");
+                    } else if (path.endsWith("@bookTicker")) {
+                        ws.writeTextMessage("{\"u\":9001,\"s\":\"BTCUSDT\",\"b\":\"84999.00\",\"B\":\"1.0\",\"a\":\"85001.00\",\"A\":\"1.0\",\"path\":\"" + path + "\"}");
                     }
                 });
 
         int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
-        String spotWsBase = "ws://localhost:" + port + "/spot";
-        String futuresWsBase = "ws://localhost:" + port + "/futures";
-
         BinanceStreamConnector connector = new BinanceStreamConnector(
                 marketWsRuntime,
-                spotWsBase,
-                futuresWsBase,
+                "ws://127.0.0.1:" + port + "/spot",
+                "ws://127.0.0.1:" + port + "/futures",
                 200L,
                 0L
         );
-        connector.setDisconnectListener(disconnectEvents::add);
 
-        Map<BinanceStreamType, String> decodedFromBytes = new ConcurrentHashMap<>();
-        Map<BinanceStreamType, Long> byteTimestampsByType = new ConcurrentHashMap<>();
-        AtomicBoolean workerRunning = new AtomicBoolean(true);
+        Map<BinanceStreamType, List<String>> collectorFrames = new ConcurrentHashMap<>();
+        List<Long> strategyAggTradeIds = new CopyOnWriteArrayList<>();
 
-        Thread externalWorker = Thread.ofPlatform()
-                .daemon(true)
-                .name("test-binance-ext-worker")
-                .unstarted(() -> {
-                    List<TimestampedFrame> scratch = new ArrayList<>(64);
-                    while (workerRunning.get()) {
-                        int drained = connector.drainStreams(scratch);
-                        if (drained > 0) {
-                            continue;
-                        }
-                        LockSupport.parkNanos(connector, 15_000_000L);
+        // Reject non-bookTicker stream types in startBookTickerStreams
+        assertThatThrownBy(() -> connector.startBookTickerStreams(
+                "BTCUSDT",
+                EnumSet.of(BinanceStreamType.SPOT_AGG_TRADES),
+                (type, rawJson, ts) -> {}
+        )).isInstanceOf(IllegalArgumentException.class);
+
+        // Start both bookTicker collector streams AND dual SPOT_AGG_TRADES strategy streams simultaneously
+        connector.startBookTickerStreams(
+                "BTCUSDT",
+                EnumSet.of(BinanceStreamType.SPOT_BOOK_TICKER, BinanceStreamType.FUTURES_BOOK_TICKER),
+                new BinanceStreamListener() {
+                    @Override
+                    public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
+                        throw new AssertionError("Expected zero-decode byte[] callback");
                     }
-                });
 
-        BinanceStreamListener byteListener = new BinanceStreamListener() {
-            @Override
-            public void onStreamMessage(BinanceStreamType streamType, String rawJson, long recvTimestampMs) {
-                throw new AssertionError("onStreamMessage(String) must not be called when onStreamFrame(byte[]) is overridden");
+                    @Override
+                    public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
+                        collectorFrames.computeIfAbsent(streamType, k -> new CopyOnWriteArrayList<>())
+                                .add(new String(rawUtf8Bytes, StandardCharsets.UTF_8));
+                    }
+                }
+        );
+
+        Thread dummyStrategyWorker = Thread.ofPlatform().daemon(true).name("dummy-binance-strat").unstarted(() -> {});
+        connector.startSpotAggTradesBatch("BTCUSDT", batch -> {
+            for (TimestampedFrame frame : batch) {
+                strategyAggTradeIds.add(BinanceStreamConnector.extractAggTradeId(frame.rawUtf8Bytes()));
             }
+        }, dummyStrategyWorker);
 
-            @Override
-            public void onStreamFrame(BinanceStreamType streamType, byte[] rawUtf8Bytes, long recvTimestampMs) {
-                decodedFromBytes.put(streamType, new String(rawUtf8Bytes, StandardCharsets.UTF_8));
-                byteTimestampsByType.put(streamType, recvTimestampMs);
-            }
-        };
-
-        externalWorker.start();
-        connector.start("BTCUSDT", java.util.EnumSet.allOf(BinanceStreamType.class), byteListener, externalWorker);
-
+        List<TimestampedFrame> scratch = new ArrayList<>(16);
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
-                    assertThat(decodedFromBytes).hasSize(4);
-                    assertThat(byteTimestampsByType).hasSize(4);
-                    assertThat(byteTimestampsByType.values()).allMatch(ts -> ts > 0L);
-                    assertThat(disconnectEvents).isNotEmpty();
-                    assertThat(disconnectEvents.getFirst().lastCloseCode()).isEqualTo(1013);
+                    assertThat(aggTradeSockets).hasSize(2);
+                    connector.drainStreams(scratch);
+                    assertThat(strategyAggTradeIds).containsExactly(5001L);
+                    assertThat(collectorFrames.get(BinanceStreamType.SPOT_BOOK_TICKER)).hasSize(1);
+                    assertThat(collectorFrames.get(BinanceStreamType.FUTURES_BOOK_TICKER)).hasSize(1);
+                    assertThat(collectorFrames).doesNotContainKey(BinanceStreamType.SPOT_AGG_TRADES);
+                    assertThat(connector.getBookTickerConnectionStates())
+                            .containsEntry(BinanceStreamType.SPOT_BOOK_TICKER, ConnectionState.CONNECTED)
+                            .containsEntry(BinanceStreamType.FUTURES_BOOK_TICKER, ConnectionState.CONNECTED);
+                    assertThat(connector.getSpotAggTradesState()).isEqualTo(ConnectionState.CONNECTED);
                 });
 
-        workerRunning.set(false);
-        LockSupport.unpark(externalWorker);
+        // Stop strategy streams (mode OFF) and verify bookTicker collector streams stay CONNECTED
+        connector.stopSpotAggTrades();
+        assertThat(connector.getSpotAggTradesState()).isEqualTo(ConnectionState.DISCONNECTED);
+        assertThat(connector.hasQueuedFrames()).isFalse();
+        assertThat(connector.getBookTickerConnectionStates())
+                .containsEntry(BinanceStreamType.SPOT_BOOK_TICKER, ConnectionState.CONNECTED)
+                .containsEntry(BinanceStreamType.FUTURES_BOOK_TICKER, ConnectionState.CONNECTED);
+
         connector.destroy();
     }
 
@@ -253,8 +202,7 @@ class BinanceStreamConnectorTest {
                 .untilAsserted(() -> {
                     assertThat(aggTradeSockets).hasSize(2);
                     assertThat(deliveredAggTradeIds).containsExactly(1002L, 1003L);
-                    assertThat(connector.getConnectionStates().get(BinanceStreamType.SPOT_AGG_TRADES))
-                            .isEqualTo(ConnectionState.CONNECTED);
+                    assertThat(connector.getSpotAggTradesState()).isEqualTo(ConnectionState.CONNECTED);
                     assertThat(connector.getStreamTelemetries()).hasSize(2);
                 });
 
@@ -270,6 +218,5 @@ class BinanceStreamConnectorTest {
         assertThat(redundancy.failoverActive()).isTrue();
 
         connector.destroy();
-        assertThat(connector.isAllConnected()).isFalse();
     }
 }

@@ -9,22 +9,19 @@ All global rules for **Polymarket Bot** live here.
 
 ---
 
-## 2. Module Boundaries (7 Maven Submodules)
+## 2. Module Boundaries (4 Maven Submodules)
 
 Only the internal dependencies listed under **Allowed Internal Deps** are permitted; **all other internal submodule dependencies are strictly forbidden**:
 
 | Submodule | Type | Allowed Internal Deps (Strict Whitelist) | Scope & Isolation Notes |
 | :--- | :--- | :--- | :--- |
 | **`common`** | Library | *None* | Pure domain records, math/TWAP calculators (`CalculatedSpotTwapEngine`), `TradingStrategy`, `StrategyContext`, `ExecutionRouter`. No heavy frameworks. |
-| **`connector`** | Library | *None* | Resilient WS/REST clients (Binance, Kraken, Coinbase, Polymarket Gamma/PolyBolt/CLOB). **Never depends on `common` or `trading`.** |
-| **`data`** | App (`:8084`) | `connector` | Raw `.jsonl.zst` stream recorder with Blue-Green cutover. **Never depends on `common` or `trading`.** |
-| **`trading`** | Library | `common`, `connector` | Shared runtime, UI/REST/WS wiring, and `CalculatedSpotStreamProcessor` for `paper` and `live`. Zero `data`/`backtest` leakage. |
-| **`live`** | App (`:8080`) | `trading`, `connector` | Real-money Polymarket execution (EIP-712 signing, CLOB gateway, risk guards). Zero `backtest` leakage. |
-| **`paper`** | App (`:8082`) | `trading`, `connector` | Virtual order simulator against live market feeds. Zero `backtest` leakage. |
-| **`backtest`** | App (`:8083`) | `common` | Historical simulation engine (DuckDB, Parquet replay, simulated `ExecutionRouter`). Isolated from `connector`/`trading`/`live`/`paper`. |
+| **`connector`** | Library | *None* | Resilient WS/REST clients (Binance, Kraken, Coinbase, Polymarket Gamma/PolyBolt/CLOB). **Never depends on `common`, `bot`, or `backtest`.** |
+| **`bot`** | App (`:8080`) | `common`, `connector` | Unified production application combining `StrategyTradingEngine` (`StrategyMode`: `LIVE`, `PAPER`, `OFF`), continuous `.jsonl.zst` `DataCollectorService`, `RuntimeStateStore`, and unified Web/REST dashboard. Zero `backtest` leakage. |
+| **`backtest`** | App (`:8083`) | `common` | Historical simulation engine (DuckDB, Parquet replay, simulated `ExecutionRouter`). Isolated from `connector` and `bot`. |
 
-- **Zero Discrepancy**: Strategy (`TradingStrategy`) and calculator bytecode in `common` executes identically across `backtest`, `paper`, and `live` via `StrategyContext` and `ExecutionRouter`.
-- **Jandex Indexing**: Shared Quarkus libraries (`common`, `connector`, `trading`) must include `jandex-maven-plugin` and `META-INF/beans.xml`.
+- **Zero Discrepancy**: Strategy (`TradingStrategy`) and calculator bytecode in `common` executes identically across `backtest` and `bot` (`PAPER` and `LIVE`) via `StrategyContext` and `ExecutionRouter`.
+- **Jandex Indexing**: Shared Quarkus libraries (`common`, `connector`) must include `jandex-maven-plugin` and `META-INF/beans.xml`.
 
 ---
 
@@ -32,7 +29,7 @@ Only the internal dependencies listed under **Allowed Internal Deps** are permit
 
 - **Plan First**: Before modifying source code, use `/plan` and present an Implementation Plan artifact for review. Follow the approved plan strictly; pause and update it if unexpected architectural issues arise.
 - **Clean Code & Full Refactoring**: Enforce DRY (shared math/domain in `common`), SOLID/SRP, and domain-accurate naming. Leave zero dead code, unused imports/fields, or **unused constructor/method overloads**.
-- **No Backward Compatibility & Production Code Priority (Fail Fast)**: Never add `@Deprecated` shims, compatibility wrappers, legacy overloads, heuristics, or silent fallbacks — **never retain backward-compatible code in `src/main/java` just to keep existing tests compiling or passing**. Production code cleanliness always takes strict priority: refactor all call sites across all 7 submodules and scripts, and **rewrite `src/test/java` tests to adapt to the clean production contract**. Fail fast with descriptive errors.
+- **No Backward Compatibility & Production Code Priority (Fail Fast)**: Never add `@Deprecated` shims, compatibility wrappers, legacy overloads, heuristics, or silent fallbacks — **never retain backward-compatible code in `src/main/java` just to keep existing tests compiling or passing**. Production code cleanliness always takes strict priority: refactor all call sites across all 4 submodules and scripts, and **rewrite `src/test/java` tests to adapt to the clean production contract**. Fail fast with descriptive errors.
 - **Hot-Path Purity & Low-Latency Java 25**:
   - **Zero Non-Essential Code on the Hot Path**: Every instruction on the WS-to-order critical path must strictly serve real-time pricing, signal calculation, or order execution. **NEVER** add unnecessary instructions, state updates, or bookkeeping on the hot path (e.g., counters, flags, or probes added to assert behavior in tests, diagnostics, or convenience).
   - **GC-Free & Lock-Free**: Eliminate heap allocations and `Double`/`Long`/`BigDecimal` boxing in real-time loops; use non-blocking Vert.x event loops without locks.

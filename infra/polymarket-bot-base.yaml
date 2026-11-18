@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Base Infrastructure in eu-west-1 (Dublin). Provisions an encrypted private S3 release
+  artifact bucket, CloudWatch Logs group, least-privilege IAM role with SSM Session Manager, S3 artifact
+  read, Secrets Manager, and EBS volume attachment access, a persistent 100 GiB gp3 encrypted EBS volume
+  (or references an existing retained EBS volume), and a security group restricting inbound HTTPS (port 443)
+  strictly to authorized management IP (178.17.13.13/32).
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  PolymarketSecretId:
+    Type: String
+    Default: polymarket-sniper/clob-credentials
+    Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2, PolyBolt, and EIP-712 signing credentials.
+
+  ExistingEbsVolumeId:
+    Type: String
+    Default: ""
+    Description: >
+      Existing persistent gp3 EBS Volume ID in eu-west-1a to reuse (leave empty to provision a new 100 GiB gp3 EBS volume).
+
+  EbsVolumeSizeGb:
+    Type: Number
+    Default: 100
+    MinValue: 20
+    MaxValue: 1000
+    Description: Size in GiB of the persistent gp3 EBS volume for Data Collector, Paper trades, and Runtime State (default 100 GiB).
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: Retention period in days for the CloudWatch Logs log group.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0ebc7d75fbfa0bf7f
+    Description: VPC ID in eu-west-1 for the Polymarket Bot security group.
+
+  AllowedInboundCidr:
+    Type: String
+    Default: 178.17.13.13/32
+    Description: CIDR IP range allowed inbound HTTPS (port 443) access.
+
+Conditions:
+  CreateNewEbsVolume: !Equals [!Ref ExistingEbsVolumeId, ""]
+
+Resources:
+  PolymarketBotArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores versioned Quarkus fast-jar release archives (bot-{x.y.z}.tar.gz) for direct Bare-OS systemd deployment on EC2 without Docker or ECR overhead.
+        must: Block all public access, encrypt at rest with AES256, and expire old release archives after 30 days.
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldBotReleaseArchives
+            Prefix: releases/
+            Status: Enabled
+            ExpirationInDays: 30
+
+  PolymarketBotArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Enforces TLS-only transport for all requests to PolymarketBotArtifactBucket.
+        must: Deny any S3 operation where aws:SecureTransport is false.
+    Properties:
+      Bucket: !Ref PolymarketBotArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt PolymarketBotArtifactBucket.Arn
+              - !Sub "${PolymarketBotArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  PolymarketBotLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Centralized CloudWatch Logs log group for the unified Polymarket Bot systemd service and EC2 host logs.
+        must: Retain logs across stack updates and enforce a bounded retention period.
+    Properties:
+      LogGroupName: !Sub "/polymarket-bot/${AWS::StackName}/bot"
+      RetentionInDays: !Ref LogRetentionDays
+
+  PolymarketBotSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Security group restricting inbound HTTPS to authorized management IP and permitting outbound traffic for Polymarket, Binance, Kraken, Coinbase, and AWS endpoints.
+        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound traffic for market feeds and AWS control plane.
+    Properties:
+      GroupDescription: Security group for Polymarket Bot EC2 instance with restricted inbound HTTPS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedInboundCidr
+          Description: Inbound HTTPS access strictly for authorized management IP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound traffic for Polymarket CLOB/Gamma/PolyBolt (443), Binance (443/9443), Kraken (443), Coinbase (443), S3, SSM, CloudWatch Logs, and Secrets Manager
+
+  PolymarketBotIamRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows the EC2 instance to be managed via SSM Session Manager/Run Command, stream logs to CloudWatch, download release archives from S3, attach the persistent 100 GiB EBS volume, and read credentials from Secrets Manager.
+        must: Scope Secrets Manager GetSecretValue permission strictly to PolymarketSecretId prefix in eu-west-1.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: PolymarketBotS3SecretsCloudWatchAndEbsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3ListBotArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt PolymarketBotArtifactBucket.Arn
+              - Sid: S3GetBotArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${PolymarketBotArtifactBucket.Arn}/releases/*"
+              - Sid: ListSecretsForQuarkusSecretsManagerConfigSource
+                Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                Resource: '*'
+              - Sid: ReadPolymarketCredentialsSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PolymarketSecretId}*"
+              - Sid: WriteServiceAndHostLogsToCloudWatch
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt PolymarketBotLogGroup.Arn
+              - Sid: EbsAttachAndDescribe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:AttachVolume
+                  - ec2:DetachVolume
+                Resource: '*'
+
+  PolymarketBotInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Binds the PolymarketBotIamRole to the EC2 instance.
+        must: Reference PolymarketBotIamRole.
+    Properties:
+      Roles:
+        - !Ref PolymarketBotIamRole
+
+  PolymarketBotEbsVolume:
+    Type: AWS::EC2::Volume
+    Condition: CreateNewEbsVolume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Dedicated persistent 100 GiB gp3 EBS volume storing compressed .jsonl.zst market archives, paper trade logs, and runtime-state.json separately from the root OS volume.
+        must: Must be encrypted, gp3, 100 GiB by default, retained on stack deletion, and created in eu-west-1a.
+        mutability: immutable
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      VolumeType: gp3
+      Size: !Ref EbsVolumeSizeGb
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ebs-data"
+
+Outputs:
+  ArtifactBucketName:
+    Description: S3 Bucket name storing Polymarket Bot release archives (bot-{x.y.z}.tar.gz)
+    Value: !Ref PolymarketBotArtifactBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketName"
+  ArtifactBucketArn:
+    Description: S3 Bucket ARN storing Polymarket Bot release archives
+    Value: !GetAtt PolymarketBotArtifactBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketArn"
+  LogGroupName:
+    Description: CloudWatch Logs log group name for Polymarket Bot logs
+    Value: !Ref PolymarketBotLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupName"
+  LogGroupArn:
+    Description: CloudWatch Logs log group ARN for Polymarket Bot logs
+    Value: !GetAtt PolymarketBotLogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupArn"
+  SecurityGroupId:
+    Description: Security Group ID for Polymarket Bot EC2 instance
+    Value: !GetAtt PolymarketBotSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+  InstanceProfileName:
+    Description: IAM Instance Profile name for Polymarket Bot EC2 instance
+    Value: !Ref PolymarketBotInstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceProfileName"
+  EbsVolumeId:
+    Description: Persistent gp3 EBS Volume ID mounted at /mnt/ebs/polymarket-bot
+    Value: !If [CreateNewEbsVolume, !Ref PolymarketBotEbsVolume, !Ref ExistingEbsVolumeId]
+    Export:
+      Name: !Sub "${AWS::StackName}-EbsVolumeId"

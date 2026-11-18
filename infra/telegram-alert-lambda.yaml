@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Polymarket Bot Telegram Alert Lambda Function in eu-west-1 (Dublin). Provisions the Java 25 Telegram
   Alert Lambda function from an existing Amazon ECR container image, authorizes CloudWatch Logs invocation,
-  and attaches CloudWatch Logs Subscription Filters to both the Live Trading and Data Collector Log Groups.
+  and attaches a CloudWatch Logs Subscription Filter to the unified Polymarket Bot Log Group.
 
 Metadata:
   AWSToolsMetrics:
@@ -14,15 +14,10 @@ Parameters:
     Default: polymarket-bot-alert-base
     Description: Name of the Telegram Alert Base Infrastructure stack exporting TelegramAlertEcrRepositoryUri and TelegramAlertRoleArn.
 
-  LiveBaseStackName:
+  BotBaseStackName:
     Type: String
-    Default: polymarket-bot-live-base
-    Description: Name of the Live Trading Base Infrastructure stack exporting LogGroupName and LogGroupArn.
-
-  DataBaseStackName:
-    Type: String
-    Default: polymarket-bot-data-base
-    Description: Name of the Data Collector Base Infrastructure stack exporting LogGroupName and LogGroupArn.
+    Default: polymarket-bot-base
+    Description: Name of the Polymarket Bot Base Infrastructure stack exporting LogGroupName and LogGroupArn.
 
   ImageTag:
     Type: String
@@ -83,55 +78,31 @@ Resources:
     Type: AWS::Lambda::Permission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Authorizes CloudWatch Logs service to invoke the Telegram alert Lambda function upon pattern match in Live Trading logs.
-        must: Restrict invocation strictly to Live Trading LogGroup.
+        why: Authorizes CloudWatch Logs service to invoke the Telegram alert Lambda function upon pattern match in Polymarket Bot logs.
+        must: Restrict invocation strictly to the unified Polymarket Bot LogGroup and owning AWS account.
     Properties:
       Action: lambda:InvokeFunction
       FunctionName: !GetAtt TelegramAlertFunction.Arn
       Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
       SourceArn:
-        Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupArn"
+        Fn::ImportValue: !Sub "${BotBaseStackName}-LogGroupArn"
 
   TelegramAlertSubscriptionFilter:
     Type: AWS::Logs::SubscriptionFilter
     DependsOn: TelegramAlertPermission
     Metadata:
       com.aws.cloudformation.Context:
-        why: Filters Live Trading logs strictly for [FATAL], [ERROR], and *Exception occurrences ([WARN] intentionally excluded at subscription level; kept in Lambda code for future reactivation).
+        why: Filters Polymarket Bot logs strictly for [FATAL], [ERROR], and *Exception occurrences ([WARN] intentionally excluded at subscription level; kept in Lambda code for future reactivation).
     Properties:
       LogGroupName:
-        Fn::ImportValue: !Sub "${LiveBaseStackName}-LogGroupName"
-      FilterPattern: '%\[FATAL\]|\[ERROR\]|\w*Exception\W|\w*Exception$%'
-      DestinationArn: !GetAtt TelegramAlertFunction.Arn
-
-  TelegramAlertDataPermission:
-    Type: AWS::Lambda::Permission
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Authorizes CloudWatch Logs service to invoke the Telegram alert Lambda function upon pattern match in Data Collector logs.
-        must: Restrict invocation strictly to Data Collector LogGroup.
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !GetAtt TelegramAlertFunction.Arn
-      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
-      SourceArn:
-        Fn::ImportValue: !Sub "${DataBaseStackName}-LogGroupArn"
-
-  TelegramAlertDataSubscriptionFilter:
-    Type: AWS::Logs::SubscriptionFilter
-    DependsOn: TelegramAlertDataPermission
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Filters Data Collector logs strictly for [FATAL], [ERROR], and *Exception occurrences ([WARN] intentionally excluded at subscription level; kept in Lambda code for future reactivation).
-    Properties:
-      LogGroupName:
-        Fn::ImportValue: !Sub "${DataBaseStackName}-LogGroupName"
+        Fn::ImportValue: !Sub "${BotBaseStackName}-LogGroupName"
       FilterPattern: '%\[FATAL\]|\[ERROR\]|\w*Exception\W|\w*Exception$%'
       DestinationArn: !GetAtt TelegramAlertFunction.Arn
 
 Outputs:
   TelegramAlertFunctionArn:
-    Description: AWS Lambda Function ARN dispatching Telegram alerts for live trading and data collector fatals, errors, and exceptions
+    Description: AWS Lambda Function ARN dispatching Telegram alerts for Polymarket Bot fatals, errors, and exceptions
     Value: !GetAtt TelegramAlertFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-TelegramAlertFunctionArn"

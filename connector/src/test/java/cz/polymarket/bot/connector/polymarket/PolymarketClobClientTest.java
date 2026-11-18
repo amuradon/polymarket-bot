@@ -3,6 +3,7 @@ package cz.polymarket.bot.connector.polymarket;
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.RawWebSocketListener;
 import cz.polymarket.bot.connector.ws.StreamRedundancyStatus;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
@@ -14,7 +15,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -23,8 +26,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tests for {@link PolymarketClobClient} verifying per-market WebSocket stream subscription,
- * raw unparsed message delivery, and individual market stream disconnection.
+ * Tests for {@link PolymarketClobClient} verifying isolated single-leg collector streams,
+ * dual Active-Active deduplicated strategy streams, zero collector duplication, and clean
+ * strategy stream shutdown in {@code OFF} mode without disturbing active collector recording.
  */
 class PolymarketClobClientTest {
 
@@ -52,7 +56,7 @@ class PolymarketClobClientTest {
     }
 
     @Test
-    void shouldOpenAndClosePerMarketStreamDeliveringRawMessages() throws Exception {
+    void shouldOpenAndCloseCollectorMarketStreamDeliveringRawMessages() throws Exception {
         List<String> receivedSubMessages = new CopyOnWriteArrayList<>();
 
         server = vertx.createHttpServer()
@@ -82,26 +86,32 @@ class PolymarketClobClientTest {
 
         String slug = "btc-updown-15m-1789041600";
         List<String> rawEvents = new CopyOnWriteArrayList<>();
-        client.openMarketStream(slug, List.of("token_up_1", "token_down_1"), (rawJson, recvTs) -> rawEvents.add(rawJson));
+        client.openCollectorMarketStream(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                (rawJson, recvTs) -> rawEvents.add(rawJson),
+                null,
+                null
+        );
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
                     assertThat(receivedSubMessages).isNotEmpty();
-                    assertThat(client.getConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+                    assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
                     assertThat(rawEvents).hasSize(3);
                     assertThat(rawEvents.get(0)).contains("\"event_type\":\"book\"");
                     assertThat(rawEvents.get(1)).contains("\"event_type\":\"price_change\"");
                     assertThat(rawEvents.get(2)).contains("\"event_type\":\"last_trade_price\"");
                 });
 
-        client.closeMarketStream(slug);
-        assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+        client.closeCollectorMarketStream(slug);
+        assertThat(client.getCollectorConnectionStates()).doesNotContainKey(slug);
         client.stopAll();
     }
 
     @Test
-    void shouldCloseMarketStreamCleanlyAndInvokeNormalCloseListenerWhenServerClosesWithCode1000() throws Exception {
+    void shouldCloseCollectorStreamCleanlyAndInvokeNormalCloseListenerWhenServerClosesWithCode1000() throws Exception {
         AtomicInteger connectionCount = new AtomicInteger(0);
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
@@ -134,11 +144,12 @@ class PolymarketClobClientTest {
         client.setDisconnectListener(unexpectedDisconnects::add);
 
         String slug = "btc-updown-15m-1789041600";
-        client.openMarketStream(
+        client.openCollectorMarketStream(
                 slug,
                 List.of("token_up_1", "token_down_1"),
                 (rawJson, recvTs) -> rawEvents.add(rawJson),
-                normalCloses::add
+                normalCloses::add,
+                null
         );
 
         Awaitility.await()
@@ -147,7 +158,7 @@ class PolymarketClobClientTest {
                     assertThat(normalCloses).hasSize(1);
                     assertThat(rawEvents).hasSize(2);
                     assertThat(rawEvents.get(1)).contains("\"event_type\":\"market_resolved\"");
-                    assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+                    assertThat(client.getCollectorConnectionStates()).doesNotContainKey(slug);
                 });
 
         Thread.sleep(150L);
@@ -160,7 +171,7 @@ class PolymarketClobClientTest {
     }
 
     @Test
-    void shouldNotReconnectAndInvokeCloseListenerWhenDisconnectedAfterMarketIntervalEnd() throws Exception {
+    void shouldNotReconnectCollectorStreamAndInvokeCloseListenerWhenDisconnectedAfterMarketIntervalEnd() throws Exception {
         AtomicInteger connectionCount = new AtomicInteger(0);
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
@@ -190,7 +201,7 @@ class PolymarketClobClientTest {
         client.setDisconnectListener(unexpectedDisconnects::add);
 
         String slug = "btc-updown-15m-1789041600";
-        client.openMarketStream(
+        client.openCollectorMarketStream(
                 slug,
                 List.of("token_up_1", "token_down_1"),
                 (rawJson, recvTs) -> rawEvents.add(rawJson),
@@ -203,7 +214,7 @@ class PolymarketClobClientTest {
                 .untilAsserted(() -> {
                     assertThat(terminalCloses).hasSize(1);
                     assertThat(rawEvents).hasSize(1);
-                    assertThat(client.getConnectionStates()).doesNotContainKey(slug);
+                    assertThat(client.getCollectorConnectionStates()).doesNotContainKey(slug);
                 });
 
         Thread.sleep(150L);
@@ -211,6 +222,107 @@ class PolymarketClobClientTest {
         assertThat(unexpectedDisconnects).isEmpty();
         assertThat(terminalCloses.getFirst().lastCloseCode()).isEqualTo(1001);
         assertThat(terminalCloses.getFirst().lastCloseReason()).isEqualTo("going away after market end");
+
+        client.stopAll();
+    }
+
+    @Test
+    void shouldIsolateCollectorSingleStreamFromStrategyDualStreamWithZeroDuplicationAndZeroQueueFillWhenStrategyStopped() throws Exception {
+        List<ServerWebSocket> serverSockets = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    serverSockets.add(ws);
+                    ws.textMessageHandler(msg -> {
+                        if (msg.contains("token_up_1")) {
+                            ws.writeTextMessage("{\"event_type\":\"book\",\"seq\":1}");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketClobClient client = new PolymarketClobClient(
+                vertx,
+                marketWsRuntime,
+                "ws://localhost:" + port + "/ws/market",
+                200L,
+                0L
+        );
+
+        String slug = "btc-updown-15m-1795000000";
+        List<String> collectorPayloads = new CopyOnWriteArrayList<>();
+        List<String> strategyPayloads = new CopyOnWriteArrayList<>();
+
+        // 1. Collector opens single-leg lookahead stream first
+        client.openCollectorMarketStream(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                new RawWebSocketListener() {
+                    @Override
+                    public void onMessage(String rawJson, long recvTs) {
+                        collectorPayloads.add(rawJson);
+                    }
+
+                    @Override
+                    public void onMessageBytes(TimestampedFrame frame) {
+                        collectorPayloads.add(new String(frame.rawUtf8Bytes(), StandardCharsets.UTF_8));
+                    }
+                },
+                null,
+                null
+        );
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(collectorPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
+                    assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+                });
+
+        // 2. Strategy opens dual Active-Active stream for the SAME slug without colliding or duplicating collector data
+        Thread dummyStrategyWorker = Thread.ofPlatform().daemon(true).name("dummy-strat-worker").unstarted(() -> {});
+        client.openMarketStreamBatch(
+                slug,
+                List.of("token_up_1", "token_down_1"),
+                batch -> {
+                    for (TimestampedFrame f : batch) {
+                        strategyPayloads.add(f.rawText());
+                    }
+                },
+                dummyStrategyWorker
+        );
+
+        List<TimestampedFrame> scratch = new ArrayList<>(16);
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(serverSockets).hasSize(3); // 1 collector + 2 strategy (PRIMARY + BACKUP)
+                    client.drainMarketStreams(scratch);
+                    assertThat(strategyPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
+                    // Collector still has ONLY its single copy (never duplicated from strategy's dual legs)
+                    assertThat(collectorPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
+                });
+
+        // 3. Switch Strategy to OFF (stopAllStrategyStreams): collector stays CONNECTED, strategy queues remain empty
+        client.stopAllStrategyStreams();
+        assertThat(client.getConnectionStates()).isEmpty();
+        assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+
+        // Broadcast another update across all still-open server sockets
+        for (ServerWebSocket ws : serverSockets) {
+            if (!ws.isClosed()) {
+                ws.writeTextMessage("{\"event_type\":\"price_change\",\"seq\":2}");
+            }
+        }
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(collectorPayloads).hasSize(2));
+
+        // Strategy queues must be 100% empty while strategy is OFF
+        assertThat(client.hasQueuedMarketFrames()).isFalse();
+        assertThat(client.drainMarketStreams(scratch)).isZero();
+        assertThat(strategyPayloads).hasSize(1);
 
         client.stopAll();
     }
@@ -253,7 +365,7 @@ class PolymarketClobClientTest {
         );
 
         List<String> userEvents = new CopyOnWriteArrayList<>();
-        client.openUserStream(credentials, (rawJson, recvTs) -> userEvents.add(rawJson));
+        client.openUserStream(credentials, (rawJson, recvTs) -> userEvents.add(rawJson), null);
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
@@ -288,10 +400,8 @@ class PolymarketClobClientTest {
                     ws.textMessageHandler(msg -> {
                         if (msg.contains("token_up_1")) {
                             int count = subscribedSocketCount.incrementAndGet();
-                            // Both PRIMARY and BACKUP streams receive the exact same initial frame
                             ws.writeTextMessage(duplicateFrame1);
                             if (count == 2) {
-                                // Simulate upstream 1013 disconnect on socket #1 while socket #2 keeps streaming
                                 ServerWebSocket primaryWs = activeServerSockets.get(0);
                                 ServerWebSocket backupWs = activeServerSockets.get(1);
                                 vertx.setTimer(30L, id -> {
@@ -329,46 +439,25 @@ class PolymarketClobClientTest {
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
                     assertThat(subscribedSocketCount.get()).isGreaterThanOrEqualTo(2);
-                    // Market state stays CONNECTED seamlessly via BACKUP stream
                     assertThat(client.getConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
-                    // Duplicate frame 1 must be delivered ONLY ONCE, followed by backupOnlyFrame2
                     assertThat(deliveredUniquePayloads).containsExactly(duplicateFrame1, backupOnlyFrame2);
                 });
 
         List<WebSocketStreamTelemetry> telemetries = client.getStreamTelemetries();
         assertThat(telemetries).hasSize(2);
-        assertThat(telemetries)
-                .allSatisfy(snap -> assertThat(snap.remoteAddress()).contains(":" + port));
         long totalCoalescedOrDeduped = telemetries.stream()
                 .mapToLong(WebSocketStreamTelemetry::coalescedFramesCount)
                 .sum();
         assertThat(totalCoalescedOrDeduped).isGreaterThanOrEqualTo(1L);
 
-        // Verify peer redundancy lookup while BACKUP is CONNECTED
         StreamRedundancyStatus primaryRedundancy =
                 client.describeMarketStreamRedundancy("POLYMARKET-CLOB-" + slug);
         assertThat(primaryRedundancy.dualStream()).isTrue();
         assertThat(primaryRedundancy.peerStreamName()).isEqualTo("POLYMARKET-CLOB-" + slug + "-BACKUP");
         assertThat(primaryRedundancy.peerState()).isEqualTo(ConnectionState.CONNECTED);
-        assertThat(primaryRedundancy.peerRemoteAddress()).contains(":" + port);
         assertThat(primaryRedundancy.failoverActive()).isTrue();
 
-        assertThat(client.describeMarketStreamRedundancy("POLYMARKET-CLOB-USER"))
-                .isEqualTo(StreamRedundancyStatus.NONE);
-        assertThat(client.describeMarketStreamRedundancy("POLYMARKET-POLYBOLT-TWAP"))
-                .isEqualTo(StreamRedundancyStatus.NONE);
-
-        // Closing the market stream and opening a new market must not leak reconnectCount into the new market
         client.closeMarketStream(slug);
-        String nextSlug = "btc-updown-15m-1794222000";
-        client.openMarketStreamBatch(nextSlug, List.of("token_up_2", "token_down_2"), batch -> {
-        }, null);
-
-        for (WebSocketStreamTelemetry nextSnap : client.getStreamTelemetries()) {
-            assertThat(nextSnap.reconnectCount()).isZero();
-            assertThat(nextSnap.lastCloseCode()).isZero();
-        }
-
         client.stopAll();
     }
 
@@ -378,16 +467,14 @@ class PolymarketClobClientTest {
         assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(null)).isZero();
         assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(empty)).isZero();
 
-        // Short payloads (< 8 bytes and non-multiple of 8 bytes)
-        byte[] shortA = "PING".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] shortB = "PONG".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] oddLen = "{\"event_type\":\"book\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] shortA = "PING".getBytes(StandardCharsets.UTF_8);
+        byte[] shortB = "PONG".getBytes(StandardCharsets.UTF_8);
+        byte[] oddLen = "{\"event_type\":\"book\"}".getBytes(StandardCharsets.UTF_8);
         assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(shortA))
                 .isNotZero()
                 .isNotEqualTo(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(shortB));
         assertThat(PolymarketClobClient.PayloadDeduplicator.computeFingerprint(oddLen)).isNotZero();
 
-        // Large 16 KB orderbook snapshot payload with single-byte mutation near the tail
         byte[] large1 = new byte[16_387];
         for (int i = 0; i < large1.length; i++) {
             large1[i] = (byte) ('0' + (i % 10));

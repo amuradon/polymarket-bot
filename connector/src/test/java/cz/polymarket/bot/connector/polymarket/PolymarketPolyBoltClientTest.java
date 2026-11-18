@@ -2,25 +2,30 @@ package cz.polymarket.bot.connector.polymarket;
 
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
+import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.ServerWebSocket;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for {@link PolymarketPolyBoltClient} verifying the mandatory PolyBolt v2 authentication handshake
- * ({@code op: "auth"} -> {@code op: "authed"} -> {@code op: "subscribe"}) for both {@code price.crypto.twap} (60s)
- * and {@code price.crypto} streams and unparsed raw message delivery.
+ * ({@code op: "auth"} -&gt; {@code op: "authed"} -&gt; {@code op: "subscribe"}), concurrent collector + strategy
+ * delivery, and zero strategy queue accumulation when the strategy consumer is detached ({@code OFF} mode).
  */
 class PolymarketPolyBoltClientTest {
 
@@ -48,14 +53,14 @@ class PolymarketPolyBoltClientTest {
     }
 
     @Test
-    void shouldAuthenticateAndSubscribeBothTwapAndCryptoPriceStreamsIndependently() throws Exception {
-        List<String> clientMessages = new CopyOnWriteArrayList<>();
+    void shouldDeliverToCollectorAndAttachableStrategyQueueAndKeepStrategyQueueEmptyWhenDetached() throws Exception {
+        List<ServerWebSocket> twapSockets = new CopyOnWriteArrayList<>();
+        List<ServerWebSocket> cryptoSockets = new CopyOnWriteArrayList<>();
 
         server = vertx.createHttpServer()
                 .webSocketHandler(ws -> {
                     AtomicBoolean authenticated = new AtomicBoolean(false);
                     ws.textMessageHandler(msg -> {
-                        clientMessages.add(msg);
                         if (msg.contains("\"op\":\"auth\"")
                                 && msg.contains("\"apiKey\":\"test-api-key\"")
                                 && msg.contains("\"secret\":\"test-secret\"")
@@ -68,14 +73,16 @@ class PolymarketPolyBoltClientTest {
                             if (!authenticated.get()) {
                                 ws.writeTextMessage("{\"op\":\"error\",\"code\":\"auth_required\",\"rid\":\"s1\"}");
                             } else if (msg.contains("\"channel\":\"price.crypto.twap\"")) {
+                                twapSockets.add(ws);
                                 ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto.twap\",\"rid\":\"s1\"}");
                                 ws.writeTextMessage("""
-                                        {"v":1,"channel":"price.crypto.twap","seq":1,"ts":1789041601000,"payload":{"symbol":"btcusd","value":78455.00,"full_accuracy_value":"78455.00000000","timestamp":1789041601000,"source":"chainlink","window_seconds":60}}
+                                        {"v":1,"channel":"price.crypto.twap","seq":1,"ts":1789041601000,"payload":{"symbol":"btcusd","value":78455.00,"timestamp":1789041601000,"source":"chainlink","window_seconds":60}}
                                         """.strip());
                             } else if (msg.contains("\"channel\":\"price.crypto\"")) {
+                                cryptoSockets.add(ws);
                                 ws.writeTextMessage("{\"op\":\"subscribed\",\"channel\":\"price.crypto\",\"rid\":\"s1\"}");
                                 ws.writeTextMessage("""
-                                        {"v":1,"channel":"price.crypto","seq":1,"ts":1789041601000,"payload":{"symbol":"btcusd","value":78460.00,"full_accuracy_value":"78460.00000000","timestamp":1789041601000,"source":"chainlink"}}
+                                        {"v":1,"channel":"price.crypto","seq":1,"ts":1789041601000,"payload":{"symbol":"btcusd","value":78460.00,"timestamp":1789041601000,"source":"chainlink"}}
                                         """.strip());
                             }
                         }
@@ -86,26 +93,62 @@ class PolymarketPolyBoltClientTest {
         PolymarketPolyBoltClient client = new PolymarketPolyBoltClient(
                 marketWsRuntime,
                 "ws://localhost:" + port + "/ws",
-                 java.util.Optional.of("test-api-key"),
-                java.util.Optional.of("test-secret"),
-                java.util.Optional.of("test-passphrase"),
+                Optional.of("test-api-key"),
+                Optional.of("test-secret"),
+                Optional.of("test-passphrase"),
                 200L,
                 5000L
         );
 
-        List<String> twapPayloads = new CopyOnWriteArrayList<>();
-        List<String> cryptoPayloads = new CopyOnWriteArrayList<>();
-        client.startTwapStream("BTCUSDT", (rawJson, recvTs) -> twapPayloads.add(rawJson));
-        client.startCryptoPriceStream("BTCUSDT", (rawJson, recvTs) -> cryptoPayloads.add(rawJson));
+        List<String> collectorTwap = new CopyOnWriteArrayList<>();
+        List<String> collectorCrypto = new CopyOnWriteArrayList<>();
+        List<String> strategyFrames = new CopyOnWriteArrayList<>();
 
+        Thread dummyStrategyWorker = Thread.ofPlatform().daemon(true).name("dummy-polybolt-strat").unstarted(() -> {});
+        client.attachStrategyConsumer((rawJson, recvTs) -> strategyFrames.add(rawJson), dummyStrategyWorker);
+        client.startCollectorStreams(
+                "BTCUSDT",
+                (rawJson, recvTs) -> collectorCrypto.add(rawJson),
+                (rawJson, recvTs) -> collectorTwap.add(rawJson)
+        );
+
+        List<TimestampedFrame> scratch = new ArrayList<>(16);
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
                     assertThat(client.getTwapState()).isEqualTo(ConnectionState.CONNECTED);
                     assertThat(client.getCryptoPriceState()).isEqualTo(ConnectionState.CONNECTED);
-                    assertThat(twapPayloads).anyMatch(p -> p.contains("\"channel\":\"price.crypto.twap\"") && p.contains("78455.00"));
-                    assertThat(cryptoPayloads).anyMatch(p -> p.contains("\"channel\":\"price.crypto\"") && p.contains("78460.00"));
+                    assertThat(collectorTwap).hasSize(1);
+                    assertThat(collectorCrypto).hasSize(1);
+                    client.drainStreams(scratch);
+                    assertThat(strategyFrames).hasSize(2);
                 });
+
+        // Switch Strategy to OFF (detachStrategyConsumer) while Collector stays active
+        client.detachStrategyConsumer();
+        assertThat(client.hasQueuedFrames()).isFalse();
+        assertThat(client.getStrategyQueueDepth()).isZero();
+
+        // Push more frames on both PolyBolt sockets
+        for (int seq = 2; seq <= 5; seq++) {
+            twapSockets.getFirst().writeTextMessage(
+                    "{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":" + seq + ",\"payload\":{\"symbol\":\"btcusd\",\"value\":78500.00}}");
+            cryptoSockets.getFirst().writeTextMessage(
+                    "{\"v\":1,\"channel\":\"price.crypto\",\"seq\":" + seq + ",\"payload\":{\"symbol\":\"btcusd\",\"value\":78510.00}}");
+        }
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(collectorTwap).hasSize(5);
+                    assertThat(collectorCrypto).hasSize(5);
+                });
+
+        // Verify strategy queue NEVER accumulated any frames while detached
+        assertThat(client.hasQueuedFrames()).isFalse();
+        assertThat(client.getStrategyQueueDepth()).isZero();
+        assertThat(client.drainStreams(scratch)).isZero();
+        assertThat(strategyFrames).hasSize(2);
 
         client.stop();
     }
@@ -115,23 +158,15 @@ class PolymarketPolyBoltClientTest {
         PolymarketPolyBoltClient clientWithoutCreds = new PolymarketPolyBoltClient(
                 marketWsRuntime,
                 "ws://localhost:9999/ws",
-                java.util.Optional.empty(),
-                java.util.Optional.empty(),
-                java.util.Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
                 200L,
                 5000L
         );
 
         assertThat(clientWithoutCreds.hasCredentials()).isFalse();
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> clientWithoutCreds.startTwapStream("BTCUSDT", (raw, ts) -> {})
-                )
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Missing required Polymarket CLOB API credentials");
-
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> clientWithoutCreds.startCryptoPriceStream("BTCUSDT", (raw, ts) -> {})
-                )
+        assertThatThrownBy(() -> clientWithoutCreds.startCollectorStreams("BTCUSDT", (r, t) -> {}, (r, t) -> {}))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Missing required Polymarket CLOB API credentials");
     }

@@ -24,25 +24,35 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Manages resilient WebSocket connections for Binance Spot and USD-M Futures data streams
- * ({@code SPOT_AGG_TRADES}, {@code SPOT_BOOK_TICKER}, {@code FUTURES_AGG_TRADES}, {@code FUTURES_BOOK_TICKER})
- * on the consolidated {@link MarketWebSocketRuntime} ({@code market-ws-io-reader} on {@code CPU #1}).
- * <p>
- * For latency-sensitive live/paper trading ({@link #startSpotAggTradesBatch}), opens two independent TCP/TLS
- * connections pinned to distinct Tokyo ({@code ap-northeast-1}) edge IPv4 addresses ({@code slot 0} and {@code slot 1})
- * paired with a zero-allocation monotonic {@code aggTradeId} ({@code "a"}) fast-forward filter: whichever path delivers
- * a trade first immediately advances {@code maxSeenAggTradeId}, while delayed or retransmitted frames arriving out-of-order
- * on the slower path ({@code aggTradeId <= maxSeenAggTradeId}) are dropped in nanoseconds without waiting for TCP retransmission.
+ * Manages resilient WebSocket connections for Binance Spot and USD-M Futures data streams on
+ * {@link MarketWebSocketRuntime} ({@code market-ws-io-reader} on {@code CPU #1}), strictly isolating:
+ * <ul>
+ *   <li><b>Strategy {@code SPOT_AGG_TRADES} dual streams</b>: Two independent TCP/TLS connections pinned to
+ *       distinct Tokyo edge IPv4 addresses ({@code slot 0} and {@code slot 1}) paired with a zero-allocation
+ *       monotonic {@code aggTradeId} ({@code "a"}) fast-forward filter, drained lock-free on {@code CPU #2}.</li>
+ *   <li><b>Collector {@code bookTicker} streams</b> ({@code SPOT_BOOK_TICKER}, {@code FUTURES_BOOK_TICKER}):
+ *       Optional single-leg archival streams drained on {@code CPU #0} (inactive by default), completely
+ *       isolated from Strategy's dual {@code SPOT_AGG_TRADES} lifecycle so zero duplicate frames can ever
+ *       enter the Data Collector.</li>
+ * </ul>
  */
 @ApplicationScoped
 public class BinanceStreamConnector {
+
+    private static final Set<BinanceStreamType> SUPPORTED_BOOK_TICKER_TYPES = EnumSet.of(
+            BinanceStreamType.SPOT_BOOK_TICKER,
+            BinanceStreamType.FUTURES_BOOK_TICKER
+    );
 
     private final MarketWebSocketRuntime marketWsRuntime;
     private final String spotWsBaseUrl;
     private final String futuresWsBaseUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
-    private final Map<BinanceStreamType, ReconnectingWebSocketStream> streams = new EnumMap<>(BinanceStreamType.class);
+
+    private final Map<BinanceStreamType, ReconnectingWebSocketStream> bookTickerStreams =
+            new EnumMap<>(BinanceStreamType.class);
+    private volatile ReconnectingWebSocketStream primarySpotAggTradesStream;
     private volatile ReconnectingWebSocketStream backupSpotAggTradesStream;
     private volatile WebSocketDisconnectListener disconnectListener;
 
@@ -109,8 +119,12 @@ public class BinanceStreamConnector {
      */
     public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
         this.disconnectListener = disconnectListener;
-        for (ReconnectingWebSocketStream stream : streams.values()) {
+        for (ReconnectingWebSocketStream stream : bookTickerStreams.values()) {
             stream.setDisconnectListener(disconnectListener);
+        }
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        if (primary != null) {
+            primary.setDisconnectListener(disconnectListener);
         }
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         if (backup != null) {
@@ -119,37 +133,31 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Starts all 4 Binance WebSocket streams (single-leg raw archival mode for Data Collector) and routes messages to {@code listener}.
+     * Starts single-leg Data Collector {@code bookTicker} WebSocket streams ({@code SPOT_BOOK_TICKER} and/or
+     * {@code FUTURES_BOOK_TICKER}) on {@code CPU #0} without disturbing Strategy's {@code SPOT_AGG_TRADES} streams.
      *
-     * @param symbol   trading pair symbol (e.g. BTCUSDT)
-     * @param listener callback receiving stream type, payload, and local receipt timestamp
+     * @param symbol          trading pair symbol (e.g. {@code BTCUSDT})
+     * @param bookTickerTypes subset of {@code SPOT_BOOK_TICKER} / {@code FUTURES_BOOK_TICKER}
+     * @param listener        callback receiving stream type, payload, and local receipt timestamp
      */
-    public synchronized void start(String symbol, BinanceStreamListener listener) {
-        start(symbol, EnumSet.allOf(BinanceStreamType.class), listener, null);
-    }
-
-    /**
-     * Starts the specified subset of Binance WebSocket streams for the given symbol, optionally bound to an external worker thread.
-     *
-     * @param symbol         trading pair symbol (e.g. BTCUSDT)
-     * @param streamTypes    set of {@link BinanceStreamType} streams to connect
-     * @param listener       callback receiving stream type, payload, and local receipt timestamp
-     * @param externalWorker optional dedicated platform worker thread responsible for draining these streams
-     */
-    public synchronized void start(
+    public synchronized void startBookTickerStreams(
             String symbol,
-            Set<BinanceStreamType> streamTypes,
-            BinanceStreamListener listener,
-            Thread externalWorker) {
-        stop();
-        if (streamTypes == null || streamTypes.isEmpty()) {
+            Set<BinanceStreamType> bookTickerTypes,
+            BinanceStreamListener listener) {
+        stopBookTickerStreams();
+        if (bookTickerTypes == null || bookTickerTypes.isEmpty()) {
             return;
         }
+        for (BinanceStreamType type : bookTickerTypes) {
+            if (!SUPPORTED_BOOK_TICKER_TYPES.contains(type)) {
+                throw new IllegalArgumentException(
+                        "startBookTickerStreams only supports SPOT_BOOK_TICKER and FUTURES_BOOK_TICKER, got: " + type);
+            }
+        }
         String normalizedSymbol = normalizeSymbol(symbol);
-
-        for (BinanceStreamType type : streamTypes) {
+        for (BinanceStreamType type : bookTickerTypes) {
             String wsUrl = type.buildWsUrl(spotWsBaseUrl, futuresWsBaseUrl, normalizedSymbol);
-            String streamName = "BINANCE-" + type.name() + "-" + normalizedSymbol;
+            String streamName = "COLLECTOR-BINANCE-" + type.name() + "-" + normalizedSymbol;
             RawWebSocketListener rawListener = new RawWebSocketListener() {
                 @Override
                 public void onMessage(String rawJson, long recvTs) {
@@ -175,21 +183,41 @@ public class BinanceStreamConnector {
                     pingIntervalMs
             );
             stream.setDisconnectListener(this.disconnectListener);
-            if (externalWorker != null) {
-                stream.bindExternalWorker(externalWorker);
-            }
-            streams.put(type, stream);
+            bookTickerStreams.put(type, stream);
             stream.start();
         }
     }
 
     /**
-     * Starts a dual Active-Active pair of Binance Spot {@code aggTrades} ({@link BinanceStreamType#SPOT_AGG_TRADES})
-     * WebSocket connections pinned to distinct Tokyo edge IPv4 addresses ({@code slot 0} and {@code slot 1})
-     * with monotonic {@code aggTradeId} ({@code "a"}) fast-forward filtering to eliminate TCP head-of-line
-     * retransmission delays and drop delayed/reordered frames on arrival.
+     * Stops only the Data Collector {@code bookTicker} streams without touching Strategy's {@code SPOT_AGG_TRADES}.
+     */
+    public synchronized void stopBookTickerStreams() {
+        for (ReconnectingWebSocketStream stream : bookTickerStreams.values()) {
+            stream.stop();
+        }
+        bookTickerStreams.clear();
+    }
+
+    /**
+     * Returns an immutable snapshot of the connection states of enabled Data Collector {@code bookTicker} streams.
      *
-     * @param symbol         trading pair symbol (e.g. BTCUSDT)
+     * @return map of {@code bookTicker} stream type to {@link ConnectionState}
+     */
+    public synchronized Map<BinanceStreamType, ConnectionState> getBookTickerConnectionStates() {
+        Map<BinanceStreamType, ConnectionState> result = new EnumMap<>(BinanceStreamType.class);
+        for (Map.Entry<BinanceStreamType, ReconnectingWebSocketStream> entry : bookTickerStreams.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().getState());
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    /**
+     * Starts a dual Active-Active pair of Strategy Binance Spot {@code aggTrades}
+     * ({@link BinanceStreamType#SPOT_AGG_TRADES}) WebSocket connections pinned to distinct Tokyo edge IPv4
+     * addresses ({@code slot 0} and {@code slot 1}) with monotonic {@code aggTradeId} ({@code "a"}) fast-forward
+     * filtering, without touching Data Collector {@code bookTicker} streams.
+     *
+     * @param symbol         trading pair symbol (e.g. {@code BTCUSDT})
      * @param batchListener  listener invoked with strictly forward-progressing {@code aggTrade} frame batches
      * @param externalWorker optional dedicated platform worker thread (e.g. {@code market-strategy-worker})
      */
@@ -197,7 +225,7 @@ public class BinanceStreamConnector {
             String symbol,
             RawWebSocketBatchListener batchListener,
             Thread externalWorker) {
-        stop();
+        stopSpotAggTrades();
         String normalizedSymbol = normalizeSymbol(symbol);
         String wsUrl = BinanceStreamType.SPOT_AGG_TRADES.buildWsUrl(spotWsBaseUrl, futuresWsBaseUrl, normalizedSymbol);
         String primaryName = "BINANCE-" + BinanceStreamType.SPOT_AGG_TRADES.name() + "-" + normalizedSymbol;
@@ -247,12 +275,29 @@ public class BinanceStreamConnector {
             backup.bindExternalWorker(externalWorker);
         }
 
-        streams.put(BinanceStreamType.SPOT_AGG_TRADES, primary);
+        this.primarySpotAggTradesStream = primary;
         this.backupSpotAggTradesStream = backup;
         Log.infof("Opening dual multi-path Binance SPOT_AGG_TRADES WebSocket streams for %s (edgeSlots=0/1, monotonicFastForward=true)",
                 normalizedSymbol);
         primary.start();
         backup.start();
+    }
+
+    /**
+     * Stops and clears Strategy's dual {@code SPOT_AGG_TRADES} streams (used when switching Strategy to {@code OFF})
+     * without disturbing Data Collector {@code bookTicker} streams.
+     */
+    public synchronized void stopSpotAggTrades() {
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+        this.primarySpotAggTradesStream = null;
+        this.backupSpotAggTradesStream = null;
+        if (primary != null) {
+            primary.stop();
+        }
+        if (backup != null) {
+            backup.stop();
+        }
     }
 
     private static void dispatchFastForwardedBatch(
@@ -273,16 +318,17 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Drains all currently queued frames across active Binance streams (including dual {@code SPOT_AGG_TRADES} backup)
-     * into {@code scratchBatch}.
+     * Drains all currently queued Strategy {@code SPOT_AGG_TRADES} frames across both primary and backup legs
+     * into {@code scratchBatch} completely lock-free.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained
      */
-    public synchronized int drainStreams(List<TimestampedFrame> scratchBatch) {
+    public int drainStreams(List<TimestampedFrame> scratchBatch) {
         int total = 0;
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            total += stream.drainAvailableBatch(scratchBatch);
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        if (primary != null) {
+            total += primary.drainAvailableBatch(scratchBatch);
         }
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         if (backup != null) {
@@ -292,86 +338,77 @@ public class BinanceStreamConnector {
     }
 
     /**
-     * Returns whether any active Binance stream currently has frames waiting in its inbound queue.
+     * Returns whether either Strategy {@code SPOT_AGG_TRADES} leg currently has frames waiting in its inbound queue.
      *
-     * @return {@code true} if any Binance stream queue is non-empty
+     * @return {@code true} if either {@code SPOT_AGG_TRADES} queue is non-empty
      */
-    public synchronized boolean hasQueuedFrames() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            if (stream.hasQueuedFrames()) {
-                return true;
-            }
+    public boolean hasQueuedFrames() {
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        if (primary != null && primary.hasQueuedFrames()) {
+            return true;
         }
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         return backup != null && backup.hasQueuedFrames();
     }
 
     /**
-     * Marks all active Binance streams as parked prior to {@code LockSupport.parkNanos} and returns {@code true}
-     * if frames arrived concurrently.
+     * Marks Strategy {@code SPOT_AGG_TRADES} legs as parked prior to {@code LockSupport.parkNanos} and returns
+     * {@code true} if frames arrived concurrently.
      *
      * @return {@code true} if frames arrived concurrently and parking must be aborted
      */
-    public synchronized boolean prepareStreamsToPark() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            if (stream.prepareToParkAndCheckQueuedFrames()) {
-                return true;
-            }
+    public boolean prepareStreamsToPark() {
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        if (primary != null && primary.prepareToParkAndCheckQueuedFrames()) {
+            return true;
         }
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         return backup != null && backup.prepareToParkAndCheckQueuedFrames();
     }
 
     /**
-     * Stops and closes all active Binance WebSocket stream connections.
+     * Stops and closes all active Strategy and Data Collector Binance WebSocket stream connections.
      */
     public synchronized void stop() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            stream.stop();
-        }
-        streams.clear();
-        ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
-        this.backupSpotAggTradesStream = null;
-        if (backup != null) {
-            backup.stop();
-        }
+        stopSpotAggTrades();
+        stopBookTickerStreams();
     }
 
     /**
-     * Returns an immutable snapshot of the connection state for each Binance stream type.
-     * For dual multi-path {@code SPOT_AGG_TRADES}, reports {@link ConnectionState#CONNECTED} when either leg is connected.
+     * Returns the effective connection state of Strategy's dual {@code SPOT_AGG_TRADES} stream, reporting
+     * {@link ConnectionState#CONNECTED} when either leg is connected.
      *
-     * @return map of stream type to its current {@link ConnectionState}
+     * @return effective {@link ConnectionState} of {@code SPOT_AGG_TRADES}
      */
-    public synchronized Map<BinanceStreamType, ConnectionState> getConnectionStates() {
-        Map<BinanceStreamType, ConnectionState> result = new EnumMap<>(BinanceStreamType.class);
-        for (BinanceStreamType type : BinanceStreamType.values()) {
-            ReconnectingWebSocketStream primary = streams.get(type);
-            ConnectionState effective = primary != null ? primary.getState() : ConnectionState.DISCONNECTED;
-            if (type == BinanceStreamType.SPOT_AGG_TRADES && effective != ConnectionState.CONNECTED) {
-                ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
-                if (backup != null && (backup.getState() == ConnectionState.CONNECTED || effective == ConnectionState.DISCONNECTED)) {
-                    effective = backup.getState();
-                }
+    public ConnectionState getSpotAggTradesState() {
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        ConnectionState effective = primary != null ? primary.getState() : ConnectionState.DISCONNECTED;
+        if (effective != ConnectionState.CONNECTED) {
+            ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
+            if (backup != null && (backup.getState() == ConnectionState.CONNECTED || effective == ConnectionState.DISCONNECTED)) {
+                effective = backup.getState();
             }
-            result.put(type, effective);
         }
-        return Collections.unmodifiableMap(result);
+        return effective;
     }
 
     /**
-     * Returns telemetry snapshots for all active Binance WebSocket streams (including backup {@code SPOT_AGG_TRADES} leg).
+     * Returns telemetry snapshots for all active Strategy {@code SPOT_AGG_TRADES} and Collector {@code bookTicker} streams.
      *
      * @return list of {@link WebSocketStreamTelemetry} snapshots
      */
     public synchronized List<WebSocketStreamTelemetry> getStreamTelemetries() {
-        List<WebSocketStreamTelemetry> result = new ArrayList<>(streams.size() + 1);
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            result.add(stream.getTelemetrySnapshot());
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(bookTickerStreams.size() + 2);
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
+        if (primary != null) {
+            result.add(primary.getTelemetrySnapshot());
         }
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         if (backup != null) {
             result.add(backup.getTelemetrySnapshot());
+        }
+        for (ReconnectingWebSocketStream stream : bookTickerStreams.values()) {
+            result.add(stream.getTelemetrySnapshot());
         }
         return result;
     }
@@ -383,8 +420,8 @@ public class BinanceStreamConnector {
      * @param streamName identifier of the stream that disconnected
      * @return {@link StreamRedundancyStatus} describing whether the peer leg is actively covering failover
      */
-    public synchronized StreamRedundancyStatus describeStreamRedundancy(String streamName) {
-        ReconnectingWebSocketStream primary = streams.get(BinanceStreamType.SPOT_AGG_TRADES);
+    public StreamRedundancyStatus describeStreamRedundancy(String streamName) {
+        ReconnectingWebSocketStream primary = this.primarySpotAggTradesStream;
         ReconnectingWebSocketStream backup = this.backupSpotAggTradesStream;
         if (streamName == null || primary == null || backup == null) {
             return StreamRedundancyStatus.NONE;
@@ -414,24 +451,6 @@ public class BinanceStreamConnector {
      */
     public Thread getIoReaderThread() {
         return marketWsRuntime.getIoReaderThread();
-    }
-
-    /**
-     * Checks whether all active Binance stream types are currently in the {@link ConnectionState#CONNECTED} state.
-     *
-     * @return true if at least one stream is registered and all active stream types are connected
-     */
-    public synchronized boolean isAllConnected() {
-        if (streams.isEmpty()) {
-            return false;
-        }
-        Map<BinanceStreamType, ConnectionState> currentStates = getConnectionStates();
-        for (BinanceStreamType type : streams.keySet()) {
-            if (currentStates.get(type) != ConnectionState.CONNECTED) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**

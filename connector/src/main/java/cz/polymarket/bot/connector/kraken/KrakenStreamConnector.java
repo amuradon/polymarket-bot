@@ -55,6 +55,7 @@ public class KrakenStreamConnector {
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
     private final Map<String, ReconnectingWebSocketStream> streams = new LinkedHashMap<>();
+    private volatile ReconnectingWebSocketStream[] activeStreamSnapshot = new ReconnectingWebSocketStream[0];
     private volatile WebSocketDisconnectListener disconnectListener;
 
     /**
@@ -212,18 +213,20 @@ public class KrakenStreamConnector {
             streams.put(normSym, stream);
             stream.start();
         }
+        this.activeStreamSnapshot = streams.values().toArray(ReconnectingWebSocketStream[]::new);
     }
 
     /**
-     * Drains all currently queued frames across all active Kraken streams into {@code scratchBatch}.
+     * Drains all currently queued frames across all active Kraken streams into {@code scratchBatch} lock-free.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained across all active Kraken streams
      */
-    public synchronized int drainStreams(List<TimestampedFrame> scratchBatch) {
+    public int drainStreams(List<TimestampedFrame> scratchBatch) {
         int total = 0;
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            total += stream.drainAvailableBatch(scratchBatch);
+        ReconnectingWebSocketStream[] current = this.activeStreamSnapshot;
+        for (int i = 0, n = current.length; i < n; i++) {
+            total += current[i].drainAvailableBatch(scratchBatch);
         }
         return total;
     }
@@ -233,9 +236,10 @@ public class KrakenStreamConnector {
      *
      * @return {@code true} if any Kraken stream queue is non-empty
      */
-    public synchronized boolean hasQueuedFrames() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            if (stream.hasQueuedFrames()) {
+    public boolean hasQueuedFrames() {
+        ReconnectingWebSocketStream[] current = this.activeStreamSnapshot;
+        for (int i = 0, n = current.length; i < n; i++) {
+            if (current[i].hasQueuedFrames()) {
                 return true;
             }
         }
@@ -248,9 +252,10 @@ public class KrakenStreamConnector {
      *
      * @return {@code true} if frames arrived concurrently and parking must be aborted
      */
-    public synchronized boolean prepareStreamsToPark() {
-        for (ReconnectingWebSocketStream stream : streams.values()) {
-            if (stream.prepareToParkAndCheckQueuedFrames()) {
+    public boolean prepareStreamsToPark() {
+        ReconnectingWebSocketStream[] current = this.activeStreamSnapshot;
+        for (int i = 0, n = current.length; i < n; i++) {
+            if (current[i].prepareToParkAndCheckQueuedFrames()) {
                 return true;
             }
         }
@@ -261,6 +266,7 @@ public class KrakenStreamConnector {
      * Stops and closes all active Kraken WebSocket stream connections.
      */
     public synchronized void stop() {
+        this.activeStreamSnapshot = new ReconnectingWebSocketStream[0];
         for (ReconnectingWebSocketStream stream : streams.values()) {
             stream.stop();
         }

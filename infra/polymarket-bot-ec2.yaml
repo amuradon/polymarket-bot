@@ -1,0 +1,482 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Polymarket Bot Compute Infrastructure in eu-west-1 (Dublin). Provisions a 24/7 c8gn.xlarge EC2 instance
+  (4 vCPU Graviton4 ARM64, 30 Gbps Enhanced Networking) running the unified Polymarket Bot (Strategy Engine
+  in LIVE/PAPER/OFF mode + continuous Zstandard Data Collector) directly on Amazon Linux 2023 via systemd
+  (Bare-OS, zero Docker/NAT overhead), with Temurin Java 25, persistent 100 GiB gp3 EBS XFS auto-mounting,
+  runtime-state.json persistence across restarts, automatic rollback on failed health check, HFT kernel
+  TCP/busy-poll tuning, ENA IRQ isolation on CPU 0, and IMDSv2 token enforcement.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  BaseStackName:
+    Type: String
+    Default: polymarket-bot-base
+    Description: Name of the Polymarket Bot Base Infrastructure CloudFormation stack exporting network, IAM, S3 artifact bucket, EBS volume, and log group resources.
+
+  InstanceType:
+    Type: String
+    Default: c8gn.xlarge
+    Description: EC2 instance type (arm64 / Graviton4 4 vCPU + 30 Gbps ENA) for running the 4-Core Polymarket Bot.
+
+  StrategyMode:
+    Type: String
+    Default: LIVE
+    AllowedValues: [LIVE, PAPER, OFF]
+    Description: Initial StrategyMode (LIVE, PAPER, or OFF; subsequent runtime mode switches are persisted in runtime-state.json).
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Latest Amazon Linux 2023 arm64 AMI ID from SSM Parameter Store.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0b1537e6f83a86b05
+    Description: Public subnet ID in eu-west-1a for the Polymarket Bot EC2 instance.
+
+  PolymarketSecretId:
+    Type: String
+    Default: polymarket-sniper/clob-credentials
+    Description: AWS Secrets Manager secret ID storing Polymarket CLOB L2, PolyBolt, and EIP-712 signing credentials.
+
+Resources:
+  PolymarketBotInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 24/7 c8gn.xlarge EC2 host in eu-west-1 running the unified 4-Core Quarkus Polymarket Bot (Strategy + Data Collector) via systemd on Temurin JDK 25 with persistent 100 GiB EBS volume at /mnt/ebs/polymarket-bot, HFT sysctl tuning, and CloudWatch Agent log shipping.
+        must: Enforce IMDSv2 (HttpTokens required, HttpPutResponseHopLimit 1), preserve existing XFS data on the attached EBS volume without reformatting, and automatically roll back failed deployments to .previous.
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${BaseStackName}-InstanceProfileName"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${BaseStackName}-SecurityGroupId"
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+              dnf update -y
+              dnf install -y jq awscli amazon-cloudwatch-agent tar gzip logrotate util-linux ethtool xfsprogs
+
+              # Install Eclipse Temurin 25 (ARM64 / aarch64) directly to /usr/lib/jvm/temurin-25
+              mkdir -p /usr/lib/jvm/temurin-25
+              curl -fsSL "https://api.adoptium.net/v3/binary/latest/25/ga/linux/aarch64/jre/hotspot/normal/eclipse" \
+                -o /tmp/temurin-25-jre-aarch64.tar.gz
+              tar -xzf /tmp/temurin-25-jre-aarch64.tar.gz -C /usr/lib/jvm/temurin-25 --strip-components=1
+              rm -f /tmp/temurin-25-jre-aarch64.tar.gz
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/local/bin/java
+              ln -sf /usr/lib/jvm/temurin-25/bin/java /usr/bin/java
+
+              # Create dedicated unprivileged system user and directories for Polymarket Bot
+              id -u polymarket >/dev/null 2>&1 || useradd --system --home-dir /opt/polymarket-bot --shell /sbin/nologin polymarket
+              usermod -aG polymarket ec2-user || true
+              mkdir -p /opt/polymarket-bot /etc/polymarket-bot /var/log/polymarket-bot
+              touch /var/log/polymarket-bot/bot.log
+              chown -R polymarket:polymarket /opt/polymarket-bot /var/log/polymarket-bot
+
+              # Configure SSH public key for ec2-user (used by scripts/download-collector-data.ps1 & .sh over SSM)
+              mkdir -p /home/ec2-user/.ssh
+              if ! grep -q "amuradon@gmail.com" /home/ec2-user/.ssh/authorized_keys 2>/dev/null; then
+                echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZCdXFERd9b2J0Y/AaI6cNEzlHOQIXHP6ffee948/aR amuradon@gmail.com' >> /home/ec2-user/.ssh/authorized_keys
+              fi
+              chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+              chmod 700 /home/ec2-user/.ssh
+              chmod 600 /home/ec2-user/.ssh/authorized_keys
+
+              # Create idempotent EBS volume attach & XFS mount helper at /mnt/ebs/polymarket-bot
+              cat << 'EOF' > /usr/local/bin/mount-polymarket-ebs.sh
+              #!/bin/bash
+              set -euo pipefail
+              REGION="${AWS::Region}"
+              VOLUME_ID="${EbsVolumeId}"
+              MOUNT_DIR="/mnt/ebs/polymarket-bot"
+
+              if mountpoint -q "$MOUNT_DIR"; then
+                mkdir -p "$MOUNT_DIR/collector" "$MOUNT_DIR/paper" "$MOUNT_DIR/state"
+                chown -R polymarket:polymarket "$MOUNT_DIR"
+                chmod -R 2775 "$MOUNT_DIR"
+                exit 0
+              fi
+
+              TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+              VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+              if [ "$VOL_STATE" = "in-use" ]; then
+                ATTACHED_ID=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].Attachments[0].InstanceId" --output text || true)
+                if [ -n "$ATTACHED_ID" ] && [ "$ATTACHED_ID" != "None" ] && [ "$ATTACHED_ID" != "$INSTANCE_ID" ]; then
+                  echo "Detaching EBS volume $VOLUME_ID from previous instance $ATTACHED_ID..."
+                  aws ec2 detach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$ATTACHED_ID" || true
+                  for i in $(seq 1 120); do
+                    VOL_STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query "Volumes[0].State" --output text || true)
+                    if [ "$VOL_STATE" = "available" ]; then
+                      break
+                    fi
+                    sleep 1
+                  done
+                fi
+              fi
+
+              if [ "$VOL_STATE" = "available" ]; then
+                aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/sdf
+              fi
+
+              DATA_DEV=""
+              for i in $(seq 1 60); do
+                for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+                  if [ -b "$candidate" ]; then
+                    ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
+                    if [ "$candidate" != "$ROOT_DEV" ]; then
+                      DATA_DEV="$candidate"
+                      break 2
+                    fi
+                  fi
+                done
+                sleep 0.5
+              done
+
+              if [ -z "$DATA_DEV" ]; then
+                echo "Error: Secondary EBS block device for volume $VOLUME_ID not found." >&2
+                exit 1
+              fi
+
+              mkdir -p "$MOUNT_DIR"
+              if ! blkid "$DATA_DEV" >/dev/null 2>&1; then
+                mkfs.xfs "$DATA_DEV"
+              fi
+              UUID=$(blkid -s UUID -o value "$DATA_DEV")
+              if ! grep -q "$UUID" /etc/fstab; then
+                echo "UUID=$UUID $MOUNT_DIR xfs defaults,nofail 0 2" >> /etc/fstab
+              fi
+              if ! mountpoint -q "$MOUNT_DIR"; then
+                mount "$MOUNT_DIR" || mount -a
+              fi
+
+              mkdir -p "$MOUNT_DIR/collector" "$MOUNT_DIR/paper" "$MOUNT_DIR/state"
+              chown -R polymarket:polymarket "$MOUNT_DIR"
+              chmod -R 2775 "$MOUNT_DIR"
+              EOF
+              chmod +x /usr/local/bin/mount-polymarket-ebs.sh
+              /usr/local/bin/mount-polymarket-ebs.sh || true
+
+              # Configure logrotate for /var/log/polymarket-bot/bot.log
+              cat << 'EOF' > /etc/logrotate.d/polymarket-bot
+              /var/log/polymarket-bot/bot.log {
+                  daily
+                  rotate 7
+                  size 100M
+                  compress
+                  delaycompress
+                  missingok
+                  notifempty
+                  copytruncate
+              }
+              EOF
+
+              # Configure Amazon CloudWatch Agent for systemd service and host logs
+              mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+              cat << 'EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+              {
+                "logs": {
+                  "logs_collected": {
+                    "files": {
+                      "collect_list": [
+                        {
+                          "file_path": "/var/log/polymarket-bot/bot.log",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "polymarket-bot"
+                        },
+                        {
+                          "file_path": "/var/log/cloud-init-output.log",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "{instance_id}/cloud-init-output"
+                        },
+                        {
+                          "file_path": "/var/log/messages",
+                          "log_group_name": "${LogGroupName}",
+                          "log_stream_name": "{instance_id}/messages"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+              EOF
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config -m ec2 \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+              # Enable BBR congestion control and tune Linux kernel TCP buffers, reordering tolerance, keepalives, and busy-polling
+              echo tcp_bbr > /etc/modules-load.d/polymarket-bbr.conf
+              modprobe tcp_bbr || true
+              cat << 'EOF' > /etc/sysctl.d/99-polymarket-network.conf
+              net.core.default_qdisc = fq
+              net.ipv4.tcp_congestion_control = bbr
+              net.core.rmem_default = 262144
+              net.core.rmem_max = 33554432
+              net.ipv4.tcp_rmem = 4096 262144 33554432
+              net.core.wmem_default = 262144
+              net.core.wmem_max = 16777216
+              net.ipv4.tcp_wmem = 4096 65536 16777216
+              net.ipv4.tcp_moderate_rcvbuf = 1
+              net.ipv4.tcp_slow_start_after_idle = 0
+              net.ipv4.tcp_reordering = 32
+              net.ipv4.tcp_max_reordering = 600
+              net.ipv4.tcp_early_retrans = 0
+              net.ipv4.tcp_autocorking = 0
+              net.ipv4.tcp_keepalive_time = 30
+              net.ipv4.tcp_keepalive_intvl = 5
+              net.ipv4.tcp_keepalive_probes = 3
+              net.ipv4.tcp_retries2 = 8
+              net.core.busy_read = 100
+              net.core.busy_poll = 100
+              net.core.netdev_max_backlog = 30000
+              net.ipv4.ip_unprivileged_port_start = 443
+              EOF
+              sysctl --system || true
+
+              # Isolate ENA NIC hardware interrupts to CPU 0 and enable interrupt coalescing
+              systemctl disable --now irqbalance 2>/dev/null || true
+              cat << 'EOF' > /usr/local/bin/tune-polymarket-nic.sh
+              #!/bin/bash
+              set -euo pipefail
+              PRIMARY_NIC=$(ip route show default | awk '/default/ {print $5; exit}')
+              if [ -n "$PRIMARY_NIC" ]; then
+                for irq in $(awk -v nic="$PRIMARY_NIC" '$0 ~ nic"-Tx-Rx" {gsub(":", "", $1); print $1}' /proc/interrupts); do
+                  echo 0 > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+                done
+                ethtool -C "$PRIMARY_NIC" rx-usecs 25 tx-usecs 64 2>/dev/null || true
+              fi
+              EOF
+              chmod +x /usr/local/bin/tune-polymarket-nic.sh
+
+              cat << 'EOF' > /etc/systemd/system/polymarket-nic-tuning.service
+              [Unit]
+              Description=Pin ENA NIC IRQs to CPU 0 and configure interrupt coalescing
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/local/bin/tune-polymarket-nic.sh
+              RemainAfterExit=yes
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+              systemctl enable --now polymarket-nic-tuning.service || true
+
+              # Enable Transparent Huge Pages (madvise) and shared memory THP (advise) for Java 25 ZGC
+              echo madvise > /sys/kernel/mm/transparent_hugepage/enabled || true
+              echo advise > /sys/kernel/mm/transparent_hugepage/shmem_enabled || true
+              cat << 'EOF' > /etc/tmpfiles.d/polymarket-thp.conf
+              w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise
+              w /sys/kernel/mm/transparent_hugepage/shmem_enabled - - - - advise
+              EOF
+
+              if [ ! -f /etc/polymarket-bot/bot.env ]; then
+                cat << 'EOF' > /etc/polymarket-bot/bot.env
+              POLYMARKET_STRATEGY_MODE=${StrategyMode}
+              EOF
+              fi
+
+              # Configure systemd service for Bare-OS 24/7 execution (housekeeping + Collector pinned to CPU 0; Strategy hot threads self-pin to CPU 1..3)
+              cat << 'EOF' > /etc/systemd/system/polymarket-bot.service
+              [Unit]
+              Description=Polymarket Bot (Unified 4-Core Strategy Engine & Data Collector)
+              After=network-online.target polymarket-nic-tuning.service
+              Wants=network-online.target
+
+              [Service]
+              Type=simple
+              User=polymarket
+              Group=polymarket
+              UMask=0002
+              WorkingDirectory=/opt/polymarket-bot
+              EnvironmentFile=-/etc/polymarket-bot/bot.env
+              Environment="QUARKUS_PROFILE=prod"
+              Environment="AWS_REGION=${AWS::Region}"
+              Environment="POLYMARKET_CREDENTIALS_SECRET_ID=${PolymarketSecretId}"
+              Environment="POLYMARKET_STRATEGY_NAME=UtterParameciumStrategy"
+              Environment="POLYMARKET_COLLECTOR_DATA_DIR=/mnt/ebs/polymarket-bot/collector"
+              Environment="POLYMARKET_PAPER_DATA_DIR=/mnt/ebs/polymarket-bot/paper"
+              Environment="POLYMARKET_STATE_FILE=/mnt/ebs/polymarket-bot/state/runtime-state.json"
+              AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+              CPUAffinity=0
+              Nice=-20
+              LimitMEMLOCK=infinity
+              LimitNOFILE=1048576
+              ExecStartPre=+/usr/local/bin/mount-polymarket-ebs.sh
+              ExecStart=/usr/lib/jvm/temurin-25/bin/java \
+                -XX:+UseZGC \
+                -XX:+AlwaysPreTouch \
+                -XX:+UseTransparentHugePages \
+                -XX:+UseThreadPriorities \
+                -XX:ActiveProcessorCount=4 \
+                -XX:ConcGCThreads=1 \
+                -XX:ParallelGCThreads=2 \
+                -Xms4g \
+                -Xmx4g \
+                -XX:+DisableExplicitGC \
+                -Djava.net.preferIPv4Stack=true \
+                -Djava.net.preferIPv6Addresses=false \
+                --enable-native-access=ALL-UNNAMED \
+                -Dquarkus.http.host=0.0.0.0 \
+                -Dquarkus.http.port=443 \
+                -Djava.util.logging.manager=org.jboss.logmanager.LogManager \
+                -jar /opt/polymarket-bot/quarkus-run.jar
+              StandardOutput=append:/var/log/polymarket-bot/bot.log
+              StandardError=append:/var/log/polymarket-bot/bot.log
+              Restart=always
+              RestartSec=2
+              TimeoutStopSec=15
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+              systemctl daemon-reload
+
+              # Create atomic S3 release deployment script with runtime-state preservation, /api/health verification, and auto-rollback
+              cat << 'EOF' > /usr/local/bin/deploy-polymarket-bot.sh
+              #!/bin/bash
+              set -euo pipefail
+              S3_ARTIFACT_URI="${!1:?Usage: deploy-polymarket-bot.sh s3://<bucket>/releases/bot-<version>.tar.gz}"
+              SERVICE_NAME="${!POLYMARKET_SERVICE_NAME:-polymarket-bot}"
+              HEALTH_URL="${!POLYMARKET_HEALTH_URL:-http://127.0.0.1:443/api/health}"
+              MAX_ATTEMPTS="${!POLYMARKET_HEALTH_MAX_ATTEMPTS:-40}"
+              APP_DIR="${!POLYMARKET_APP_DIR:-/opt/polymarket-bot}"
+              STAGING_DIR="${!APP_DIR}.staging"
+              PREVIOUS_DIR="${!APP_DIR}.previous"
+              FAILED_DIR="${!APP_DIR}.failed"
+              TMP_ARCHIVE="/tmp/polymarket-bot-release.tar.gz"
+              LOG_FILE="${!POLYMARKET_LOG_FILE:-/var/log/polymarket-bot/bot.log}"
+
+              if [ -x /usr/local/bin/mount-polymarket-ebs.sh ]; then
+                /usr/local/bin/mount-polymarket-ebs.sh
+              fi
+
+              # 1. Pre-stage new release while existing service continues running uninterrupted
+              if [[ "$S3_ARTIFACT_URI" == s3://* ]]; then
+                aws s3 cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE" --region "${AWS::Region}"
+              else
+                cp "$S3_ARTIFACT_URI" "$TMP_ARCHIVE"
+              fi
+              rm -rf "$STAGING_DIR"
+              mkdir -p "$STAGING_DIR"
+              tar -xzf "$TMP_ARCHIVE" -C "$STAGING_DIR"
+              rm -f "$TMP_ARCHIVE"
+              if [ ! -f "$STAGING_DIR/quarkus-run.jar" ]; then
+                echo "ERROR: Staged archive '$S3_ARTIFACT_URI' does not contain quarkus-run.jar" >&2
+                rm -rf "$STAGING_DIR"
+                exit 1
+              fi
+              id -u polymarket >/dev/null 2>&1 && chown -R polymarket:polymarket "$STAGING_DIR" || true
+
+              HAD_PREVIOUS="false"
+              if [ -f "$APP_DIR/quarkus-run.jar" ]; then
+                HAD_PREVIOUS="true"
+              fi
+
+              # 2. Stop active service (persists runtime-state.json + flushes .jsonl.zst) and perform <1ms atomic directory swap
+              systemctl stop "$SERVICE_NAME" || true
+              if [ "$HAD_PREVIOUS" = "true" ]; then
+                rm -rf "$PREVIOUS_DIR"
+                mv "$APP_DIR" "$PREVIOUS_DIR"
+              else
+                rm -rf "$APP_DIR"
+              fi
+              mv "$STAGING_DIR" "$APP_DIR"
+
+              systemctl daemon-reload
+              systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+              systemctl start "$SERVICE_NAME"
+
+              # 3. Verify new release reaches healthy=true twice consecutively
+              echo "Verifying new release health at ${!HEALTH_URL}..."
+              CONSECUTIVE_OK=0
+              LAST_HEALTH=""
+              for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+                if systemctl is-active --quiet "$SERVICE_NAME"; then
+                  if LAST_HEALTH=$(curl -fsS --max-time 2 "$HEALTH_URL" 2>/dev/null); then
+                    if echo "$LAST_HEALTH" | jq -e '.healthy == true' >/dev/null 2>&1; then
+                      CONSECUTIVE_OK=$((CONSECUTIVE_OK + 1))
+                      if [ "$CONSECUTIVE_OK" -ge 2 ]; then
+                        echo "Deployment verified healthy (attempt ${!attempt}): $LAST_HEALTH"
+                        rm -rf "$FAILED_DIR"
+                        exit 0
+                      fi
+                      sleep 1
+                      continue
+                    fi
+                  fi
+                fi
+                CONSECUTIVE_OK=0
+                sleep 1
+              done
+
+              # 4. Health check failed -> automatically roll back to previous working version
+              echo "ERROR: New release failed health verification after ${!MAX_ATTEMPTS} attempts (last response: ${!LAST_HEALTH:-none})." >&2
+              [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" >&2 || true
+
+              systemctl stop "$SERVICE_NAME" || true
+              if [ "$HAD_PREVIOUS" = "true" ] && [ -f "$PREVIOUS_DIR/quarkus-run.jar" ]; then
+                echo "Rolling back to previous working release in ${!PREVIOUS_DIR}..." >&2
+                rm -rf "$FAILED_DIR"
+                mv "$APP_DIR" "$FAILED_DIR"
+                mv "$PREVIOUS_DIR" "$APP_DIR"
+                systemctl start "$SERVICE_NAME"
+                ROLLBACK_OK="false"
+                for rb_attempt in $(seq 1 30); do
+                  if RB_HEALTH=$(curl -fsS --max-time 2 "$HEALTH_URL" 2>/dev/null); then
+                    if echo "$RB_HEALTH" | jq -e '.healthy == true' >/dev/null 2>&1; then
+                      ROLLBACK_OK="true"
+                      echo "ROLLBACK SUCCESSFUL (attempt ${!rb_attempt}): $RB_HEALTH" >&2
+                      break
+                    fi
+                  fi
+                  sleep 1
+                done
+                if [ "$ROLLBACK_OK" != "true" ]; then
+                  echo "CRITICAL: Rollback instance started but did not report healthy within 30s!" >&2
+                fi
+              else
+                echo "WARNING: No previous working release available in ${!PREVIOUS_DIR} to roll back to." >&2
+              fi
+              exit 1
+              EOF
+              chmod +x /usr/local/bin/deploy-polymarket-bot.sh
+            - LogGroupName:
+                Fn::ImportValue: !Sub "${BaseStackName}-LogGroupName"
+              EbsVolumeId:
+                Fn::ImportValue: !Sub "${BaseStackName}-EbsVolumeId"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID of the Polymarket Bot host
+    Value: !Ref PolymarketBotInstance
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceId"
+  PublicIp:
+    Description: Public IPv4 address of the Polymarket Bot EC2 instance
+    Value: !GetAtt PolymarketBotInstance.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicIp"

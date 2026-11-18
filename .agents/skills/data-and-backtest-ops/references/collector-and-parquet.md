@@ -1,7 +1,7 @@
 # Collector Download & DuckDB Parquet Conversion (PowerShell)
 
 ## 1. Download Data from EC2 Collector (`.\scripts\download-collector-data.ps1`)
-Streams daily `.jsonl.zst` archives (Binance, Kraken including `USDTUSD`, Coinbase, PolyBolt) and per-market Polymarket CLOB files from `/mnt/ebs/polymarket-data/collector` on EC2 to local disk (default `D:\Crypto\data\Polymarket\collector`), verifies byte sizes, and deletes verified remote files unless `-KeepRemoteFiles` is passed.
+Streams daily `.jsonl.zst` archives (Polymarket PolyBolt + optional Binance `bookTicker`) and per-market Polymarket CLOB files from `/mnt/ebs/polymarket-bot/collector` on the unified Polymarket Bot EC2 instance (`polymarket-bot-ec2`) to local disk (default `D:\Crypto\data\Polymarket\collector`), verifies byte sizes, and deletes verified remote files unless `-KeepRemoteFiles` is passed.
 
 ```powershell
 # Preview matched files on EC2 without downloading or deleting:
@@ -11,11 +11,11 @@ Streams daily `.jsonl.zst` archives (Binance, Kraken including `USDTUSD`, Coinba
 .\scripts\download-collector-data.ps1 -Date 2026-10-30
 
 # Filter by stream/exchange substring and retain files on EC2:
-.\scripts\download-collector-data.ps1 -Date 2026-10-30 -Stream "kraken" -KeepRemoteFiles
+.\scripts\download-collector-data.ps1 -Date 2026-10-30 -Stream "price_crypto" -KeepRemoteFiles
 
 # Download only Polymarket directory to custom path:
 .\scripts\download-collector-data.ps1 -Date 2026-10-30 `
-  -RemoteBaseDir /mnt/ebs/polymarket-data/collector/polymarket `
+  -RemoteBaseDir /mnt/ebs/polymarket-bot/collector/polymarket `
   -DestinationDir D:\Crypto\data\Polymarket\collector\polymarket
 
 # Reconcile and delete remote EC2 files already verified in local DestinationDir:

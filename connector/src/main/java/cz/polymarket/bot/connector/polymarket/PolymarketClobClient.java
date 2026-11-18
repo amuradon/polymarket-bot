@@ -34,10 +34,16 @@ import java.util.stream.Collectors;
  * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
  * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
  * <p>
- * Routes high-frequency market orderbook streams onto the consolidated {@link MarketWebSocketRuntime}
- * ({@code market-ws-io-reader} on {@code CPU #1}) with deterministic CloudFront edge IPv4 diversity
- * ({@code slot 0} for {@code PRIMARY}, {@code slot 1} for {@code BACKUP}), while keeping the low-rate
- * authenticated User Channel stream on the shared Quarkus {@link Vertx} runtime ({@code CPU #0}).
+ * Strictly isolates two independent market-stream lifecycles on {@link MarketWebSocketRuntime} ({@code CPU #1}):
+ * <ul>
+ *   <li><b>Data Collector streams ({@code COLLECTOR-CLOB-<slug>})</b>: Single-leg raw streams for the current
+ *       market plus {@code lookahead-count} future markets, drained exclusively on {@code CPU #0} and kept open
+ *       until server-side {@code closeCode == 1000} resolution with zero duplication.</li>
+ *   <li><b>Strategy hot-path streams ({@code POLYMARKET-CLOB-<slug>} + {@code -BACKUP})</b>: Dual Active-Active
+ *       connections pinned to distinct CloudFront edge IPv4 slots ({@code 0} and {@code 1}) with pre-parse
+ *       fingerprint deduplication, bound to {@code market-strategy-worker} ({@code CPU #2}) when strategy mode
+ *       is {@code LIVE} or {@code PAPER}, and completely closed with empty queues when strategy mode is {@code OFF}.</li>
+ * </ul>
  */
 @ApplicationScoped
 public class PolymarketClobClient {
@@ -53,6 +59,7 @@ public class PolymarketClobClient {
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
 
+    private final Map<String, ReconnectingWebSocketStream> collectorMarketStreams = new ConcurrentHashMap<>();
     private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
     private final Map<String, ReconnectingWebSocketStream> backupMarketStreams = new ConcurrentHashMap<>();
     private final Map<String, PayloadDeduplicator> marketDeduplicators = new ConcurrentHashMap<>();
@@ -115,12 +122,16 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Registers a listener notified whenever any active CLOB market or user stream disconnects unexpectedly.
+     * Registers a listener notified whenever any active CLOB collector, strategy market, or user stream
+     * disconnects unexpectedly.
      *
      * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
      */
     public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
         this.disconnectListener = disconnectListener;
+        for (ReconnectingWebSocketStream collectorStream : collectorMarketStreams.values()) {
+            collectorStream.setDisconnectListener(disconnectListener);
+        }
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             stream.setDisconnectListener(disconnectListener);
         }
@@ -134,48 +145,17 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Opens a dedicated CLOB WebSocket connection for a single market subscribed to its token IDs,
-     * forwarding all raw frames directly to the listener without parsing.
-     *
-     * @param marketSlug Polymarket market slug
-     * @param tokenIds   CLOB asset token IDs belonging to the market
-     * @param listener   listener receiving raw JSON frames and receipt timestamps
-     */
-    public synchronized void openMarketStream(String marketSlug, List<String> tokenIds, RawWebSocketListener listener) {
-        openMarketStream(marketSlug, tokenIds, listener, null, null);
-    }
-
-    /**
-     * Opens a dedicated CLOB WebSocket connection for a single market subscribed to its token IDs,
-     * forwarding all raw frames directly to the listener without parsing and invoking {@code normalCloseListener}
-     * when the server terminates the resolved market stream with {@code closeCode == 1000}.
-     *
-     * @param marketSlug          Polymarket market slug
-     * @param tokenIds            CLOB asset token IDs belonging to the market
-     * @param listener            listener receiving raw JSON frames and receipt timestamps
-     * @param normalCloseListener optional listener invoked when the server cleanly closes the stream with {@code closeCode == 1000}
-     */
-    public synchronized void openMarketStream(
-            String marketSlug,
-            List<String> tokenIds,
-            RawWebSocketListener listener,
-            Consumer<WebSocketStreamTelemetry> normalCloseListener) {
-        openMarketStream(marketSlug, tokenIds, listener, normalCloseListener, null);
-    }
-
-    /**
-     * Opens a dedicated CLOB WebSocket connection for a single market subscribed to its token IDs,
-     * forwarding all raw frames directly to the listener without parsing, invoking {@code normalCloseListener}
-     * when the server terminates the resolved market stream with {@code closeCode == 1000} or when the stream
-     * disconnects after {@code shouldReconnectSupplier} evaluates to {@code false}.
+     * Opens a dedicated single-leg Data Collector CLOB WebSocket connection ({@code COLLECTOR-CLOB-<slug>})
+     * for a market subscribed to its token IDs, forwarding all raw frames directly to {@code listener} on
+     * {@code CPU #0} without JSON parsing and completely isolated from Strategy's dual streams.
      *
      * @param marketSlug              Polymarket market slug
      * @param tokenIds                CLOB asset token IDs belonging to the market
      * @param listener                listener receiving raw JSON frames and receipt timestamps
-     * @param normalCloseListener     optional listener invoked upon terminal stream closure
+     * @param normalCloseListener     optional listener invoked upon terminal stream closure ({@code closeCode == 1000} or post-end)
      * @param shouldReconnectSupplier optional supplier returning {@code true} if reconnection is allowed on disconnect
      */
-    public synchronized void openMarketStream(
+    public synchronized void openCollectorMarketStream(
             String marketSlug,
             List<String> tokenIds,
             RawWebSocketListener listener,
@@ -184,7 +164,7 @@ public class PolymarketClobClient {
         if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
             return;
         }
-        if (marketStreams.containsKey(marketSlug)) {
+        if (collectorMarketStreams.containsKey(marketSlug)) {
             return;
         }
         String subPayload = buildSubscriptionPayload(tokenIds);
@@ -205,7 +185,7 @@ public class PolymarketClobClient {
         };
         ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
                 marketWsRuntime.vertx(),
-                "POLYMARKET-CLOB-" + marketSlug,
+                "COLLECTOR-CLOB-" + marketSlug,
                 wsUrl,
                 () -> List.of(subPayload),
                 delegatingListener,
@@ -217,17 +197,54 @@ public class PolymarketClobClient {
         stream.setShouldReconnectSupplier(shouldReconnectSupplier);
         if (normalCloseListener != null) {
             stream.setNormalCloseListener(telemetry -> {
-                marketStreams.remove(marketSlug, stream);
+                collectorMarketStreams.remove(marketSlug, stream);
                 normalCloseListener.accept(telemetry);
             });
         }
-        marketStreams.put(marketSlug, stream);
-        Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
+        collectorMarketStreams.put(marketSlug, stream);
+        Log.infof("Opening Collector Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
         stream.start();
     }
 
     /**
-     * Opens a dual Active-Active pair of CLOB WebSocket connections ({@code PRIMARY} on edge IPv4 {@code slot 0}
+     * Closes and removes the single-leg Data Collector CLOB WebSocket stream for a completed market
+     * without affecting Strategy streams.
+     *
+     * @param marketSlug Polymarket market slug to disconnect
+     */
+    public synchronized void closeCollectorMarketStream(String marketSlug) {
+        if (marketSlug == null) {
+            return;
+        }
+        ReconnectingWebSocketStream collectorStream = collectorMarketStreams.remove(marketSlug);
+        if (collectorStream != null) {
+            Log.infof("Closing Collector Polymarket CLOB WebSocket stream for market %s", marketSlug);
+            collectorStream.stop();
+        }
+    }
+
+    /**
+     * Stops all active Data Collector CLOB WebSocket streams without touching Strategy streams.
+     */
+    public synchronized void stopAllCollectorStreams() {
+        for (String slug : List.copyOf(collectorMarketStreams.keySet())) {
+            closeCollectorMarketStream(slug);
+        }
+    }
+
+    /**
+     * Returns an unmodifiable snapshot of the connection states of all active Data Collector CLOB streams.
+     *
+     * @return map of market slug to {@link ConnectionState}
+     */
+    public Map<String, ConnectionState> getCollectorConnectionStates() {
+        Map<String, ConnectionState> states = new LinkedHashMap<>();
+        collectorMarketStreams.forEach((slug, stream) -> states.put(slug, stream.getState()));
+        return Collections.unmodifiableMap(states);
+    }
+
+    /**
+     * Opens a dual Active-Active pair of Strategy CLOB WebSocket connections ({@code PRIMARY} on edge IPv4 {@code slot 0}
      * and {@code BACKUP} on edge IPv4 {@code slot 1}) for a single market with pre-parse {@code rawUtf8Bytes}
      * fingerprint deduplication and batch-draining listener support, optionally bound to an external dedicated
      * worker thread (e.g. {@code market-strategy-worker}).
@@ -296,7 +313,7 @@ public class PolymarketClobClient {
         }
         marketStreams.put(marketSlug, primaryStream);
         backupMarketStreams.put(marketSlug, backupStream);
-        Log.infof("Opening dual Active-Active Polymarket CLOB WebSocket streams for market %s (tokens=%d, batchMode=true, edgeSlots=0/1)",
+        Log.infof("Opening dual Active-Active Strategy Polymarket CLOB WebSocket streams for market %s (tokens=%d, edgeSlots=0/1)",
                 marketSlug, tokenIds.size());
         primaryStream.start();
         backupStream.start();
@@ -322,7 +339,8 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Disconnects and removes both primary and backup CLOB WebSocket streams for a market that has finished.
+     * Disconnects and removes both primary and backup Strategy CLOB WebSocket streams for a market
+     * without affecting Data Collector streams.
      *
      * @param marketSlug Polymarket market slug to disconnect
      */
@@ -334,7 +352,7 @@ public class PolymarketClobClient {
         ReconnectingWebSocketStream primary = marketStreams.remove(marketSlug);
         ReconnectingWebSocketStream backup = backupMarketStreams.remove(marketSlug);
         if (primary != null || backup != null) {
-            Log.infof("Closing Polymarket CLOB WebSocket stream(s) for market %s", marketSlug);
+            Log.infof("Closing Strategy Polymarket CLOB WebSocket stream(s) for market %s", marketSlug);
         }
         if (primary != null) {
             primary.stop();
@@ -342,17 +360,6 @@ public class PolymarketClobClient {
         if (backup != null) {
             backup.stop();
         }
-    }
-
-    /**
-     * Opens an authenticated CLOB User Channel WebSocket stream ({@code /ws/user}) receiving real-time
-     * account order and trade fill notifications.
-     *
-     * @param credentials Polymarket Level 2 API credentials
-     * @param listener    listener receiving raw JSON frames and receipt timestamps
-     */
-    public synchronized void openUserStream(PolymarketCredentials credentials, RawWebSocketListener listener) {
-        openUserStream(credentials, listener, null);
     }
 
     /**
@@ -409,9 +416,10 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Disconnects all active market and user CLOB WebSocket streams.
+     * Stops and clears all active Strategy market and user CLOB streams (used when switching Strategy to {@code OFF})
+     * while leaving all Data Collector CLOB streams running uninterrupted.
      */
-    public synchronized void stopAll() {
+    public synchronized void stopAllStrategyStreams() {
         for (String slug : List.copyOf(marketStreams.keySet())) {
             closeMarketStream(slug);
         }
@@ -419,7 +427,15 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Drains all currently queued frames across active primary and backup market CLOB streams into {@code scratchBatch}.
+     * Disconnects all active Strategy, User, and Data Collector CLOB WebSocket streams.
+     */
+    public synchronized void stopAll() {
+        stopAllStrategyStreams();
+        stopAllCollectorStreams();
+    }
+
+    /**
+     * Drains all currently queued frames across active Strategy primary and backup market CLOB streams into {@code scratchBatch}.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained
@@ -447,9 +463,9 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns whether any active primary or backup market CLOB stream currently has frames waiting in its inbound queue.
+     * Returns whether any active Strategy primary or backup market CLOB stream currently has frames waiting in its inbound queue.
      *
-     * @return {@code true} if any market stream queue is non-empty
+     * @return {@code true} if any strategy market stream queue is non-empty
      */
     public boolean hasQueuedMarketFrames() {
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
@@ -466,8 +482,8 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Marks all active primary and backup market streams as parked prior to {@code LockSupport.parkNanos}
-     * and returns {@code true} if any market stream received frames concurrently.
+     * Marks all active Strategy primary and backup market streams as parked prior to {@code LockSupport.parkNanos}
+     * and returns {@code true} if any strategy market stream received frames concurrently.
      *
      * @return {@code true} if frames arrived concurrently and parking must be aborted
      */
@@ -507,7 +523,7 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Records additional fast-forwarded frames for the specified market slug.
+     * Records additional fast-forwarded frames for the specified Strategy market slug.
      *
      * @param marketSlug market slug
      * @param delta      number of additional fast-forwarded frames
@@ -523,7 +539,7 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns an unmodifiable snapshot of the connection states of all active market and user CLOB streams.
+     * Returns an unmodifiable snapshot of the connection states of all active Strategy market and user CLOB streams.
      * For dual Active-Active market streams, reports {@link ConnectionState#CONNECTED} as long as either
      * the primary or backup connection is active.
      *
@@ -553,12 +569,13 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns telemetry snapshots for all active primary, backup, and user CLOB streams.
+     * Returns telemetry snapshots for all active Strategy (primary, backup, user) and Data Collector CLOB streams.
      *
      * @return list of {@link WebSocketStreamTelemetry} snapshots
      */
     public List<WebSocketStreamTelemetry> getStreamTelemetries() {
-        List<WebSocketStreamTelemetry> result = new ArrayList<>(marketStreams.size() + backupMarketStreams.size() + 1);
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(
+                marketStreams.size() + backupMarketStreams.size() + collectorMarketStreams.size() + 1);
         for (ReconnectingWebSocketStream stream : marketStreams.values()) {
             result.add(stream.getTelemetrySnapshot());
         }
@@ -569,11 +586,14 @@ public class PolymarketClobClient {
         if (currentUser != null) {
             result.add(currentUser.getTelemetrySnapshot());
         }
+        for (ReconnectingWebSocketStream collectorStream : collectorMarketStreams.values()) {
+            result.add(collectorStream.getTelemetrySnapshot());
+        }
         return result;
     }
 
     /**
-     * Evaluates the live connection state of the peer leg for a dual Active-Active market WebSocket stream
+     * Evaluates the live connection state of the peer leg for a dual Active-Active Strategy market WebSocket stream
      * (e.g. {@code POLYMARKET-CLOB-<slug>} vs {@code POLYMARKET-CLOB-<slug>-BACKUP}).
      *
      * @param streamName identifier of the stream that disconnected

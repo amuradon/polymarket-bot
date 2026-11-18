@@ -21,10 +21,10 @@
     Local root directory for collector data. Defaults to 'D:\Crypto\data\Polymarket\collector'.
 
 .PARAMETER Ec2Host
-    EC2 SSH host alias configured in ~/.ssh/config. Defaults to 'i-0e826b5eb507d87be'.
+    EC2 SSH host alias / Instance ID configured in ~/.ssh/config. If omitted, resolved dynamically from CloudFormation stack 'polymarket-bot-ec2' in eu-west-1.
 
 .PARAMETER RemoteBaseDir
-    Root directory of collector data on the EC2 host. Defaults to '/mnt/ebs/polymarket-data/collector'.
+    Root directory of collector data on the EC2 host. Defaults to '/mnt/ebs/polymarket-bot/collector'.
 
 .PARAMETER DryRun
     If specified, displays matched files and sizes on EC2 without downloading or deleting anything.
@@ -57,10 +57,10 @@ param(
     [string]$DestinationDir = "D:\Crypto\data\Polymarket\collector",
 
     [Parameter()]
-    [string]$Ec2Host = "i-0e826b5eb507d87be",
+    [string]$Ec2Host = "",
 
     [Parameter()]
-    [string]$RemoteBaseDir = "/mnt/ebs/polymarket-data/collector",
+    [string]$RemoteBaseDir = "/mnt/ebs/polymarket-bot/collector",
 
     [Parameter()]
     [switch]$DryRun,
@@ -76,6 +76,24 @@ $ErrorActionPreference = "Stop"
 $pluginBin = "C:\Program Files\Amazon\SessionManagerPlugin\bin"
 if ($env:PATH -notlike "*$pluginBin*") {
     $env:PATH += ";$pluginBin"
+}
+
+if ([string]::IsNullOrWhiteSpace($Ec2Host)) {
+    try {
+        $resolvedId = (aws cloudformation describe-stacks `
+            --stack-name "polymarket-bot-ec2" `
+            --region "eu-west-1" `
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" `
+            --output text 2>$null)
+        if ($resolvedId -and $resolvedId.Trim() -ne "None") {
+            $Ec2Host = $resolvedId.Trim()
+        }
+    } catch {
+        $Ec2Host = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($Ec2Host)) {
+        throw "Could not resolve EC2 Instance ID from stack 'polymarket-bot-ec2' in eu-west-1. Specify -Ec2Host explicitly."
+    }
 }
 
 # --- MODE: CLEAN ALREADY DOWNLOADED ---
