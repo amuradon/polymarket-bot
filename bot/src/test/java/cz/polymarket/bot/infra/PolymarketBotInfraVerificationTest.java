@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Synthetic verification tests for unified Polymarket Bot CloudFormation templates ({@code polymarket-bot-base.yaml},
- * {@code polymarket-bot-ec2.yaml}, {@code telegram-alert-lambda.yaml}) and the {@code deploy-polymarket-bot.sh}
+ * {@code polymarket-bot-ec2.yaml}) and the {@code deploy-polymarket-bot.sh}
  * health-check &amp; auto-rollback script.
  */
 class PolymarketBotInfraVerificationTest {
@@ -23,11 +23,10 @@ class PolymarketBotInfraVerificationTest {
     Path tempDir;
 
     @Test
-    void shouldDefine100GbEncryptedRetainedEbsVolumeUnifiedBotServiceAndSingleLogSubscriptionInCloudFormation() throws Exception {
+    void shouldDefine100GbEncryptedRetainedEbsVolumeAndUnifiedBotServiceInCloudFormation() throws Exception {
         Path repoRoot = resolveRepoRoot();
         String baseYaml = Files.readString(repoRoot.resolve("infra/polymarket-bot-base.yaml"));
         String ec2Yaml = Files.readString(repoRoot.resolve("infra/polymarket-bot-ec2.yaml"));
-        String alertYaml = Files.readString(repoRoot.resolve("infra/telegram-alert-lambda.yaml"));
 
         assertThat(baseYaml)
                 .contains("EbsVolumeSizeGb:")
@@ -35,7 +34,9 @@ class PolymarketBotInfraVerificationTest {
                 .contains("VolumeType: gp3")
                 .contains("Encrypted: true")
                 .contains("DeletionPolicy: Retain")
-                .contains("/polymarket-bot/${AWS::StackName}/bot");
+                .contains("/polymarket-bot/${AWS::StackName}/bot")
+                .contains("LogGroupName:")
+                .contains("LogGroupArn:");
 
         assertThat(ec2Yaml)
                 .contains("Default: polymarket-bot-base")
@@ -51,19 +52,14 @@ class PolymarketBotInfraVerificationTest {
                 .contains("http://127.0.0.1:443/api/health")
                 .contains("Rolling back to previous working release");
 
-        assertThat(alertYaml)
-                .contains("BotBaseStackName:")
-                .contains("Default: polymarket-bot-base")
-                .contains("SourceAccount: !Ref AWS::AccountId")
-                .doesNotContain("LiveBaseStackName")
-                .doesNotContain("DataBaseStackName");
-
         assertThat(Files.exists(repoRoot.resolve("infra/live-trading-base.yaml"))).isFalse();
         assertThat(Files.exists(repoRoot.resolve("infra/live-trading-ec2.yaml"))).isFalse();
         assertThat(Files.exists(repoRoot.resolve("infra/data-collector-base.yaml"))).isFalse();
         assertThat(Files.exists(repoRoot.resolve("infra/data-collector-ec2.yaml"))).isFalse();
         assertThat(Files.exists(repoRoot.resolve("infra/deploy-live.ps1"))).isFalse();
         assertThat(Files.exists(repoRoot.resolve("infra/deploy-data.ps1"))).isFalse();
+        assertThat(Files.exists(repoRoot.resolve("infra/telegram-alert-base.yaml"))).isFalse();
+        assertThat(Files.exists(repoRoot.resolve("infra/telegram-alert-lambda.yaml"))).isFalse();
     }
 
     @Test

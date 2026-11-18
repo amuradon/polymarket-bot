@@ -2,7 +2,7 @@
 name: aws-deployment
 description: >-
   AWS eu-west-1 (Dublin) infrastructure, CloudFormation templates in infra/
-  (polymarket-bot-base.yaml, polymarket-bot-ec2.yaml, telegram-alert-*.yaml),
+  (polymarket-bot-base.yaml, polymarket-bot-ec2.yaml),
   Maven SemVer release workflow, Bare-OS systemd EC2 deployments with
   runtime-state preservation and automatic health-check rollback via SSM,
   Secrets Manager safety, and CloudWatch/EBS operations. Use when deploying
@@ -49,9 +49,6 @@ Schedule deployments near the start of a new 15m interval; never recreate EC2 in
 
 # 2. Package bot-{x.y.z}.tar.gz, upload to S3 artifact bucket, deploy via SSM, verify /api/health (or auto-rollback):
 .\infra\deploy-bot.ps1
-
-# Update Telegram Alert Lambda container image & function code:
-.\infra\deploy-telegram-alert.ps1 -Version "1.0.3"
 ```
 
 ---
@@ -61,5 +58,4 @@ Schedule deployments near the start of a new 15m interval; never recreate EC2 in
 Read **only** the reference document relevant to your current task:
 
 - **[references/polymarket-bot.md](references/polymarket-bot.md)**: Unified `bot` CloudFormation stacks (`polymarket-bot-base.yaml` with 100 GiB `gp3` EBS, `polymarket-bot-ec2.yaml`), `c8gn.xlarge` 4-core pinning, ZGC flags, state persistence, and auto-rollback.
-- **[references/telegram-alert.md](references/telegram-alert.md)**: ECR + Java 25 Telegram Alert Lambda stacks (`telegram-alert-base.yaml`, `telegram-alert-lambda.yaml`) subscribing to `polymarket-bot-base`.
 - **[references/operations.md](references/operations.md)**: Unified dashboard/telemetry/mode endpoints, SSM port forwarding, and CloudWatch log tailing.

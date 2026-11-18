@@ -1,3 +1,0 @@
-target/*
-!target/telegram-alert-*.jar
-target/original-*.jar
