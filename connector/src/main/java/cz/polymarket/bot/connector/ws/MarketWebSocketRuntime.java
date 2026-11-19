@@ -7,9 +7,10 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.dns.AddressResolverOptions;
-import io.vertx.core.net.SocketAddress;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -27,11 +28,11 @@ import java.util.concurrent.TimeUnit;
  * {@code KrakenStreamConnector}, and {@code CoinbaseStreamConnector}).
  * <p>
  * Consolidates all market WebSocket file descriptors onto a single {@code epoll_wait} loop
- * ({@code market-ws-io-reader}) pinned to {@code CPU #1} on 4-core Linux hosts, eliminating redundant
- * Netty EventLoop instances, idle blocking worker pools, and cross-core scheduler migrations. Also provides
- * deterministic, non-blocking IPv4 pool resolution so dual Active-Active connections ({@code PRIMARY} and
- * {@code BACKUP}) connect to distinct CDN/exchange edge IPv4 addresses while preserving TLS SNI and HTTP
- * {@code Host} headers.
+ * ({@code market-ws-io-reader}) pinned exclusively to {@code CPU #1} on 4-core Linux hosts while pinning
+ * the single asynchronous DNS worker thread to {@code CPU #0}. Provides sibling-aware IPv4 pool resolution
+ * so dual Active-Active connections ({@code PRIMARY} and {@code BACKUP}) always connect to distinct
+ * CDN/exchange edge IPv4 addresses on startup and across reconnections while preserving TLS SNI,
+ * X.509 hostname verification, and HTTP {@code Host} headers.
  */
 @ApplicationScoped
 public class MarketWebSocketRuntime {
@@ -42,21 +43,37 @@ public class MarketWebSocketRuntime {
     /** Target physical CPU index on 4-vCPU hosts ({@code c8gn.xlarge}) for market WebSocket I/O reading. */
     public static final int MARKET_IO_CPU_INDEX = 1;
 
-    private static final long DNS_CACHE_TTL_NS = TimeUnit.SECONDS.toNanos(30L);
+    private static final int HOUSEKEEPING_CPU_INDEX = 0;
 
     private record CachedIpv4Pool(List<String> sortedIpv4s, long expiresAtNanoTime) {
     }
 
     private final Vertx marketVertx;
+    private final long dnsCacheTtlNs;
     private final ConcurrentHashMap<String, CachedIpv4Pool> ipv4PoolCache = new ConcurrentHashMap<>();
     private volatile Thread ioReaderThread;
 
     /**
-     * Constructs and initializes the shared 1-thread market WebSocket {@link Vertx} runtime,
-     * naming the EventLoop thread {@link #DEDICATED_MARKET_IO_THREAD_NAME}, setting {@link Thread#MAX_PRIORITY},
-     * and pinning it to {@code CPU #1} when supported.
+     * Package-private no-arg constructor required exclusively by Quarkus ArC client proxies.
+     * Allocates zero threads and zero Vert.x resources so no ghost EventLoop is created on {@code CPU #1}.
      */
-    public MarketWebSocketRuntime() {
+    MarketWebSocketRuntime() {
+        this.marketVertx = null;
+        this.dnsCacheTtlNs = 0L;
+    }
+
+    /**
+     * Constructs and initializes the shared 1-thread market WebSocket {@link Vertx} runtime,
+     * pinning the single blocking DNS worker to {@code CPU #0} and the single EventLoop thread
+     * ({@link #DEDICATED_MARKET_IO_THREAD_NAME}) exclusively to {@code CPU #1}.
+     *
+     * @param dnsCacheTtlSec TTL in seconds for cached sorted IPv4 {@code A}-record pools (default 30s)
+     */
+    @Inject
+    public MarketWebSocketRuntime(
+            @ConfigProperty(name = "polymarket.connector.dns.cache-ttl-sec", defaultValue = "30")
+            long dnsCacheTtlSec) {
+        this.dnsCacheTtlNs = TimeUnit.SECONDS.toNanos(Math.max(1L, dnsCacheTtlSec));
         this.marketVertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(1)
                 .setWorkerPoolSize(1)
@@ -67,7 +84,22 @@ public class MarketWebSocketRuntime {
                         .setRotateServers(true)
                         .setCacheMaxTimeToLive(60)));
 
-        CountDownLatch initLatch = new CountDownLatch(1);
+        // Eagerly initialize and pin the single worker thread to CPU #0 before CPU #1 EventLoop work runs,
+        // preventing lazy worker threads spawned during DNS lookups from inheriting CPU #1 affinity.
+        CountDownLatch workerInitLatch = new CountDownLatch(1);
+        this.marketVertx.executeBlocking(() -> {
+            try {
+                Thread worker = Thread.currentThread();
+                worker.setPriority(Thread.NORM_PRIORITY);
+                LinuxCpuAffinity.pinCurrentThreadIfSupported(HOUSEKEEPING_CPU_INDEX, "vCPU #0: Market DNS Worker");
+            } catch (SecurityException ignored) {
+            } finally {
+                workerInitLatch.countDown();
+            }
+            return null;
+        }, false);
+
+        CountDownLatch ioInitLatch = new CountDownLatch(1);
         this.marketVertx.runOnContext(v -> {
             try {
                 Thread current = Thread.currentThread();
@@ -78,11 +110,12 @@ public class MarketWebSocketRuntime {
             } catch (SecurityException ignored) {
                 this.ioReaderThread = Thread.currentThread();
             } finally {
-                initLatch.countDown();
+                ioInitLatch.countDown();
             }
         });
         try {
-            initLatch.await(2L, TimeUnit.SECONDS);
+            workerInitLatch.await(2L, TimeUnit.SECONDS);
+            ioInitLatch.await(2L, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -102,9 +135,11 @@ public class MarketWebSocketRuntime {
     @PreDestroy
     public void destroy() {
         ipv4PoolCache.clear();
-        try {
-            marketVertx.close().toCompletionStage().toCompletableFuture().get(3L, TimeUnit.SECONDS);
-        } catch (Exception ignored) {
+        if (marketVertx != null) {
+            try {
+                marketVertx.close().toCompletionStage().toCompletableFuture().get(3L, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -132,7 +167,7 @@ public class MarketWebSocketRuntime {
      * @return {@code true} if native transport is enabled
      */
     public boolean isNativeTransportEnabled() {
-        return marketVertx.isNativeTransportEnabled();
+        return marketVertx != null && marketVertx.isNativeTransportEnabled();
     }
 
     /**
@@ -145,65 +180,86 @@ public class MarketWebSocketRuntime {
     }
 
     /**
-     * Asynchronously resolves a deterministic IPv4 target {@link SocketAddress} for the given {@code host},
-     * {@code port}, {@code preferredSlot} (e.g. {@code 0} for {@code PRIMARY} and {@code 1} for {@code BACKUP}),
-     * and {@code reconnectAttempt}.
-     * <p>
-     * Sorting the resolved {@code A} records deterministically guarantees that {@code slot 0} and {@code slot 1}
-     * select distinct upstream CDN/exchange edge IPv4 addresses whenever at least two {@code A} records exist,
-     * while subsequent reconnect attempts rotate across the remaining pool entries.
+     * Asynchronously resolves the deterministically sorted list of unique IPv4 {@code A} records for {@code host},
+     * using the in-memory TTL cache unless {@code forceRefresh} is {@code true}.
      *
-     * @param host             target DNS hostname or IP literal
-     * @param port             target TCP port
-     * @param preferredSlot    0-based leg index ({@code 0} for primary, {@code 1} for backup; {@code < 0} disables slot pinning)
-     * @param reconnectAttempt consecutive reconnect attempt counter ({@code >= 0})
-     * @return future yielding the resolved IPv4 {@link SocketAddress}, or {@code null} to use default host connect
+     * @param host         target DNS hostname or IP literal
+     * @param forceRefresh {@code true} to bypass the TTL cache (e.g. after a connection drop)
+     * @return future yielding an unmodifiable sorted list of IPv4 address strings (empty on lookup failure)
      */
-    public Future<SocketAddress> resolveDistinctIpv4Server(
-            String host,
-            int port,
-            int preferredSlot,
-            int reconnectAttempt) {
-        if (host == null || host.isBlank() || preferredSlot < 0) {
-            return Future.succeededFuture(null);
+    public Future<List<String>> resolveIpv4Pool(String host, boolean forceRefresh) {
+        if (marketVertx == null || host == null || host.isBlank()) {
+            return Future.succeededFuture(List.of());
         }
         String normalizedHost = host.trim();
-        long nowNs = System.nanoTime();
-        CachedIpv4Pool cached = ipv4PoolCache.get(normalizedHost);
-        if (cached != null && nowNs < cached.expiresAtNanoTime() && !cached.sortedIpv4s().isEmpty()) {
-            String selectedIp = selectIpv4ForSlot(cached.sortedIpv4s(), preferredSlot, reconnectAttempt);
-            return Future.succeededFuture(selectedIp != null ? SocketAddress.inetSocketAddress(port, selectedIp) : null);
+        if (!forceRefresh) {
+            long nowNs = System.nanoTime();
+            CachedIpv4Pool cached = ipv4PoolCache.get(normalizedHost);
+            if (cached != null && nowNs < cached.expiresAtNanoTime() && !cached.sortedIpv4s().isEmpty()) {
+                return Future.succeededFuture(cached.sortedIpv4s());
+            }
         }
 
         return marketVertx.executeBlocking(() -> {
             List<String> resolved = lookupSortedIpv4Addresses(normalizedHost);
             if (!resolved.isEmpty()) {
-                ipv4PoolCache.put(normalizedHost, new CachedIpv4Pool(resolved, System.nanoTime() + DNS_CACHE_TTL_NS));
+                ipv4PoolCache.put(normalizedHost, new CachedIpv4Pool(resolved, System.nanoTime() + dnsCacheTtlNs));
+                return resolved;
             }
-            String selectedIp = selectIpv4ForSlot(resolved, preferredSlot, reconnectAttempt);
-            return selectedIp != null ? SocketAddress.inetSocketAddress(port, selectedIp) : null;
+            CachedIpv4Pool stale = ipv4PoolCache.get(normalizedHost);
+            return stale != null ? stale.sortedIpv4s() : List.of();
         }, false);
     }
 
     /**
-     * Deterministically selects an IPv4 address from a sorted list of {@code A} records for the given
-     * {@code preferredSlot} and {@code reconnectAttempt}.
+     * Deterministically selects an IPv4 address from a sorted list of {@code A} records for {@code preferredSlot}
+     * and {@code reconnectAttempt} while avoiding collision with {@code excludedPeerIp} (whenever at least 2 records
+     * exist) and rotating away from {@code lastFailedIp}.
      *
      * @param sortedIpv4s      deterministically sorted unique IPv4 literal strings
      * @param preferredSlot    0-based stream leg slot ({@code >= 0})
      * @param reconnectAttempt consecutive reconnect counter ({@code >= 0})
+     * @param excludedPeerIp   IPv4 address currently in use by the sibling leg (may be {@code null} or blank)
+     * @param lastFailedIp     IPv4 address that most recently failed on this leg (may be {@code null} or blank)
      * @return selected IPv4 address string, or {@code null} if {@code sortedIpv4s} is null/empty or {@code preferredSlot < 0}
      */
-    public static String selectIpv4ForSlot(List<String> sortedIpv4s, int preferredSlot, int reconnectAttempt) {
+    public static String selectIpv4ForSlot(
+            List<String> sortedIpv4s,
+            int preferredSlot,
+            int reconnectAttempt,
+            String excludedPeerIp,
+            String lastFailedIp) {
         if (sortedIpv4s == null || sortedIpv4s.isEmpty() || preferredSlot < 0) {
             return null;
         }
         int size = sortedIpv4s.size();
-        int offset = Math.floorMod(preferredSlot + Math.max(0, reconnectAttempt), size);
-        return sortedIpv4s.get(offset);
+        if (size == 1) {
+            return sortedIpv4s.getFirst();
+        }
+        int startIdx = Math.floorMod(preferredSlot + Math.max(0, reconnectAttempt), size);
+        String peerIp = normalizeIp(excludedPeerIp);
+        String failedIp = normalizeIp(lastFailedIp);
+
+        if (failedIp != null) {
+            for (int i = 0; i < size; i++) {
+                String candidate = sortedIpv4s.get((startIdx + i) % size);
+                if (!candidate.equals(peerIp) && !candidate.equals(failedIp)) {
+                    return candidate;
+                }
+            }
+        }
+        if (peerIp != null) {
+            for (int i = 0; i < size; i++) {
+                String candidate = sortedIpv4s.get((startIdx + i) % size);
+                if (!candidate.equals(peerIp)) {
+                    return candidate;
+                }
+            }
+        }
+        return sortedIpv4s.get(startIdx);
     }
 
-    static List<String> lookupSortedIpv4Addresses(String host) {
+    List<String> lookupSortedIpv4Addresses(String host) {
         try {
             InetAddress[] all = InetAddress.getAllByName(host);
             if (all == null || all.length == 0) {
@@ -233,6 +289,18 @@ public class MarketWebSocketRuntime {
             Log.debugf("IPv4 DNS pool lookup failed for '%s': %s", host, e.getMessage());
             return List.of();
         }
+    }
+
+    private static String normalizeIp(String rawIp) {
+        if (rawIp == null) {
+            return null;
+        }
+        String trimmed = rawIp.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        int colonIdx = trimmed.indexOf(':');
+        return colonIdx > 0 ? trimmed.substring(0, colonIdx) : trimmed;
     }
 
     private static long ipv4ToUnsignedLong(Inet4Address addr) {

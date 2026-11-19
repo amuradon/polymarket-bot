@@ -134,7 +134,7 @@ class StrategyTradingEngineTest {
         binanceSockets.clear();
 
         vertx = Vertx.vertx();
-        marketWsRuntime = new MarketWebSocketRuntime();
+        marketWsRuntime = new MarketWebSocketRuntime(30L);
         paperRepository = new PaperTradeRepository(
                 tempDir.resolve("paper").toString(),
                 10_000.0,
@@ -523,7 +523,7 @@ class StrategyTradingEngineTest {
         DailyPolyBoltStorageManager polyBoltStorage = new DailyPolyBoltStorageManager(collectorDir.toString(), "BTCUSDT");
         PolymarketMarketStorageManager polymarketStorage = new PolymarketMarketStorageManager(collectorDir.toString(), "BTCUSDT", "15m");
         PolymarketLifecycleCoordinator lifecycleCoordinator = new PolymarketLifecycleCoordinator(
-                gammaClient, clobClient, polymarketStorage, "BTCUSDT", "15m", 2
+                gammaClient, clobClient, polymarketStorage, "BTCUSDT", "15m", 1
         );
         DataCollectorService collectorService = new DataCollectorService(
                 binanceConnector, binanceStorage, polyBoltStorage, lifecycleCoordinator, polymarketStorage,
@@ -565,16 +565,16 @@ class StrategyTradingEngineTest {
         try {
             coordinator.startRuntime(nowSec);
 
-            // Wait until Collector (3 single-leg CLOB sockets: 0..2) + Strategy (2 dual-leg CLOB sockets) = 5 CLOB sockets connect
+            // Wait until shared Active market (2 dual-leg CLOB sockets: PRIMARY + BACKUP) + 1 Lookahead market = 3 CLOB sockets connect
             Awaitility.await()
                     .atMost(Duration.ofSeconds(5))
                     .untilAsserted(() -> {
-                        assertThat(clobSockets).hasSize(5);
+                        assertThat(clobSockets).hasSize(3);
                         assertThat(binanceSockets).hasSize(2);
                         assertThat(polyBoltAuthedBeforeSubscribe.get()).isTrue();
                     });
 
-            // Broadcast an identical unique CLOB book frame to ALL 5 connected CLOB sockets (1 collector + 2 strategy active-active + 2 lookahead)
+            // Broadcast an identical unique CLOB book frame to ALL 3 connected CLOB sockets (2 shared active PRIMARY+BACKUP + 1 lookahead)
             String uniqueBookPayload = """
                     [{"event_type":"book","asset_id":"%s","timestamp":"%d","bids":[{"price":"0.51","size":"999"}],"asks":[{"price":"0.52","size":"888"}]}]
                     """.formatted(TEST_TOKEN_UP, nowSec * 1000L).trim();
@@ -587,15 +587,18 @@ class StrategyTradingEngineTest {
                     .untilAsserted(() -> {
                         assertThat(engine.getLatestQuote()).isNotNull();
                         assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.52);
-                        assertThat(polymarketStorage.getTotalRecordsWritten()).isGreaterThanOrEqualTo(6L);
+                        assertThat(polymarketStorage.getTotalRecordsWritten()).isGreaterThanOrEqualTo(4L);
                     });
 
-            // Switch Strategy to OFF at runtime -> Collector MUST stay active while Strategy queues stay strictly at 0!
+            // Switch Strategy to OFF at runtime -> BACKUP closes (leaving 2 open CLOB sockets), Collector stays active, Strategy queues stay at 0!
             coordinator.switchStrategyMode(StrategyMode.OFF);
             assertThat(engine.getStrategyMode()).isEqualTo(StrategyMode.OFF);
             assertThat(clobClient.hasQueuedMarketFrames()).isFalse();
             assertThat(clobClient.hasQueuedUserFrames()).isFalse();
             assertThat(polyBoltClient.getStrategyQueueDepth()).isZero();
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(clobSockets.stream().filter(ws -> !ws.isClosed()).count()).isEqualTo(2L));
 
             // Push additional frames on CLOB and PolyBolt while Strategy is OFF
             for (ServerWebSocket ws : clobSockets) {

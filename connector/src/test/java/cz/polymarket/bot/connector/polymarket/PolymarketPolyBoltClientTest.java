@@ -36,7 +36,7 @@ class PolymarketPolyBoltClientTest {
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
-        marketWsRuntime = new MarketWebSocketRuntime();
+        marketWsRuntime = new MarketWebSocketRuntime(30L);
     }
 
     @AfterEach

@@ -8,7 +8,7 @@ import java.util.Map;
  *
  * @param symbol                             configured trading symbol (e.g. BTCUSDT)
  * @param timeframe                          configured Polymarket market timeframe (e.g. 15m)
- * @param lookaheadCount                     configured number of future Polymarket markets recorded ahead (default 2)
+ * @param lookaheadCount                     configured number of future Polymarket markets recorded ahead (default 1)
  * @param healthy                            whether all enabled collector streams are connected and persisting data
  * @param binanceSpotBookTickerEnabled       whether the Binance Spot {@code bookTicker} stream is enabled
  * @param binanceFuturesBookTickerEnabled    whether the Binance USD-M Futures {@code bookTicker} stream is enabled

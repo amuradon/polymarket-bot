@@ -18,7 +18,7 @@ Automated low-latency algorithmic trading platform for **Polymarket binary predi
 
 1. **`backtest` (`:8083`)**: High-throughput historical simulation over 1s snapshots and L2 tick data (Parquet/DuckDB) modeling slippage, market impact, exchange latency, and taker fees; evaluates Sharpe, Sortino, Win Rate, Profit Factor, and Max Drawdown.
 2. **`bot` (`:8080` locally / `:443` in AWS prod)**: Unified production Quarkus application combining:
-   - **Continuous Data Collector (`DataCollectorService`)**: Always records Polymarket PolyBolt (`price.crypto`, `price.crypto.twap`) and single-leg per-market CLOB streams (`current + lookahead-count`, default `lookahead-count = 2`) into `.jsonl.zst` archives on `CPU #0` (with optional Binance Spot/Futures `bookTicker` preserved and disabled by default).
+   - **Continuous Data Collector (`DataCollectorService`)**: Always records Polymarket PolyBolt (`price.crypto`, `price.crypto.twap`) and deduplicated per-market CLOB streams (`current + lookahead-count`, default `lookahead-count = 1`) into `.jsonl.zst` archives on `CPU #0` (with optional Binance Spot/Futures `bookTicker` preserved and disabled by default).
    - **Unified Strategy Engine (`StrategyTradingEngine`)**: Switchable at startup (`polymarket.strategy.mode`) or at runtime (`POST /api/mode`) between:
      - **`LIVE`**: Real-money execution on Polymarket CLOB (EIP-712 order signing, `POST /order`, `/ws/user` balance stream, `GET /balance-allowance`).
      - **`PAPER`**: Identical live market feeds routed to virtual order execution (`orderLatencyMs`, bestAsk price improvement / slippage checks, `PaperTradeRepository` persistence to `trades.jsonl` + `metrics.json`).
@@ -39,7 +39,7 @@ Automated low-latency algorithmic trading platform for **Polymarket binary predi
 - **Polymarket Connectors**:
   - `PolymarketGammaClient`: Market discovery via `GET /markets/slug/{slug}`.
   - `PolymarketPolyBoltClient`: Shared single-connection `price.crypto` and `price.crypto.twap` streams feeding Data Collector on `CPU #0` and lock-free `strategyQueue` on `CPU #2` when attached (`detachStrategyConsumer()` clears and bypasses `strategyQueue` in `OFF` mode).
-  - `PolymarketClobClient`: Strictly isolated single-leg Collector streams (`openCollectorMarketStream` -> `COLLECTOR-CLOB-<slug>`) vs. dual Active-Active deduplicated Strategy streams (`openMarketStreamBatch` -> `POLYMARKET-CLOB-<slug>` + `-BACKUP`) and `POLYMARKET-CLOB-USER`, guaranteeing zero duplicate collector records.
+  - `PolymarketClobClient`: Unifies per-market CLOB subscriptions (`POLYMARKET-CLOB-<slug>` + `-BACKUP` for the active strategy market, single-leg `POLYMARKET-CLOB-<slug>` for the `1` lookahead/resolving market -> max `3` CLOB market streams total) plus `POLYMARKET-CLOB-USER`, using independent lock-free queues and deduplicators on `CPU #0` (Collector) and `CPU #2` (Strategy) so zero duplicate records ever enter `.jsonl.zst`.
 - **Spot Exchange Connectors**: Dual multi-path `BinanceStreamConnector` (`startSpotAggTradesBatch` for strategy; `startBookTickerStreams` preserved for optional collector recording), lock-free `KrakenStreamConnector` (`USDTUSD` + `<SYMBOL>`), and `CoinbaseStreamConnector` (`matches`).
 
 ### `bot` (Unified Production Quarkus App — `:8080`)

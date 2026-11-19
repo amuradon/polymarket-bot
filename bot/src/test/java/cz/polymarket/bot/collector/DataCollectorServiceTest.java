@@ -46,7 +46,7 @@ class DataCollectorServiceTest {
         String activeSlug = PolymarketMarketInfo.buildMarketSlug(
                 "BTCUSDT", "15m", PolymarketMarketInfo.alignCycleStart(nowSec, 900L));
 
-        when(polymarketCoordinator.getLookaheadCount()).thenReturn(2);
+        when(polymarketCoordinator.getLookaheadCount()).thenReturn(1);
         when(polyBoltClient.getTwapState()).thenReturn(ConnectionState.CONNECTED);
         when(polyBoltClient.getCryptoPriceState()).thenReturn(ConnectionState.CONNECTED);
         when(polymarketCoordinator.getTrackedMarketSlugs()).thenReturn(List.of(activeSlug));
@@ -81,7 +81,7 @@ class DataCollectorServiceTest {
         when(polyBoltDailyStorage.getTotalRecordsWritten()).thenReturn(5L);
         CollectorStatusDto status = service.getStatus();
         assertThat(status.healthy()).isTrue();
-        assertThat(status.lookaheadCount()).isEqualTo(2);
+        assertThat(status.lookaheadCount()).isEqualTo(1);
         assertThat(status.binanceSpotBookTickerEnabled()).isFalse();
         assertThat(status.binanceFuturesBookTickerEnabled()).isFalse();
         assertThat(status.binanceStreams()).isEmpty();

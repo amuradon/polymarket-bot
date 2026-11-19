@@ -31,7 +31,7 @@ import static org.hamcrest.Matchers.nullValue;
 /**
  * Component test verifying that enabling {@code polymarket.collector.binance.spot-book-ticker-enabled}
  * and {@code polymarket.collector.binance.futures-book-ticker-enabled} collects and persists only the two
- * Binance {@code bookTicker} streams alongside PolyBolt and single-leg Polymarket CLOB ({@code lookahead-count = 2}).
+ * Binance {@code bookTicker} streams alongside PolyBolt and Polymarket CLOB ({@code lookahead-count = 1}).
  */
 @QuarkusTest
 @QuarkusTestResource(value = MockMarketStreamsTestResource.class, restrictToAnnotatedClass = true)
@@ -61,7 +61,7 @@ class CollectorBookTickerEnabledTest {
     String dataDir;
 
     @Test
-    void shouldCollectSpotAndFuturesBookTickerAlongsideThreeLookaheadPolymarketMarketsInOffMode() throws Exception {
+    void shouldCollectSpotAndFuturesBookTickerAlongsideCurrentPlusOneLookaheadPolymarketMarketInOffMode() throws Exception {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(10))
                 .untilAsserted(() -> given()
@@ -69,7 +69,7 @@ class CollectorBookTickerEnabledTest {
                         .then()
                         .statusCode(200)
                         .body("healthy", equalTo(true))
-                        .body("lookaheadCount", equalTo(2))
+                        .body("lookaheadCount", equalTo(1))
                         .body("binanceSpotBookTickerEnabled", equalTo(true))
                         .body("binanceFuturesBookTickerEnabled", equalTo(true))
                         .body("binanceStreams.SPOT_BOOK_TICKER", equalTo("CONNECTED"))
@@ -78,10 +78,10 @@ class CollectorBookTickerEnabledTest {
                         .body("binanceStreams.FUTURES_AGG_TRADES", nullValue())
                         .body("polymarketPolyBoltTwapState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltCryptoPriceState", equalTo("CONNECTED"))
-                        .body("trackedPolymarketSlugs", hasSize(3))
+                        .body("trackedPolymarketSlugs", hasSize(2))
                         .body("binanceRecordsWritten", greaterThanOrEqualTo(2))
                         .body("polyBoltRecordsWritten", greaterThanOrEqualTo(2))
-                        .body("polymarketRecordsWritten", greaterThanOrEqualTo(9)));
+                        .body("polymarketRecordsWritten", greaterThanOrEqualTo(6)));
 
         // /api/health must also return 200 OK in OFF mode while Collector is healthy
         given()
@@ -103,8 +103,8 @@ class CollectorBookTickerEnabledTest {
             zstFiles = walk.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
         }
 
-        // 2 daily Binance bookTicker + 2 daily PolyBolt + 3 Polymarket (current + 2 lookahead) = 7 .jsonl.zst files
-        assertThat(zstFiles).hasSize(7);
+        // 2 daily Binance bookTicker + 2 daily PolyBolt + 2 Polymarket (current + 1 lookahead) = 6 .jsonl.zst files
+        assertThat(zstFiles).hasSize(6);
         assertThat(Files.exists(root.resolve("binance/spot/BTCUSDT/aggTrades"))).isFalse();
 
         Path spotBookTickerDir = root.resolve("binance/spot/BTCUSDT/bookTicker");

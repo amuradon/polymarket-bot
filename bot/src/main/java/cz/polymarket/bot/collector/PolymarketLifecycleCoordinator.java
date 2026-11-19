@@ -22,9 +22,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Coordinates the lifecycle of Polymarket prediction markets for the Data Collector, maintaining single-leg
- * {@code COLLECTOR-CLOB-<slug>} WebSocket connections to the current market and {@code lookahead-count}
- * (default {@code 2}) future markets.
+ * Coordinates the lifecycle of Polymarket prediction markets for the Data Collector, maintaining CLOB
+ * archival recording across the current market (sharing {@code POLYMARKET-CLOB-<slug>} + {@code -BACKUP}
+ * with Strategy without archive duplication) and {@code lookahead-count} (default {@code 1}) future market
+ * (single-leg {@code POLYMARKET-CLOB-<slug>}, keeping total CLOB market streams bounded to at most {@code 3}).
  * <p>
  * Records all raw CLOB WebSocket messages as UTF-8 {@code byte[]} directly to Zstandard storage on {@code CPU #0}
  * without JSON parsing, avoids writing duplicate {@code market_discovered} records when appending across restarts,
@@ -61,7 +62,7 @@ public class PolymarketLifecycleCoordinator {
      * @param polymarketStorage per-market Zstd storage manager
      * @param symbol            configured asset symbol (e.g. BTCUSDT)
      * @param timeframe         configured Polymarket timeframe (e.g. 15m)
-     * @param lookaheadCount    number of future markets to record ahead of the current market (default 2)
+     * @param lookaheadCount    number of future markets to record ahead of the current market (default 1)
      */
     @Inject
     public PolymarketLifecycleCoordinator(
@@ -72,7 +73,7 @@ public class PolymarketLifecycleCoordinator {
             String symbol,
             @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
             String timeframe,
-            @ConfigProperty(name = "polymarket.collector.lookahead-count", defaultValue = "2")
+            @ConfigProperty(name = "polymarket.collector.lookahead-count", defaultValue = "1")
             int lookaheadCount) {
         this.gammaClient = gammaClient;
         this.clobClient = clobClient;
@@ -267,6 +268,9 @@ public class PolymarketLifecycleCoordinator {
             }
         } else {
             Log.infof("Polymarket market %s closed by server; market archive finalized.", slug);
+        }
+        if (this.lastRefreshEpochSec > 0L) {
+            discoverAndRefreshMarkets(currentEpochSec());
         }
     }
 

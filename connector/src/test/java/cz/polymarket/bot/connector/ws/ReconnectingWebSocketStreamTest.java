@@ -891,19 +891,114 @@ class ReconnectingWebSocketStreamTest {
     }
 
     @Test
-    void shouldSelectDeterministicDistinctIpv4AddressesPerSlotAndParseLinuxCpuRanges() {
-        List<String> pool = List.of("3.162.140.12", "3.162.140.46", "3.162.140.82", "3.162.140.91");
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 0, 0)).isEqualTo("3.162.140.12");
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 1, 0)).isEqualTo("3.162.140.46");
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 0, 1)).isEqualTo("3.162.140.46");
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, 1, 1)).isEqualTo("3.162.140.82");
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(List.of(), 0, 0)).isNull();
-        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool, -1, 0)).isNull();
+    void shouldSelectDistinctSiblingAwareIpv4AddressesAndAvoidPeerCollisionOnReconnect() {
+        List<String> pool4 = List.of("3.162.140.12", "3.162.140.46", "3.162.140.82", "3.162.140.91");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool4, 0, 0, null, null)).isEqualTo("3.162.140.12");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool4, 1, 0, "3.162.140.12", null)).isEqualTo("3.162.140.46");
+        // When PRIMARY (slot 0) reconnects (attempt 1) after failing on .12 while BACKUP is active on .46,
+        // it MUST skip both .46 (peer) and .12 (failed) and land on .82!
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool4, 0, 1, "3.162.140.46", "3.162.140.12"))
+                .isEqualTo("3.162.140.82");
+
+        // In a 2-IP pool, PRIMARY and BACKUP must still never share the same IP even after reconnect
+        List<String> pool2 = List.of("18.65.194.12", "18.65.194.47");
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool2, 0, 1, "18.65.194.47", "18.65.194.12"))
+                .isEqualTo("18.65.194.12");
+
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(List.of(), 0, 0, null, null)).isNull();
+        assertThat(MarketWebSocketRuntime.selectIpv4ForSlot(pool4, -1, 0, null, null)).isNull();
+
+        MarketWebSocketRuntime proxyInstance = new MarketWebSocketRuntime();
+        assertThat(proxyInstance.vertx()).isNull();
+        assertThat(proxyInstance.getIoReaderThread()).isNull();
 
         assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0-3")).isEqualTo(4);
         assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0-1\n")).isEqualTo(2);
         assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("0,2-5")).isEqualTo(5);
         assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount("")).isZero();
         assertThat(cz.polymarket.bot.connector.os.LinuxCpuAffinity.parseOnlineCpuCount(null)).isZero();
+    }
+
+    @Test
+    void shouldConnectPrimaryAndBackupToDistinctEdgeIpv4SocketsPreservingHostHeaderAndRotateWithoutPeerCollision() throws Exception {
+        List<String> observedServerLocalIps = new CopyOnWriteArrayList<>();
+        List<String> observedHostHeaders = new CopyOnWriteArrayList<>();
+        AtomicBoolean droppedInitialPrimary = new AtomicBoolean(false);
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    String localIp = ws.localAddress().hostAddress();
+                    observedServerLocalIps.add(localIp);
+                    String hostHeader = ws.headers().get("Host");
+                    if (hostHeader != null) {
+                        observedHostHeaders.add(hostHeader);
+                    }
+                    ws.textMessageHandler(msg -> {
+                        ws.writeTextMessage("{\"edge\":\"" + localIp + "\"}");
+                        if ("127.0.0.1".equals(localIp) && droppedInitialPrimary.compareAndSet(false, true)) {
+                            vertx.setTimer(25L, id -> ws.close((short) 1013, "slow consumer"));
+                        }
+                    });
+                });
+
+        int port = server.listen(0, "0.0.0.0").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String logicalHost = "ws-subscriptions-clob.polymarket.com";
+        String wsUrl = "ws://" + logicalHost + ":" + port + "/ws/market";
+
+        MarketWebSocketRuntime slotRuntime = new MarketWebSocketRuntime(30L) {
+            @Override
+            List<String> lookupSortedIpv4Addresses(String host) {
+                return List.of("127.0.0.1", "127.0.0.2", "127.0.0.3");
+            }
+        };
+
+        ReconnectingWebSocketStream[] primaryHolder = new ReconnectingWebSocketStream[1];
+        ReconnectingWebSocketStream[] backupHolder = new ReconnectingWebSocketStream[1];
+        List<String> receivedPayloads = new CopyOnWriteArrayList<>();
+
+        ReconnectingWebSocketStream primary = new ReconnectingWebSocketStream(
+                slotRuntime.vertx(),
+                "TEST-PRIMARY",
+                wsUrl,
+                () -> List.of("{\"type\":\"market\"}"),
+                (rawJson, ts) -> receivedPayloads.add(rawJson),
+                60L,
+                0L
+        );
+        ReconnectingWebSocketStream backup = new ReconnectingWebSocketStream(
+                slotRuntime.vertx(),
+                "TEST-BACKUP",
+                wsUrl,
+                () -> List.of("{\"type\":\"market\"}"),
+                (rawJson, ts) -> receivedPayloads.add(rawJson),
+                60L,
+                0L
+        );
+        primaryHolder[0] = primary;
+        backupHolder[0] = backup;
+        primary.setPreferredAddressSlot(slotRuntime, 0, () -> backupHolder[0].getActiveOrPendingRemoteIp());
+        backup.setPreferredAddressSlot(slotRuntime, 1, () -> primaryHolder[0].getActiveOrPendingRemoteIp());
+
+        try {
+            primary.start();
+            backup.start();
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        // PRIMARY starts on 127.0.0.1, BACKUP starts on 127.0.0.2; after 127.0.0.1 drops,
+                        // PRIMARY skips BACKUP's active 127.0.0.2 and lands on 127.0.0.3!
+                        assertThat(primary.getState()).isEqualTo(ConnectionState.CONNECTED);
+                        assertThat(backup.getState()).isEqualTo(ConnectionState.CONNECTED);
+                        assertThat(backup.getRemoteAddress()).isEqualTo("127.0.0.2:" + port);
+                        assertThat(primary.getRemoteAddress()).isEqualTo("127.0.0.3:" + port);
+                        assertThat(observedServerLocalIps).contains("127.0.0.1", "127.0.0.2", "127.0.0.3");
+                        assertThat(observedHostHeaders).allMatch(h -> h.startsWith(logicalHost));
+                    });
+        } finally {
+            primary.stop();
+            backup.stop();
+            slotRuntime.destroy();
+        }
     }
 }

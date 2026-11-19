@@ -145,7 +145,7 @@ class DashboardResourceTest {
                 .when().get("/api/collector/status")
                 .then()
                 .statusCode(200)
-                .body("lookaheadCount", equalTo(2))
+                .body("lookaheadCount", equalTo(1))
                 .body("binanceSpotBookTickerEnabled", equalTo(false))
                 .body("binanceFuturesBookTickerEnabled", equalTo(false));
     }

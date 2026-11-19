@@ -1,5 +1,6 @@
 package cz.polymarket.bot.connector.polymarket;
 
+import cz.polymarket.bot.connector.os.LinuxCpuAffinity;
 import cz.polymarket.bot.connector.polymarket.auth.PolymarketCredentials;
 import cz.polymarket.bot.connector.ws.ConnectionState;
 import cz.polymarket.bot.connector.ws.MarketWebSocketRuntime;
@@ -16,6 +17,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jctools.queues.MpscUnboundedArrayQueue;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -26,6 +28,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -34,15 +38,18 @@ import java.util.stream.Collectors;
  * Resilient WebSocket client for Polymarket CLOB ({@code wss://ws-subscriptions-clob.polymarket.com/ws/market}
  * and {@code wss://ws-subscriptions-clob.polymarket.com/ws/user}).
  * <p>
- * Strictly isolates two independent market-stream lifecycles on {@link MarketWebSocketRuntime} ({@code CPU #1}):
+ * Unifies market WebSocket subscriptions on {@link MarketWebSocketRuntime} ({@code CPU #1}) so Data Collector
+ * and Strategy share active market connections without redundant sockets or duplicate archive records:
  * <ul>
- *   <li><b>Data Collector streams ({@code COLLECTOR-CLOB-<slug>})</b>: Single-leg raw streams for the current
- *       market plus {@code lookahead-count} future markets, drained exclusively on {@code CPU #0} and kept open
- *       until server-side {@code closeCode == 1000} resolution with zero duplication.</li>
- *   <li><b>Strategy hot-path streams ({@code POLYMARKET-CLOB-<slug>} + {@code -BACKUP})</b>: Dual Active-Active
- *       connections pinned to distinct CloudFront edge IPv4 slots ({@code 0} and {@code 1}) with pre-parse
- *       fingerprint deduplication, bound to {@code market-strategy-worker} ({@code CPU #2}) when strategy mode
- *       is {@code LIVE} or {@code PAPER}, and completely closed with empty queues when strategy mode is {@code OFF}.</li>
+ *   <li><b>Active trading market ({@code LIVE} / {@code PAPER})</b>: 2 connections
+ *       ({@code POLYMARKET-CLOB-<slug>} on edge IPv4 {@code slot 0} + {@code POLYMARKET-CLOB-<slug>-BACKUP}
+ *       on distinct edge IPv4 {@code slot 1}), feeding Strategy ({@code CPU #2}) and Data Collector
+ *       ({@code CPU #0}) through completely independent lock-free queues and independent
+ *       {@link PayloadDeduplicator} instances (zero lock contention and zero duplicate lines in {@code .jsonl.zst}).</li>
+ *   <li><b>Lookahead / post-end resolving market (and all markets in {@code OFF} mode)</b>: 1 single-leg
+ *       connection ({@code POLYMARKET-CLOB-<slug>}) with Strategy queue disabled, keeping total CLOB market
+ *       connections bounded to at most {@code 3} ({@code 2} active + {@code 1} lookahead/resolving) in
+ *       {@code LIVE}/{@code PAPER} and {@code 2} in {@code OFF}.</li>
  * </ul>
  */
 @ApplicationScoped
@@ -53,16 +60,29 @@ public class PolymarketClobClient {
      */
     public static final String USER_STREAM_KEY = "USER";
 
+    private static final int COLLECTOR_QUEUE_CHUNK_SIZE = 1024;
+    private static final int COLLECTOR_DRAIN_BATCH_LIMIT = 512;
+
+    private record CollectorQueueItem(
+            SharedMarketSubscription subscription,
+            TimestampedFrame frame,
+            WebSocketStreamTelemetry terminalCloseTelemetry
+    ) {
+    }
+
     private final Vertx sharedVertx;
     private final MarketWebSocketRuntime marketWsRuntime;
     private final String wsUrl;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
 
-    private final Map<String, ReconnectingWebSocketStream> collectorMarketStreams = new ConcurrentHashMap<>();
-    private final Map<String, ReconnectingWebSocketStream> marketStreams = new ConcurrentHashMap<>();
-    private final Map<String, ReconnectingWebSocketStream> backupMarketStreams = new ConcurrentHashMap<>();
-    private final Map<String, PayloadDeduplicator> marketDeduplicators = new ConcurrentHashMap<>();
+    private final Map<String, SharedMarketSubscription> marketSubscriptions = new ConcurrentHashMap<>();
+    private final MpscUnboundedArrayQueue<CollectorQueueItem> collectorEventQueue =
+            new MpscUnboundedArrayQueue<>(COLLECTOR_QUEUE_CHUNK_SIZE);
+    private final AtomicBoolean collectorWorkerRunning = new AtomicBoolean(false);
+    private final AtomicBoolean collectorWorkerParked = new AtomicBoolean(true);
+    private volatile Thread collectorWorkerThread;
+
     private volatile ReconnectingWebSocketStream userStream;
     private volatile WebSocketDisconnectListener disconnectListener;
 
@@ -122,21 +142,18 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Registers a listener notified whenever any active CLOB collector, strategy market, or user stream
-     * disconnects unexpectedly.
+     * Registers a listener notified whenever any active CLOB market or user stream disconnects unexpectedly.
      *
      * @param disconnectListener listener invoked with the stream telemetry snapshot at the moment of disconnect
      */
     public synchronized void setDisconnectListener(WebSocketDisconnectListener disconnectListener) {
         this.disconnectListener = disconnectListener;
-        for (ReconnectingWebSocketStream collectorStream : collectorMarketStreams.values()) {
-            collectorStream.setDisconnectListener(disconnectListener);
-        }
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            stream.setDisconnectListener(disconnectListener);
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            backup.setDisconnectListener(disconnectListener);
+        for (SharedMarketSubscription sub : marketSubscriptions.values()) {
+            sub.primaryStream.setDisconnectListener(disconnectListener);
+            ReconnectingWebSocketStream backup = sub.backupStream;
+            if (backup != null) {
+                backup.setDisconnectListener(disconnectListener);
+            }
         }
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
@@ -145,13 +162,13 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Opens a dedicated single-leg Data Collector CLOB WebSocket connection ({@code COLLECTOR-CLOB-<slug>})
-     * for a market subscribed to its token IDs, forwarding all raw frames directly to {@code listener} on
-     * {@code CPU #0} without JSON parsing and completely isolated from Strategy's dual streams.
+     * Attaches Data Collector archival recording ({@code CPU #0}) to {@code marketSlug}, opening
+     * {@code POLYMARKET-CLOB-<slug>} if not already open or sharing the active market's connection(s)
+     * with deduplicated zero-copy fan-out so zero duplicate records are ever written to {@code .jsonl.zst}.
      *
      * @param marketSlug              Polymarket market slug
      * @param tokenIds                CLOB asset token IDs belonging to the market
-     * @param listener                listener receiving raw JSON frames and receipt timestamps
+     * @param listener                listener receiving deduplicated raw JSON frames and receipt timestamps
      * @param normalCloseListener     optional listener invoked upon terminal stream closure ({@code closeCode == 1000} or post-end)
      * @param shouldReconnectSupplier optional supplier returning {@code true} if reconnection is allowed on disconnect
      */
@@ -164,95 +181,82 @@ public class PolymarketClobClient {
         if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
             return;
         }
-        if (collectorMarketStreams.containsKey(marketSlug)) {
+        ensureCollectorWorkerStarted();
+        SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+        if (sub != null && sub.collectorAttached) {
             return;
         }
-        String subPayload = buildSubscriptionPayload(tokenIds);
-        RawWebSocketListener delegatingListener = new RawWebSocketListener() {
-            @Override
-            public void onMessage(String rawJson, long recvTs) {
-                if (listener != null && rawJson != null && !rawJson.isBlank()) {
-                    listener.onMessage(rawJson, recvTs);
-                }
-            }
-
-            @Override
-            public void onMessageBytes(TimestampedFrame frame) {
-                if (listener != null && frame != null) {
-                    listener.onMessageBytes(frame);
-                }
-            }
-        };
-        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
-                marketWsRuntime.vertx(),
-                "COLLECTOR-CLOB-" + marketSlug,
-                wsUrl,
-                () -> List.of(subPayload),
-                delegatingListener,
-                reconnectDelayMs,
-                pingIntervalMs,
-                "PING"
-        );
-        stream.setDisconnectListener(this.disconnectListener);
-        stream.setShouldReconnectSupplier(shouldReconnectSupplier);
-        if (normalCloseListener != null) {
-            stream.setNormalCloseListener(telemetry -> {
-                collectorMarketStreams.remove(marketSlug, stream);
-                normalCloseListener.accept(telemetry);
-            });
+        if (sub == null) {
+            sub = createSharedMarketSubscription(marketSlug, tokenIds);
+            marketSubscriptions.put(marketSlug, sub);
         }
-        collectorMarketStreams.put(marketSlug, stream);
-        Log.infof("Opening Collector Polymarket CLOB WebSocket stream for market %s (tokens=%d)", marketSlug, tokenIds.size());
-        stream.start();
+        sub.attachCollector(listener, normalCloseListener, shouldReconnectSupplier);
+        if (!sub.primaryStarted) {
+            sub.primaryStarted = true;
+            Log.infof("Opening Polymarket CLOB WebSocket stream for market %s (tokens=%d, mode=collector)", marketSlug, tokenIds.size());
+            sub.primaryStream.start();
+        } else {
+            Log.infof("Attached Data Collector to existing Polymarket CLOB stream for market %s", marketSlug);
+        }
     }
 
     /**
-     * Closes and removes the single-leg Data Collector CLOB WebSocket stream for a completed market
-     * without affecting Strategy streams.
+     * Detaches Data Collector recording from {@code marketSlug}, closing {@code POLYMARKET-CLOB-<slug>}
+     * only if Strategy is not currently subscribed to {@code marketSlug}.
      *
-     * @param marketSlug Polymarket market slug to disconnect
+     * @param marketSlug Polymarket market slug
      */
     public synchronized void closeCollectorMarketStream(String marketSlug) {
         if (marketSlug == null) {
             return;
         }
-        ReconnectingWebSocketStream collectorStream = collectorMarketStreams.remove(marketSlug);
-        if (collectorStream != null) {
-            Log.infof("Closing Collector Polymarket CLOB WebSocket stream for market %s", marketSlug);
-            collectorStream.stop();
+        SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+        if (sub == null) {
+            return;
+        }
+        sub.detachCollector();
+        if (!sub.strategyAttached) {
+            marketSubscriptions.remove(marketSlug, sub);
+            Log.infof("Closing Polymarket CLOB WebSocket stream for market %s", marketSlug);
+            sub.stopAllStreams();
         }
     }
 
     /**
-     * Stops all active Data Collector CLOB WebSocket streams without touching Strategy streams.
+     * Detaches Data Collector from all tracked markets and closes any market streams not currently used by Strategy.
      */
     public synchronized void stopAllCollectorStreams() {
-        for (String slug : List.copyOf(collectorMarketStreams.keySet())) {
+        for (String slug : List.copyOf(marketSubscriptions.keySet())) {
             closeCollectorMarketStream(slug);
         }
     }
 
     /**
-     * Returns an unmodifiable snapshot of the connection states of all active Data Collector CLOB streams.
+     * Returns an unmodifiable snapshot of the effective connection states of all collector-attached CLOB market streams.
+     * When an active market also has a {@code BACKUP} leg open, reports {@link ConnectionState#CONNECTED} as long as
+     * either leg is connected.
      *
-     * @return map of market slug to {@link ConnectionState}
+     * @return map of market slug to effective {@link ConnectionState}
      */
     public Map<String, ConnectionState> getCollectorConnectionStates() {
         Map<String, ConnectionState> states = new LinkedHashMap<>();
-        collectorMarketStreams.forEach((slug, stream) -> states.put(slug, stream.getState()));
+        marketSubscriptions.forEach((slug, sub) -> {
+            if (sub.collectorAttached) {
+                states.put(slug, sub.effectiveState());
+            }
+        });
         return Collections.unmodifiableMap(states);
     }
 
     /**
-     * Opens a dual Active-Active pair of Strategy CLOB WebSocket connections ({@code PRIMARY} on edge IPv4 {@code slot 0}
-     * and {@code BACKUP} on edge IPv4 {@code slot 1}) for a single market with pre-parse {@code rawUtf8Bytes}
-     * fingerprint deduplication and batch-draining listener support, optionally bound to an external dedicated
-     * worker thread (e.g. {@code market-strategy-worker}).
+     * Attaches Strategy ({@code CPU #2}) to {@code marketSlug}, reusing {@code POLYMARKET-CLOB-<slug>} if already
+     * opened by Data Collector (or starting it on edge IPv4 {@code slot 0}) and opening the sibling
+     * {@code POLYMARKET-CLOB-<slug>-BACKUP} connection on distinct edge IPv4 {@code slot 1}.
      *
      * @param marketSlug     Polymarket market slug
      * @param tokenIds       CLOB asset token IDs belonging to the market
-     * @param batchListener  listener invoked with deduplicated chronological frame batches
-     * @param externalWorker optional dedicated platform worker thread to unpark on frame arrival
+     * @param batchListener  listener invoked with deduplicated chronological frame batches on {@code CPU #2}
+     * @param externalWorker optional dedicated platform worker thread ({@code market-strategy-worker})
      */
     public synchronized void openMarketStreamBatch(
             String marketSlug,
@@ -262,103 +266,58 @@ public class PolymarketClobClient {
         if (marketSlug == null || marketSlug.isBlank() || tokenIds == null || tokenIds.isEmpty()) {
             return;
         }
-        if (marketStreams.containsKey(marketSlug)) {
+        SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+        if (sub != null && sub.strategyAttached) {
             return;
         }
-        String subPayload = buildSubscriptionPayload(tokenIds);
-        PayloadDeduplicator deduplicator = new PayloadDeduplicator();
-        marketDeduplicators.put(marketSlug, deduplicator);
-
-        ReconnectingWebSocketStream[] primaryHolder = new ReconnectingWebSocketStream[1];
-        ReconnectingWebSocketStream[] backupHolder = new ReconnectingWebSocketStream[1];
-
-        RawWebSocketBatchListener primaryDedupListener = batch ->
-                dispatchDeduplicatedBatch(batch, primaryHolder[0], deduplicator, batchListener);
-        RawWebSocketBatchListener backupDedupListener = batch ->
-                dispatchDeduplicatedBatch(batch, backupHolder[0], deduplicator, batchListener);
-
-        ReconnectingWebSocketStream primaryStream = new ReconnectingWebSocketStream(
-                marketWsRuntime.vertx(),
-                "POLYMARKET-CLOB-" + marketSlug,
-                wsUrl,
-                () -> List.of(subPayload),
-                null,
-                primaryDedupListener,
-                reconnectDelayMs,
-                pingIntervalMs,
-                "PING"
-        );
-        primaryHolder[0] = primaryStream;
-        primaryStream.setPreferredAddressSlot(marketWsRuntime, 0);
-        primaryStream.setDisconnectListener(this.disconnectListener);
-
-        ReconnectingWebSocketStream backupStream = new ReconnectingWebSocketStream(
-                marketWsRuntime.vertx(),
-                "POLYMARKET-CLOB-" + marketSlug + "-BACKUP",
-                wsUrl,
-                () -> List.of(subPayload),
-                null,
-                backupDedupListener,
-                reconnectDelayMs,
-                pingIntervalMs,
-                "PING"
-        );
-        backupHolder[0] = backupStream;
-        backupStream.setPreferredAddressSlot(marketWsRuntime, 1);
-        backupStream.setDisconnectListener(this.disconnectListener);
-
-        if (externalWorker != null) {
-            primaryStream.bindExternalWorker(externalWorker);
-            backupStream.bindExternalWorker(externalWorker);
+        boolean createdNew = false;
+        if (sub == null) {
+            sub = createSharedMarketSubscription(marketSlug, tokenIds);
+            marketSubscriptions.put(marketSlug, sub);
+            createdNew = true;
         }
-        marketStreams.put(marketSlug, primaryStream);
-        backupMarketStreams.put(marketSlug, backupStream);
-        Log.infof("Opening dual Active-Active Strategy Polymarket CLOB WebSocket streams for market %s (tokens=%d, edgeSlots=0/1)",
-                marketSlug, tokenIds.size());
-        primaryStream.start();
-        backupStream.start();
-    }
 
-    private static void dispatchDeduplicatedBatch(
-            List<TimestampedFrame> batch,
-            ReconnectingWebSocketStream sourceStream,
-            PayloadDeduplicator deduplicator,
-            RawWebSocketBatchListener delegate) {
-        if (delegate == null || batch == null || batch.isEmpty()) {
-            return;
+        ReconnectingWebSocketStream backup = createBackupStream(sub);
+        sub.attachStrategy(batchListener, externalWorker, backup);
+
+        if (!sub.primaryStarted) {
+            sub.primaryStarted = true;
+            Log.infof("Opening dual Active-Active Polymarket CLOB WebSocket streams for market %s (tokens=%d, edgeSlots=0/1)",
+                    marketSlug, tokenIds.size());
+            sub.primaryStream.start();
+        } else if (!createdNew) {
+            Log.infof("Promoting existing Polymarket CLOB stream %s to dual Active-Active (opening BACKUP on edgeSlot=1)",
+                    marketSlug);
         }
-        synchronized (deduplicator) {
-            int duplicatesSkipped = deduplicator.filterUniqueInPlace(batch);
-            if (duplicatesSkipped > 0 && sourceStream != null) {
-                sourceStream.addCoalescedFrames(duplicatesSkipped);
-            }
-            if (!batch.isEmpty()) {
-                delegate.onMessageBatch(batch);
-            }
-        }
+        backup.start();
     }
 
     /**
-     * Disconnects and removes both primary and backup Strategy CLOB WebSocket streams for a market
-     * without affecting Data Collector streams.
+     * Detaches Strategy from {@code marketSlug} and immediately closes {@code POLYMARKET-CLOB-<slug>-BACKUP}.
+     * If Data Collector is still recording {@code marketSlug} (e.g. awaiting post-end {@code code=1000} resolution
+     * or switching Strategy to {@code OFF}), {@code POLYMARKET-CLOB-<slug>} remains open with Strategy queueing disabled.
      *
-     * @param marketSlug Polymarket market slug to disconnect
+     * @param marketSlug Polymarket market slug to detach from Strategy
      */
     public synchronized void closeMarketStream(String marketSlug) {
         if (marketSlug == null) {
             return;
         }
-        marketDeduplicators.remove(marketSlug);
-        ReconnectingWebSocketStream primary = marketStreams.remove(marketSlug);
-        ReconnectingWebSocketStream backup = backupMarketStreams.remove(marketSlug);
-        if (primary != null || backup != null) {
-            Log.infof("Closing Strategy Polymarket CLOB WebSocket stream(s) for market %s", marketSlug);
+        SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+        if (sub == null || !sub.strategyAttached) {
+            return;
         }
-        if (primary != null) {
-            primary.stop();
+        ReconnectingWebSocketStream removedBackup = sub.detachStrategy();
+        if (removedBackup != null) {
+            removedBackup.stop();
         }
-        if (backup != null) {
-            backup.stop();
+        if (sub.collectorAttached) {
+            Log.infof("Detached Strategy from Polymarket CLOB market %s (closed BACKUP; keeping single PRIMARY leg for Collector)",
+                    marketSlug);
+        } else {
+            marketSubscriptions.remove(marketSlug, sub);
+            Log.infof("Closing Polymarket CLOB WebSocket stream(s) for market %s", marketSlug);
+            sub.stopAllStreams();
         }
     }
 
@@ -416,37 +375,42 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Stops and clears all active Strategy market and user CLOB streams (used when switching Strategy to {@code OFF})
-     * while leaving all Data Collector CLOB streams running uninterrupted.
+     * Stops all Strategy market attachments (closing all {@code -BACKUP} legs and clearing Strategy queues)
+     * and closes the User stream while leaving Data Collector's single-leg {@code PRIMARY} streams running uninterrupted.
      */
     public synchronized void stopAllStrategyStreams() {
-        for (String slug : List.copyOf(marketStreams.keySet())) {
+        for (String slug : List.copyOf(marketSubscriptions.keySet())) {
             closeMarketStream(slug);
         }
         closeUserStream();
     }
 
     /**
-     * Disconnects all active Strategy, User, and Data Collector CLOB WebSocket streams.
+     * Disconnects all active Strategy, User, and Data Collector CLOB WebSocket streams and stops the collector worker.
      */
     public synchronized void stopAll() {
         stopAllStrategyStreams();
         stopAllCollectorStreams();
+        stopCollectorWorker();
     }
 
     /**
-     * Drains all currently queued frames across active Strategy primary and backup market CLOB streams into {@code scratchBatch}.
+     * Drains all currently queued Strategy frames across active primary and backup market CLOB streams into {@code scratchBatch}.
      *
      * @param scratchBatch reusable pre-allocated list owned by the caller
      * @return total number of frames drained
      */
     public int drainMarketStreams(List<TimestampedFrame> scratchBatch) {
         int total = 0;
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            total += stream.drainAvailableBatch(scratchBatch);
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            total += backup.drainAvailableBatch(scratchBatch);
+        for (SharedMarketSubscription sub : marketSubscriptions.values()) {
+            if (!sub.strategyAttached) {
+                continue;
+            }
+            total += sub.primaryStream.drainAvailableBatch(scratchBatch);
+            ReconnectingWebSocketStream backup = sub.backupStream;
+            if (backup != null) {
+                total += backup.drainAvailableBatch(scratchBatch);
+            }
         }
         return total;
     }
@@ -468,13 +432,15 @@ public class PolymarketClobClient {
      * @return {@code true} if any strategy market stream queue is non-empty
      */
     public boolean hasQueuedMarketFrames() {
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            if (stream.hasQueuedFrames()) {
+        for (SharedMarketSubscription sub : marketSubscriptions.values()) {
+            if (!sub.strategyAttached) {
+                continue;
+            }
+            if (sub.primaryStream.hasQueuedFrames()) {
                 return true;
             }
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            if (backup.hasQueuedFrames()) {
+            ReconnectingWebSocketStream backup = sub.backupStream;
+            if (backup != null && backup.hasQueuedFrames()) {
                 return true;
             }
         }
@@ -488,13 +454,15 @@ public class PolymarketClobClient {
      * @return {@code true} if frames arrived concurrently and parking must be aborted
      */
     public boolean prepareMarketStreamsToPark() {
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            if (stream.prepareToParkAndCheckQueuedFrames()) {
+        for (SharedMarketSubscription sub : marketSubscriptions.values()) {
+            if (!sub.strategyAttached) {
+                continue;
+            }
+            if (sub.primaryStream.prepareToParkAndCheckQueuedFrames()) {
                 return true;
             }
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            if (backup.prepareToParkAndCheckQueuedFrames()) {
+            ReconnectingWebSocketStream backup = sub.backupStream;
+            if (backup != null && backup.prepareToParkAndCheckQueuedFrames()) {
                 return true;
             }
         }
@@ -532,9 +500,9 @@ public class PolymarketClobClient {
         if (marketSlug == null || delta <= 0L) {
             return;
         }
-        ReconnectingWebSocketStream stream = marketStreams.get(marketSlug);
-        if (stream != null) {
-            stream.addCoalescedFrames(delta);
+        SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+        if (sub != null && sub.strategyAttached) {
+            sub.primaryStream.addCoalescedFrames(delta);
         }
     }
 
@@ -547,19 +515,10 @@ public class PolymarketClobClient {
      */
     public Map<String, ConnectionState> getConnectionStates() {
         Map<String, ConnectionState> states = new LinkedHashMap<>();
-        marketStreams.forEach((slug, primary) -> {
-            ConnectionState primaryState = primary.getState();
-            ConnectionState effectiveState = primaryState;
-            if (primaryState != ConnectionState.CONNECTED) {
-                ReconnectingWebSocketStream backup = backupMarketStreams.get(slug);
-                if (backup != null) {
-                    ConnectionState backupState = backup.getState();
-                    if (backupState == ConnectionState.CONNECTED || primaryState == ConnectionState.DISCONNECTED) {
-                        effectiveState = backupState;
-                    }
-                }
+        marketSubscriptions.forEach((slug, sub) -> {
+            if (sub.strategyAttached) {
+                states.put(slug, sub.effectiveState());
             }
-            states.put(slug, effectiveState);
         });
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
@@ -569,32 +528,31 @@ public class PolymarketClobClient {
     }
 
     /**
-     * Returns telemetry snapshots for all active Strategy (primary, backup, user) and Data Collector CLOB streams.
+     * Returns telemetry snapshots for all open CLOB streams ({@code PRIMARY} for active + lookahead markets,
+     * {@code BACKUP} for the active Strategy market, and {@code USER} in {@code LIVE} mode).
      *
      * @return list of {@link WebSocketStreamTelemetry} snapshots
      */
     public List<WebSocketStreamTelemetry> getStreamTelemetries() {
-        List<WebSocketStreamTelemetry> result = new ArrayList<>(
-                marketStreams.size() + backupMarketStreams.size() + collectorMarketStreams.size() + 1);
-        for (ReconnectingWebSocketStream stream : marketStreams.values()) {
-            result.add(stream.getTelemetrySnapshot());
-        }
-        for (ReconnectingWebSocketStream backup : backupMarketStreams.values()) {
-            result.add(backup.getTelemetrySnapshot());
+        List<WebSocketStreamTelemetry> result = new ArrayList<>(marketSubscriptions.size() * 2 + 1);
+        for (SharedMarketSubscription sub : marketSubscriptions.values()) {
+            result.add(sub.primaryStream.getTelemetrySnapshot());
+            ReconnectingWebSocketStream backup = sub.backupStream;
+            if (backup != null) {
+                result.add(backup.getTelemetrySnapshot());
+            }
         }
         ReconnectingWebSocketStream currentUser = this.userStream;
         if (currentUser != null) {
             result.add(currentUser.getTelemetrySnapshot());
         }
-        for (ReconnectingWebSocketStream collectorStream : collectorMarketStreams.values()) {
-            result.add(collectorStream.getTelemetrySnapshot());
-        }
         return result;
     }
 
     /**
-     * Evaluates the live connection state of the peer leg for a dual Active-Active Strategy market WebSocket stream
-     * (e.g. {@code POLYMARKET-CLOB-<slug>} vs {@code POLYMARKET-CLOB-<slug>-BACKUP}).
+     * Evaluates the live connection state of the peer leg when a dual Active-Active market WebSocket stream
+     * ({@code POLYMARKET-CLOB-<slug>} vs {@code POLYMARKET-CLOB-<slug>-BACKUP}) disconnects.
+     * Single-leg lookahead or {@code OFF}-mode streams (where {@code BACKUP} is absent) return {@link StreamRedundancyStatus#NONE}.
      *
      * @param streamName identifier of the stream that disconnected
      * @return {@link StreamRedundancyStatus} describing whether the peer stream is actively covering failover
@@ -607,9 +565,11 @@ public class PolymarketClobClient {
         ReconnectingWebSocketStream peer;
         if (suffix.endsWith("-BACKUP")) {
             String marketSlug = suffix.substring(0, suffix.length() - "-BACKUP".length());
-            peer = marketStreams.get(marketSlug);
+            SharedMarketSubscription sub = marketSubscriptions.get(marketSlug);
+            peer = sub != null ? sub.primaryStream : null;
         } else {
-            peer = backupMarketStreams.get(suffix);
+            SharedMarketSubscription sub = marketSubscriptions.get(suffix);
+            peer = sub != null ? sub.backupStream : null;
         }
         if (peer == null) {
             return StreamRedundancyStatus.NONE;
@@ -631,6 +591,184 @@ public class PolymarketClobClient {
      */
     public Thread getIoReaderThread() {
         return marketWsRuntime.getIoReaderThread();
+    }
+
+    private SharedMarketSubscription createSharedMarketSubscription(String marketSlug, List<String> tokenIds) {
+        String subPayload = buildSubscriptionPayload(tokenIds);
+        SharedMarketSubscription[] subHolder = new SharedMarketSubscription[1];
+
+        RawWebSocketBatchListener primaryStrategyListener = batch -> {
+            SharedMarketSubscription sub = subHolder[0];
+            if (sub != null) {
+                sub.dispatchStrategyBatch(batch, sub.primaryStream);
+            }
+        };
+
+        ReconnectingWebSocketStream primary = new ReconnectingWebSocketStream(
+                marketWsRuntime.vertx(),
+                "POLYMARKET-CLOB-" + marketSlug,
+                wsUrl,
+                () -> List.of(subPayload),
+                null,
+                primaryStrategyListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                "PING"
+        );
+        primary.setInboundQueueEnabled(false);
+        primary.setPreferredAddressSlot(marketWsRuntime, 0, () -> {
+            SharedMarketSubscription sub = subHolder[0];
+            ReconnectingWebSocketStream backup = sub != null ? sub.backupStream : null;
+            return backup != null ? backup.getActiveOrPendingRemoteIp() : "";
+        });
+        primary.setDisconnectListener(this.disconnectListener);
+        primary.setCollectorTap(frame -> {
+            SharedMarketSubscription sub = subHolder[0];
+            if (sub != null && sub.collectorAttached) {
+                enqueueCollectorItem(new CollectorQueueItem(sub, frame, null));
+            }
+        });
+        primary.setShouldReconnectSupplier(() -> {
+            SharedMarketSubscription sub = subHolder[0];
+            return sub == null || sub.shouldReconnectPrimary();
+        });
+
+        SharedMarketSubscription subscription = new SharedMarketSubscription(marketSlug, subPayload, primary);
+        subHolder[0] = subscription;
+        return subscription;
+    }
+
+    private ReconnectingWebSocketStream createBackupStream(SharedMarketSubscription sub) {
+        ReconnectingWebSocketStream[] backupHolder = new ReconnectingWebSocketStream[1];
+        RawWebSocketBatchListener backupStrategyListener = batch ->
+                sub.dispatchStrategyBatch(batch, backupHolder[0]);
+
+        ReconnectingWebSocketStream backup = new ReconnectingWebSocketStream(
+                marketWsRuntime.vertx(),
+                "POLYMARKET-CLOB-" + sub.slug + "-BACKUP",
+                wsUrl,
+                () -> List.of(sub.subPayload),
+                null,
+                backupStrategyListener,
+                reconnectDelayMs,
+                pingIntervalMs,
+                "PING"
+        );
+        backupHolder[0] = backup;
+        backup.setPreferredAddressSlot(marketWsRuntime, 1, () -> sub.primaryStream.getActiveOrPendingRemoteIp());
+        backup.setDisconnectListener(this.disconnectListener);
+        backup.setCollectorTap(frame -> {
+            if (sub.collectorAttached) {
+                enqueueCollectorItem(new CollectorQueueItem(sub, frame, null));
+            }
+        });
+        return backup;
+    }
+
+    private void ensureCollectorWorkerStarted() {
+        if (collectorWorkerRunning.compareAndSet(false, true)) {
+            collectorWorkerParked.set(true);
+            this.collectorWorkerThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .priority(Thread.NORM_PRIORITY)
+                    .name("clob-collector-worker")
+                    .start(this::collectorWorkerLoop);
+        }
+    }
+
+    private void stopCollectorWorker() {
+        if (collectorWorkerRunning.compareAndSet(true, false)) {
+            collectorEventQueue.clear();
+            collectorWorkerParked.set(false);
+            Thread worker = this.collectorWorkerThread;
+            this.collectorWorkerThread = null;
+            if (worker != null) {
+                LockSupport.unpark(worker);
+                if (worker != Thread.currentThread()) {
+                    try {
+                        worker.join(1_000L);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }
+    }
+
+    private void enqueueCollectorItem(CollectorQueueItem item) {
+        if (!collectorWorkerRunning.get()) {
+            return;
+        }
+        collectorEventQueue.offer(item);
+        if (collectorWorkerParked.getOpaque() && collectorWorkerParked.compareAndSet(true, false)) {
+            Thread worker = this.collectorWorkerThread;
+            if (worker != null) {
+                LockSupport.unpark(worker);
+            }
+        }
+    }
+
+    private void collectorWorkerLoop() {
+        LinuxCpuAffinity.pinCurrentThreadIfSupported(0, "vCPU #0: CLOB Collector");
+        List<CollectorQueueItem> batch = new ArrayList<>(64);
+        while (collectorWorkerRunning.get()) {
+            batch.clear();
+            int drained = collectorEventQueue.drain(batch::add, COLLECTOR_DRAIN_BATCH_LIMIT);
+            if (drained > 0) {
+                if (collectorWorkerParked.getOpaque()) {
+                    collectorWorkerParked.set(false);
+                }
+                for (int i = 0; i < drained; i++) {
+                    processCollectorQueueItem(batch.get(i));
+                }
+                continue;
+            }
+            collectorWorkerParked.set(true);
+            if (!collectorEventQueue.isEmpty() || !collectorWorkerRunning.get()) {
+                collectorWorkerParked.set(false);
+                continue;
+            }
+            LockSupport.parkNanos(this, ReconnectingWebSocketStream.IDLE_PARK_TIMEOUT_NS);
+            collectorWorkerParked.set(false);
+        }
+    }
+
+    private void processCollectorQueueItem(CollectorQueueItem item) {
+        if (item == null || item.subscription() == null) {
+            return;
+        }
+        SharedMarketSubscription sub = item.subscription();
+        TimestampedFrame frame = item.frame();
+        if (frame != null) {
+            RawWebSocketListener listener = sub.collectorListener;
+            if (sub.collectorAttached && listener != null && sub.collectorDeduplicator.shouldAcceptUnique(frame.rawUtf8Bytes())) {
+                try {
+                    listener.onMessageBytes(frame);
+                } catch (Exception e) {
+                    Log.errorf("[POLYMARKET-CLOB-%s] Unhandled exception in collector listener: %s", sub.slug, e.getMessage());
+                }
+            }
+            return;
+        }
+
+        WebSocketStreamTelemetry closeTelemetry = item.terminalCloseTelemetry();
+        if (closeTelemetry != null) {
+            Consumer<WebSocketStreamTelemetry> closeListener;
+            synchronized (this) {
+                closeListener = sub.collectorNormalCloseListener;
+                sub.detachCollector();
+                if (!sub.strategyAttached) {
+                    marketSubscriptions.remove(sub.slug, sub);
+                }
+            }
+            if (closeListener != null) {
+                try {
+                    closeListener.accept(closeTelemetry);
+                } catch (Exception e) {
+                    Log.warnf("[POLYMARKET-CLOB-%s] Exception in collector normalCloseListener: %s", sub.slug, e.getMessage());
+                }
+            }
+        }
     }
 
     private String buildSubscriptionPayload(List<String> tokenIds) {
@@ -665,6 +803,143 @@ public class PolymarketClobClient {
         return trimmed.endsWith("/") ? (trimmed + "user") : (trimmed + "/user");
     }
 
+    private final class SharedMarketSubscription {
+
+        private final String slug;
+        private final String subPayload;
+        private final ReconnectingWebSocketStream primaryStream;
+        private final PayloadDeduplicator collectorDeduplicator = new PayloadDeduplicator();
+
+        private volatile boolean primaryStarted;
+        private volatile boolean collectorAttached;
+        private volatile RawWebSocketListener collectorListener;
+        private volatile Consumer<WebSocketStreamTelemetry> collectorNormalCloseListener;
+        private volatile BooleanSupplier collectorShouldReconnectSupplier;
+
+        private volatile boolean strategyAttached;
+        private volatile RawWebSocketBatchListener strategyBatchListener;
+        private volatile PayloadDeduplicator strategyDeduplicator;
+        private volatile ReconnectingWebSocketStream backupStream;
+
+        private SharedMarketSubscription(String slug, String subPayload, ReconnectingWebSocketStream primaryStream) {
+            this.slug = slug;
+            this.subPayload = subPayload;
+            this.primaryStream = primaryStream;
+        }
+
+        void attachCollector(
+                RawWebSocketListener listener,
+                Consumer<WebSocketStreamTelemetry> normalCloseListener,
+                BooleanSupplier shouldReconnectSupplier) {
+            this.collectorListener = listener;
+            this.collectorNormalCloseListener = normalCloseListener;
+            this.collectorShouldReconnectSupplier = shouldReconnectSupplier;
+            this.collectorAttached = true;
+            updatePrimaryTerminalCloseArming();
+        }
+
+        void detachCollector() {
+            this.collectorAttached = false;
+            this.collectorListener = null;
+            this.collectorNormalCloseListener = null;
+            this.collectorShouldReconnectSupplier = null;
+            updatePrimaryTerminalCloseArming();
+        }
+
+        void attachStrategy(
+                RawWebSocketBatchListener batchListener,
+                Thread externalWorker,
+                ReconnectingWebSocketStream backup) {
+            this.strategyDeduplicator = new PayloadDeduplicator();
+            this.strategyBatchListener = batchListener;
+            this.backupStream = backup;
+            this.strategyAttached = true;
+            updatePrimaryTerminalCloseArming();
+
+            if (externalWorker != null) {
+                primaryStream.bindExternalWorker(externalWorker);
+                backup.bindExternalWorker(externalWorker);
+            }
+            primaryStream.setInboundQueueEnabled(true);
+            backup.setInboundQueueEnabled(true);
+        }
+
+        ReconnectingWebSocketStream detachStrategy() {
+            this.strategyAttached = false;
+            this.strategyBatchListener = null;
+            this.strategyDeduplicator = null;
+            ReconnectingWebSocketStream removedBackup = this.backupStream;
+            this.backupStream = null;
+            primaryStream.unbindExternalWorkerAndDisableQueue();
+            updatePrimaryTerminalCloseArming();
+            return removedBackup;
+        }
+
+        private void updatePrimaryTerminalCloseArming() {
+            if (!strategyAttached && collectorAttached && collectorNormalCloseListener != null) {
+                primaryStream.setNormalCloseListener(telemetry ->
+                        enqueueCollectorItem(new CollectorQueueItem(this, null, telemetry)));
+            } else {
+                primaryStream.setNormalCloseListener(null);
+            }
+        }
+
+        boolean shouldReconnectPrimary() {
+            if (strategyAttached) {
+                return true;
+            }
+            BooleanSupplier supplier = this.collectorShouldReconnectSupplier;
+            if (supplier == null) {
+                return true;
+            }
+            try {
+                return supplier.getAsBoolean();
+            } catch (Exception e) {
+                Log.warnf("[POLYMARKET-CLOB-%s] Exception in collector shouldReconnectSupplier: %s", slug, e.getMessage());
+                return true;
+            }
+        }
+
+        void dispatchStrategyBatch(List<TimestampedFrame> batch, ReconnectingWebSocketStream sourceStream) {
+            RawWebSocketBatchListener delegate = this.strategyBatchListener;
+            PayloadDeduplicator dedup = this.strategyDeduplicator;
+            if (!this.strategyAttached || delegate == null || dedup == null || batch == null || batch.isEmpty()) {
+                return;
+            }
+            int duplicatesSkipped = dedup.filterUniqueInPlace(batch);
+            if (duplicatesSkipped > 0 && sourceStream != null) {
+                sourceStream.addCoalescedFrames(duplicatesSkipped);
+            }
+            if (!batch.isEmpty()) {
+                delegate.onMessageBatch(batch);
+            }
+        }
+
+        ConnectionState effectiveState() {
+            ConnectionState primaryState = primaryStream.getState();
+            if (primaryState == ConnectionState.CONNECTED) {
+                return ConnectionState.CONNECTED;
+            }
+            ReconnectingWebSocketStream backup = this.backupStream;
+            if (backup != null) {
+                ConnectionState backupState = backup.getState();
+                if (backupState == ConnectionState.CONNECTED || primaryState == ConnectionState.DISCONNECTED) {
+                    return backupState;
+                }
+            }
+            return primaryState;
+        }
+
+        void stopAllStreams() {
+            ReconnectingWebSocketStream backup = this.backupStream;
+            this.backupStream = null;
+            primaryStream.stop();
+            if (backup != null) {
+                backup.stop();
+            }
+        }
+    }
+
     /**
      * Fast, fixed-footprint 16-way set-associative FIFO fingerprint cache (256 sets x 16 ways = 4,096 slots)
      * that deduplicates identical raw UTF-8 WebSocket frames across the primary and backup market streams
@@ -682,6 +957,11 @@ public class PolymarketClobClient {
 
         private final long[] cache = new long[SET_COUNT * WAYS_PER_SET];
         private final byte[] wayCursors = new byte[SET_COUNT];
+
+        synchronized boolean shouldAcceptUnique(byte[] rawUtf8Bytes) {
+            long fp = computeFingerprint(rawUtf8Bytes);
+            return fp == 0L || !isDuplicateAndRecord(fp);
+        }
 
         synchronized int filterUniqueInPlace(List<TimestampedFrame> batch) {
             int n = batch.size();

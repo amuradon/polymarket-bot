@@ -252,7 +252,10 @@ public class BinanceStreamConnector {
                 null
         );
         primaryHolder[0] = primary;
-        primary.setPreferredAddressSlot(marketWsRuntime, 0);
+        primary.setPreferredAddressSlot(marketWsRuntime, 0, () -> {
+            ReconnectingWebSocketStream peer = backupHolder[0];
+            return peer != null ? peer.getActiveOrPendingRemoteIp() : "";
+        });
         primary.setDisconnectListener(this.disconnectListener);
 
         ReconnectingWebSocketStream backup = new ReconnectingWebSocketStream(
@@ -267,7 +270,10 @@ public class BinanceStreamConnector {
                 null
         );
         backupHolder[0] = backup;
-        backup.setPreferredAddressSlot(marketWsRuntime, 1);
+        backup.setPreferredAddressSlot(marketWsRuntime, 1, () -> {
+            ReconnectingWebSocketStream peer = primaryHolder[0];
+            return peer != null ? peer.getActiveOrPendingRemoteIp() : "";
+        });
         backup.setDisconnectListener(this.disconnectListener);
 
         if (externalWorker != null) {

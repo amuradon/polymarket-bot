@@ -39,7 +39,7 @@ class PolymarketClobClientTest {
     @BeforeEach
     void setUp() {
         vertx = Vertx.vertx();
-        marketWsRuntime = new MarketWebSocketRuntime();
+        marketWsRuntime = new MarketWebSocketRuntime(30L);
     }
 
     @AfterEach
@@ -227,7 +227,7 @@ class PolymarketClobClientTest {
     }
 
     @Test
-    void shouldIsolateCollectorSingleStreamFromStrategyDualStreamWithZeroDuplicationAndZeroQueueFillWhenStrategyStopped() throws Exception {
+    void shouldSharePrimaryStreamBetweenCollectorAndStrategyOpenBackupOnlyWhileStrategyActiveAndNeverDuplicateCollectorRecords() throws Exception {
         List<ServerWebSocket> serverSockets = new CopyOnWriteArrayList<>();
 
         server = vertx.createHttpServer()
@@ -245,15 +245,16 @@ class PolymarketClobClientTest {
                 vertx,
                 marketWsRuntime,
                 "ws://localhost:" + port + "/ws/market",
-                200L,
+                80L,
                 0L
         );
 
         String slug = "btc-updown-15m-1795000000";
         List<String> collectorPayloads = new CopyOnWriteArrayList<>();
         List<String> strategyPayloads = new CopyOnWriteArrayList<>();
+        List<WebSocketStreamTelemetry> normalCloses = new CopyOnWriteArrayList<>();
 
-        // 1. Collector opens single-leg lookahead stream first
+        // 1. Collector opens single-leg lookahead stream first -> strictly 1 socket
         client.openCollectorMarketStream(
                 slug,
                 List.of("token_up_1", "token_down_1"),
@@ -268,18 +269,21 @@ class PolymarketClobClientTest {
                         collectorPayloads.add(new String(frame.rawUtf8Bytes(), StandardCharsets.UTF_8));
                     }
                 },
-                null,
+                normalCloses::add,
                 null
         );
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
+                    assertThat(serverSockets).hasSize(1);
                     assertThat(collectorPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
                     assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+                    assertThat(client.describeMarketStreamRedundancy("POLYMARKET-CLOB-" + slug))
+                            .isEqualTo(StreamRedundancyStatus.NONE);
                 });
 
-        // 2. Strategy opens dual Active-Active stream for the SAME slug without colliding or duplicating collector data
+        // 2. Strategy attaches to the SAME slug: reuses PRIMARY and opens ONLY BACKUP -> strictly 2 sockets total (not 3!)
         Thread dummyStrategyWorker = Thread.ofPlatform().daemon(true).name("dummy-strat-worker").unstarted(() -> {});
         client.openMarketStreamBatch(
                 slug,
@@ -296,33 +300,68 @@ class PolymarketClobClientTest {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .untilAsserted(() -> {
-                    assertThat(serverSockets).hasSize(3); // 1 collector + 2 strategy (PRIMARY + BACKUP)
+                    assertThat(serverSockets).hasSize(2); // 1 shared PRIMARY + 1 BACKUP
+                    assertThat(client.getStreamTelemetries()).hasSize(2);
                     client.drainMarketStreams(scratch);
                     assertThat(strategyPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
-                    // Collector still has ONLY its single copy (never duplicated from strategy's dual legs)
+                    // Collector deduplicator filters BACKUP's duplicate initial book -> still strictly 1 copy!
                     assertThat(collectorPayloads).containsExactly("{\"event_type\":\"book\",\"seq\":1}");
                 });
 
-        // 3. Switch Strategy to OFF (stopAllStrategyStreams): collector stays CONNECTED, strategy queues remain empty
-        client.stopAllStrategyStreams();
-        assertThat(client.getConnectionStates()).isEmpty();
-        assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
-
-        // Broadcast another update across all still-open server sockets
+        // 3. Both PRIMARY and BACKUP broadcast seq:2 simultaneously -> Strategy AND Collector each get strictly 1 copy
         for (ServerWebSocket ws : serverSockets) {
-            if (!ws.isClosed()) {
-                ws.writeTextMessage("{\"event_type\":\"price_change\",\"seq\":2}");
-            }
+            ws.writeTextMessage("{\"event_type\":\"price_change\",\"seq\":2}");
         }
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> assertThat(collectorPayloads).hasSize(2));
+                .untilAsserted(() -> {
+                    client.drainMarketStreams(scratch);
+                    assertThat(strategyPayloads).containsExactly(
+                            "{\"event_type\":\"book\",\"seq\":1}",
+                            "{\"event_type\":\"price_change\",\"seq\":2}"
+                    );
+                    assertThat(collectorPayloads).containsExactly(
+                            "{\"event_type\":\"book\",\"seq\":1}",
+                            "{\"event_type\":\"price_change\",\"seq\":2}"
+                    );
+                });
 
-        // Strategy queues must be 100% empty while strategy is OFF
+        // 4. Switch Strategy to OFF (stopAllStrategyStreams): BACKUP closes immediately, PRIMARY stays open for Collector
+        client.stopAllStrategyStreams();
+        assertThat(client.getConnectionStates()).isEmpty();
+        assertThat(client.getCollectorConnectionStates()).containsEntry(slug, ConnectionState.CONNECTED);
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(serverSockets.get(1).isClosed()).isTrue();
+                    assertThat(serverSockets.get(0).isClosed()).isFalse();
+                    assertThat(client.getStreamTelemetries()).hasSize(1);
+                });
+
+        // 5. Remaining PRIMARY leg receives seq:3 + market_resolved + closeCode=1000 while Strategy queues stay empty
+        serverSockets.get(0).writeTextMessage("{\"event_type\":\"price_change\",\"seq\":3}");
+        serverSockets.get(0).writeTextMessage("{\"event_type\":\"market_resolved\",\"winning_outcome\":\"Up\"}");
+        serverSockets.get(0).close((short) 1000, "all subscribed assets resolved");
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(normalCloses).hasSize(1);
+                    assertThat(collectorPayloads).containsExactly(
+                            "{\"event_type\":\"book\",\"seq\":1}",
+                            "{\"event_type\":\"price_change\",\"seq\":2}",
+                            "{\"event_type\":\"price_change\",\"seq\":3}",
+                            "{\"event_type\":\"market_resolved\",\"winning_outcome\":\"Up\"}"
+                    );
+                    assertThat(client.getCollectorConnectionStates()).doesNotContainKey(slug);
+                });
+
+        // Strategy queues must remain 100% empty while strategy is OFF
         assertThat(client.hasQueuedMarketFrames()).isFalse();
         assertThat(client.drainMarketStreams(scratch)).isZero();
-        assertThat(strategyPayloads).hasSize(1);
+        assertThat(strategyPayloads).hasSize(2);
 
         client.stopAll();
     }

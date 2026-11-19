@@ -7,6 +7,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
 import java.lang.management.ThreadMXBean;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -39,6 +40,9 @@ public class SystemNetworkTelemetryMonitor {
     private static final Path PROC_NET_TCP6 = Path.of("/proc/net/tcp6");
     private static final Path PROC_RMEM_MAX = Path.of("/proc/sys/net/core/rmem_max");
     private static final Path PROC_NET_NETSTAT = Path.of("/proc/net/netstat");
+    private static final Path PROC_SELF_STATUS = Path.of("/proc/self/status");
+    private static final boolean LITTLE_ENDIAN_HOST = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+    private static final long PROCESS_EFFECTIVE_UID = detectProcessEffectiveUid();
 
     /**
      * Descriptor of a monitored dedicated thread passed during periodic sampling.
@@ -386,12 +390,15 @@ public class SystemNetworkTelemetryMonitor {
 
     /**
      * Parses lines from Linux {@code /proc/net/tcp} or {@code /proc/net/tcp6} and aggregates
-     * {@code rx_queue} and {@code tx_queue} bytes across active non-listening sockets.
+     * {@code rx_queue} and {@code tx_queue} bytes across active external non-listening sockets
+     * belonging to {@code targetUid} (excluding loopback {@code 127.0.0.0/8} / {@code ::1} tunnels
+     * such as SSH-over-SSM sessions).
      *
-     * @param lines lines read from {@code /proc/net/tcp}
+     * @param lines     lines read from {@code /proc/net/tcp} or {@code /proc/net/tcp6}
+     * @param targetUid process effective UID to match against column 7 ({@code < 0} disables UID filtering)
      * @return aggregated {@link TcpQueueStats}
      */
-    public static TcpQueueStats parseProcNetTcpLines(List<String> lines) {
+    public static TcpQueueStats parseProcNetTcpLines(List<String> lines, long targetUid) {
         if (lines == null || lines.isEmpty()) {
             return new TcpQueueStats(0L, 0L, 0);
         }
@@ -415,6 +422,15 @@ public class SystemNetworkTelemetryMonitor {
             if ("0A".equalsIgnoreCase(stateHex) || "06".equalsIgnoreCase(stateHex)) {
                 continue;
             }
+            if (isLoopbackEndpoint(parts[1]) || isLoopbackEndpoint(parts[2])) {
+                continue;
+            }
+            if (targetUid >= 0L && parts.length >= 8) {
+                long socketUid = parseSafeLongWithDefault(parts[7], -1L);
+                if (socketUid != targetUid) {
+                    continue;
+                }
+            }
             String txRx = parts[4];
             int colonIdx = txRx.indexOf(':');
             if (colonIdx <= 0 || colonIdx >= txRx.length() - 1) {
@@ -430,6 +446,31 @@ public class SystemNetworkTelemetryMonitor {
             }
         }
         return new TcpQueueStats(totalRxBytes, totalTxBytes, activeCount);
+    }
+
+    private static boolean isLoopbackEndpoint(String endpointHex) {
+        if (endpointHex == null) {
+            return false;
+        }
+        int colonIdx = endpointHex.indexOf(':');
+        String addrHex = colonIdx > 0 ? endpointHex.substring(0, colonIdx) : endpointHex;
+        if (addrHex.length() == 8) {
+            return LITTLE_ENDIAN_HOST
+                    ? addrHex.regionMatches(true, 6, "7F", 0, 2)
+                    : addrHex.regionMatches(true, 0, "7F", 0, 2);
+        }
+        if (addrHex.length() == 32) {
+            if ("00000000000000000000000001000000".equalsIgnoreCase(addrHex)
+                    || "00000000000000000000000000000001".equalsIgnoreCase(addrHex)) {
+                return true;
+            }
+            if (addrHex.regionMatches(true, 0, "0000000000000000FFFF0000", 0, 24)) {
+                return LITTLE_ENDIAN_HOST
+                        ? addrHex.regionMatches(true, 30, "7F", 0, 2)
+                        : addrHex.regionMatches(true, 24, "7F", 0, 2);
+            }
+        }
+        return false;
     }
 
     /**
@@ -477,13 +518,13 @@ public class SystemNetworkTelemetryMonitor {
         int sockets = 0;
         try {
             if (Files.isReadable(PROC_NET_TCP)) {
-                TcpQueueStats v4 = parseProcNetTcpLines(Files.readAllLines(PROC_NET_TCP));
+                TcpQueueStats v4 = parseProcNetTcpLines(Files.readAllLines(PROC_NET_TCP), PROCESS_EFFECTIVE_UID);
                 rx += v4.rxQueueBytes();
                 tx += v4.txQueueBytes();
                 sockets += v4.activeSockets();
             }
             if (Files.isReadable(PROC_NET_TCP6)) {
-                TcpQueueStats v6 = parseProcNetTcpLines(Files.readAllLines(PROC_NET_TCP6));
+                TcpQueueStats v6 = parseProcNetTcpLines(Files.readAllLines(PROC_NET_TCP6), PROCESS_EFFECTIVE_UID);
                 rx += v6.rxQueueBytes();
                 tx += v6.txQueueBytes();
                 sockets += v6.activeSockets();
@@ -491,6 +532,23 @@ public class SystemNetworkTelemetryMonitor {
         } catch (Exception ignored) {
         }
         return new TcpQueueStats(rx, tx, sockets);
+    }
+
+    private static long detectProcessEffectiveUid() {
+        try {
+            if (Files.isReadable(PROC_SELF_STATUS)) {
+                for (String line : Files.readAllLines(PROC_SELF_STATUS)) {
+                    if (line != null && line.startsWith("Uid:")) {
+                        String[] tokens = line.trim().split("\\s+");
+                        if (tokens.length >= 3) {
+                            return parseSafeLongWithDefault(tokens[2], -1L);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return -1L;
     }
 
     private static long readKernelRmemMaxBytes() {
@@ -517,10 +575,14 @@ public class SystemNetworkTelemetryMonitor {
     }
 
     private static long parseSafeLong(String s) {
+        return parseSafeLongWithDefault(s, 0L);
+    }
+
+    private static long parseSafeLongWithDefault(String s, long fallback) {
         try {
             return Long.parseLong(s);
         } catch (Exception e) {
-            return 0L;
+            return fallback;
         }
     }
 

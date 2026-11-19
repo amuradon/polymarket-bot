@@ -17,20 +17,33 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SystemNetworkTelemetryMonitorTest {
 
     @Test
-    void shouldParseProcNetTcpHexQueuesAndSkipListeningAndTimeWaitSockets() {
+    void shouldParseProcNetTcpHexQueuesExcludeLoopbackAndOtherUidsAndSkipListeningAndTimeWaitSockets() {
         List<String> procNetTcpLines = List.of(
                 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
-                "   0: 00000000:1F90 00000000:0000 0A 00000000:00000100 00:00000000 00000000   185        0 12345 1 0000000000000000 100 0 0 10 0",
-                "   1: 0A000115:A3B4 681214E2:01BB 01 00000200:00001000 01:00000014 00000000   185        0 22345 2 0000000000000000 20 4 30 10 -1",
-                "   2: 0A000115:A3B6 681214E3:01BB 01 00000080:00000800 01:00000014 00000000   185        0 22346 2 0000000000000000 20 4 30 10 -1",
-                "   3: 0A000115:A3B8 681214E3:01BB 06 00000400:00000400 00:00000000 00000000     0        0 0 3 0000000000000000"
+                "   0: 00000000:01BB 00000000:0000 0A 00000000:00000100 00:00000000 00000000   992        0 12345 1 0000000000000000 100 0 0 10 0",
+                "   1: 991D1FAC:A3B4 7F72E636:01BB 01 00000200:00001000 01:00000014 00000000   992        0 22345 2 0000000000000000 20 4 30 10 -1",
+                "   2: 991D1FAC:A3B6 3EC24112:01BB 01 00000080:00000800 01:00000014 00000000   992        0 22346 2 0000000000000000 20 4 30 10 -1",
+                "   3: 991D1FAC:A3B8 3EC24112:01BB 06 00000400:00000400 00:00000000 00000000     0        0 0 3 0000000000000000",
+                "   4: 0100007F:0016 0100007F:E2C2 01 001A711D:00000000 04:00000015 00000000     0        0 103371 3 0000000096006dc3",
+                "   5: 0100007F:D800 0100007F:01BB 01 00001000:00001000 00:00000000 00000000   992        0 103372 1 0000000096006dc4",
+                "   6: 991D1FAC:98D6 7DE2FD03:01BB 01 0000092C:00000000 02:000005CD 00000000     0        0 104700 2 00000000c20a4e15"
         );
 
-        TcpQueueStats stats = SystemNetworkTelemetryMonitor.parseProcNetTcpLines(procNetTcpLines);
+        TcpQueueStats stats = SystemNetworkTelemetryMonitor.parseProcNetTcpLines(procNetTcpLines, 992L);
 
         assertThat(stats.activeSockets()).isEqualTo(2);
         assertThat(stats.rxQueueBytes()).isEqualTo(4096L + 2048L);
         assertThat(stats.txQueueBytes()).isEqualTo(512L + 128L);
+
+        List<String> procNetTcp6Lines = List.of(
+                "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+                "   0: 00000000000000000000000001000000:0016 00000000000000000000000001000000:C350 01 00010000:00020000 00:00000000 00000000   992        0 55555 1 0000000000000000",
+                "   1: 0000000000000000FFFF00000100007F:01BB 0000000000000000FFFF00000100007F:D100 01 00010000:00020000 00:00000000 00000000   992        0 55556 1 0000000000000000"
+        );
+        TcpQueueStats v6Stats = SystemNetworkTelemetryMonitor.parseProcNetTcpLines(procNetTcp6Lines, 992L);
+        assertThat(v6Stats.activeSockets()).isZero();
+        assertThat(v6Stats.rxQueueBytes()).isZero();
+        assertThat(v6Stats.txQueueBytes()).isZero();
     }
 
     @Test

@@ -1,18 +1,32 @@
 package cz.polymarket.bot.connector.ws;
 
 import io.netty.handler.ssl.OpenSsl;
+import io.netty.resolver.AbstractAddressResolver;
+import io.netty.resolver.AddressResolver;
+import io.netty.resolver.AddressResolverGroup;
+import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.Promise;
 import io.quarkus.logging.Log;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
-import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.WebSocket;
+import io.vertx.core.http.WebSocketClient;
+import io.vertx.core.http.WebSocketClientOptions;
 import io.vertx.core.http.WebSocketConnectOptions;
+import io.vertx.core.http.impl.WebSocketClientImpl;
+import io.vertx.core.impl.CloseFuture;
+import io.vertx.core.impl.ContextInternal;
+import io.vertx.core.impl.VertxInternal;
+import io.vertx.core.impl.future.PromiseInternal;
 import io.vertx.core.net.OpenSSLEngineOptions;
 import io.vertx.core.net.SocketAddress;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 
+import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -66,7 +80,7 @@ public class ReconnectingWebSocketStream {
     private final long pingIntervalMs;
     private final String textPingPayload;
     private final HttpClientOptions httpClientOptions;
-    private final HttpClient httpClient;
+    private final WebSocketClient webSocketClient;
 
     // Cache-line-padded lock-free queue (eliminates Node allocations and producer/consumer CAS contention)
     private final MpscUnboundedArrayQueue<TimestampedFrame> inboundQueue =
@@ -91,13 +105,18 @@ public class ReconnectingWebSocketStream {
     private final AtomicInteger lastCloseCode = new AtomicInteger(0);
     private final AtomicReference<String> lastCloseReason = new AtomicReference<>("");
     private final AtomicReference<String> lastRemoteAddress = new AtomicReference<>("");
+    private final AtomicReference<String> pendingRemoteIp = new AtomicReference<>("");
+    private final AtomicReference<String> lastFailedIp = new AtomicReference<>("");
     private final AtomicLong totalBusyTimeNs = new AtomicLong(0L);
+    private final AtomicBoolean inboundQueueEnabled = new AtomicBoolean(true);
     private final AtomicBoolean normalCloseTriggered = new AtomicBoolean(false);
     private final AtomicBoolean terminalCloseCompleted = new AtomicBoolean(false);
 
     private volatile String dedicatedIoThreadName;
     private volatile MarketWebSocketRuntime addressSlotRuntime;
     private volatile int preferredAddressSlot = -1;
+    private volatile Supplier<String> excludedPeerIpSupplier;
+    private volatile Consumer<TimestampedFrame> collectorTap;
     private volatile Thread ioReaderThread;
     private volatile Thread drainThread;
     private volatile Thread externalWorkerThread;
@@ -196,7 +215,159 @@ public class ReconnectingWebSocketStream {
                 .setMaxWebSocketMessageSize(MAX_FRAME_SIZE_BYTES * 4);
         configureSslEngineOptions(options, isSsl, OpenSsl.isAvailable(), OpenSsl.unavailabilityCause(), streamName);
         this.httpClientOptions = options;
-        this.httpClient = vertx.createHttpClient(options);
+        this.webSocketClient = createSlotAwareWebSocketClient(vertx, options);
+    }
+
+    private WebSocketClient createSlotAwareWebSocketClient(Vertx baseVertx, HttpClientOptions options) {
+        if (baseVertx instanceof VertxInternal vertxInternal) {
+            AddressResolverGroup<InetSocketAddress> slotResolverGroup =
+                    createSlotAwareResolverGroup(vertxInternal.nettyAddressResolverGroup());
+            VertxInternal[] ownerHolder = new VertxInternal[1];
+            VertxInternal slotAwareVertx = (VertxInternal) Proxy.newProxyInstance(
+                    VertxInternal.class.getClassLoader(),
+                    new Class<?>[]{VertxInternal.class},
+                    (proxy, method, args) -> {
+                        String name = method.getName();
+                        if ("nettyAddressResolverGroup".equals(name) && (args == null || args.length == 0)) {
+                            return slotResolverGroup;
+                        }
+                        Object res = invokeUnwrapping(vertxInternal, method, args);
+                        if (res instanceof ContextInternal ctx) {
+                            return wrapSlotAwareContext(ctx, ownerHolder[0]);
+                        }
+                        if (res instanceof PromiseInternal<?> promise) {
+                            return wrapSlotAwarePromise(promise, ownerHolder[0]);
+                        }
+                        return res;
+                    }
+            );
+            ownerHolder[0] = slotAwareVertx;
+            CloseFuture closeFuture = new CloseFuture();
+            WebSocketClientImpl client = new WebSocketClientImpl(slotAwareVertx, options, closeFuture);
+            closeFuture.add(client);
+            return client;
+        }
+        WebSocketClientOptions wsOptions = new WebSocketClientOptions()
+                .setSsl(options.isSsl())
+                .setTcpNoDelay(options.isTcpNoDelay())
+                .setTcpKeepAlive(options.isTcpKeepAlive())
+                .setTryUsePerMessageCompression(options.getTryUsePerMessageWebSocketCompression())
+                .setMaxFrameSize(options.getMaxWebSocketFrameSize())
+                .setMaxMessageSize(options.getMaxWebSocketMessageSize());
+        if (options.getSslEngineOptions() != null) {
+            wsOptions.setSslEngineOptions(options.getSslEngineOptions());
+        }
+        return baseVertx.createWebSocketClient(wsOptions);
+    }
+
+    private static ContextInternal wrapSlotAwareContext(ContextInternal delegate, VertxInternal ownerProxy) {
+        if (Proxy.isProxyClass(delegate.getClass())) {
+            return delegate;
+        }
+        return (ContextInternal) Proxy.newProxyInstance(
+                ContextInternal.class.getClassLoader(),
+                new Class<?>[]{ContextInternal.class},
+                (proxy, method, args) -> {
+                    String name = method.getName();
+                    if ("owner".equals(name) && (args == null || args.length == 0)) {
+                        return ownerProxy;
+                    }
+                    if ("equals".equals(name) && args != null && args.length == 1) {
+                        return proxy == args[0] || delegate.equals(args[0]);
+                    }
+                    if ("hashCode".equals(name) && (args == null || args.length == 0)) {
+                        return delegate.hashCode();
+                    }
+                    Object res = invokeUnwrapping(delegate, method, args);
+                    if (res instanceof ContextInternal ctx) {
+                        return wrapSlotAwareContext(ctx, ownerProxy);
+                    }
+                    if (res instanceof PromiseInternal<?> promise) {
+                        return wrapSlotAwarePromise(promise, ownerProxy);
+                    }
+                    return res;
+                }
+        );
+    }
+
+    private static PromiseInternal<?> wrapSlotAwarePromise(PromiseInternal<?> delegate, VertxInternal ownerProxy) {
+        if (Proxy.isProxyClass(delegate.getClass())) {
+            return delegate;
+        }
+        return (PromiseInternal<?>) Proxy.newProxyInstance(
+                PromiseInternal.class.getClassLoader(),
+                new Class<?>[]{PromiseInternal.class},
+                (proxy, method, args) -> {
+                    String name = method.getName();
+                    if ("context".equals(name) && (args == null || args.length == 0)) {
+                        ContextInternal ctx = delegate.context();
+                        return ctx != null ? wrapSlotAwareContext(ctx, ownerProxy) : null;
+                    }
+                    if ("equals".equals(name) && args != null && args.length == 1) {
+                        return proxy == args[0] || delegate.equals(args[0]);
+                    }
+                    if ("hashCode".equals(name) && (args == null || args.length == 0)) {
+                        return delegate.hashCode();
+                    }
+                    return invokeUnwrapping(delegate, method, args);
+                }
+        );
+    }
+
+    private static Object invokeUnwrapping(Object target, java.lang.reflect.Method method, Object[] args) throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException ite) {
+            throw ite.getTargetException();
+        }
+    }
+
+    private AddressResolverGroup<InetSocketAddress> createSlotAwareResolverGroup(
+            AddressResolverGroup<InetSocketAddress> fallbackGroup) {
+        return new AddressResolverGroup<>() {
+            @Override
+            protected AddressResolver<InetSocketAddress> newResolver(EventExecutor executor) {
+                AddressResolver<InetSocketAddress> fallback = fallbackGroup.getResolver(executor);
+                return new AbstractAddressResolver<>(executor, InetSocketAddress.class) {
+                    @Override
+                    protected boolean doIsResolved(InetSocketAddress address) {
+                        return !address.isUnresolved();
+                    }
+
+                    @Override
+                    protected void doResolve(InetSocketAddress unresolvedAddress, Promise<InetSocketAddress> promise) {
+                        String pinnedIp = pendingRemoteIp.get();
+                        if (pinnedIp != null && !pinnedIp.isBlank()) {
+                            try {
+                                promise.setSuccess(new InetSocketAddress(
+                                        InetAddress.getByName(pinnedIp), unresolvedAddress.getPort()));
+                                return;
+                            } catch (Exception e) {
+                                promise.setFailure(e);
+                                return;
+                            }
+                        }
+                        fallback.resolve(unresolvedAddress, promise);
+                    }
+
+                    @Override
+                    protected void doResolveAll(InetSocketAddress unresolvedAddress, Promise<List<InetSocketAddress>> promise) {
+                        String pinnedIp = pendingRemoteIp.get();
+                        if (pinnedIp != null && !pinnedIp.isBlank()) {
+                            try {
+                                promise.setSuccess(List.of(new InetSocketAddress(
+                                        InetAddress.getByName(pinnedIp), unresolvedAddress.getPort())));
+                                return;
+                            } catch (Exception e) {
+                                promise.setFailure(e);
+                                return;
+                            }
+                        }
+                        fallback.resolveAll(unresolvedAddress, promise);
+                    }
+                };
+            }
+        };
     }
 
     /**
@@ -241,16 +412,79 @@ public class ReconnectingWebSocketStream {
     }
 
     /**
-     * Configures deterministic edge IPv4 address slot selection (e.g. {@code 0} for {@code PRIMARY} and
+     * Configures deterministic sibling-aware edge IPv4 address slot selection ({@code 0} for {@code PRIMARY} and
      * {@code 1} for {@code BACKUP}) via {@link MarketWebSocketRuntime} so redundant legs connect to distinct
-     * upstream CDN/exchange edge servers while preserving TLS SNI and HTTP {@code Host} headers.
+     * upstream CDN/exchange edge servers while preserving TLS SNI, X.509 hostname verification, and HTTP {@code Host} headers.
      *
-     * @param runtime shared market WebSocket runtime providing cached IPv4 pool resolution
-     * @param slot    0-based address slot index ({@code >= 0})
+     * @param runtime                shared market WebSocket runtime providing cached IPv4 pool resolution
+     * @param slot                   0-based address slot index ({@code >= 0})
+     * @param excludedPeerIpSupplier optional supplier returning the IPv4 address currently active or connecting on the sibling leg
      */
-    public void setPreferredAddressSlot(MarketWebSocketRuntime runtime, int slot) {
+    public void setPreferredAddressSlot(
+            MarketWebSocketRuntime runtime,
+            int slot,
+            Supplier<String> excludedPeerIpSupplier) {
         this.addressSlotRuntime = runtime;
         this.preferredAddressSlot = slot;
+        this.excludedPeerIpSupplier = excludedPeerIpSupplier;
+    }
+
+    /**
+     * Returns the IPv4/host address currently connected or actively connecting on this stream, or {@code ""}
+     * when disconnected or waiting in a reconnect backoff timer.
+     *
+     * @return active or pending remote IPv4/host string, or {@code ""}
+     */
+    public String getActiveOrPendingRemoteIp() {
+        ConnectionState currentState = state.get();
+        if (currentState == ConnectionState.CONNECTED) {
+            String activeIp = extractHostPart(lastRemoteAddress.get());
+            if (!activeIp.isEmpty()) {
+                return activeIp;
+            }
+        }
+        if (currentState == ConnectionState.CONNECTING) {
+            return pendingRemoteIp.get();
+        }
+        return "";
+    }
+
+    /**
+     * Registers an optional zero-copy listener invoked on the I/O reader thread with each decoded
+     * {@link TimestampedFrame} (used to fan out shared market frames to the Data Collector queue on {@code CPU #0}
+     * without duplicating {@code byte[]} allocations or touching Strategy's {@code CPU #2} queue).
+     *
+     * @param collectorTap consumer receiving each non-heartbeat {@link TimestampedFrame}, or {@code null} to detach
+     */
+    public void setCollectorTap(Consumer<TimestampedFrame> collectorTap) {
+        this.collectorTap = collectorTap;
+    }
+
+    /**
+     * Enables or disables enqueuing inbound frames into this stream's {@code inboundQueue}.
+     * When disabled (e.g. a collector-only lookahead stream or when Strategy is {@code OFF}),
+     * {@code inboundQueue} is kept empty and no internal {@code ws-drain-*} thread is spawned.
+     *
+     * @param enabled {@code true} to enqueue frames into {@code inboundQueue}, {@code false} to bypass and clear it
+     */
+    public void setInboundQueueEnabled(boolean enabled) {
+        this.inboundQueueEnabled.set(enabled);
+        if (!enabled) {
+            inboundQueue.clear();
+        } else if (running.get() && externalWorkerThread == null && drainThread == null) {
+            startInternalDrainWorkerIfNeeded();
+        }
+    }
+
+    /**
+     * Unbinds any external worker thread and disables and clears {@code inboundQueue} while keeping
+     * the underlying WebSocket connection and {@code collectorTap} running uninterrupted.
+     */
+    public void unbindExternalWorkerAndDisableQueue() {
+        this.inboundQueueEnabled.set(false);
+        this.externalWorkerThread = null;
+        this.workerParked.set(false);
+        inboundQueue.clear();
     }
 
     /**
@@ -361,19 +595,26 @@ public class ReconnectingWebSocketStream {
 
     /**
      * Starts the WebSocket connection, automatic reconnection loop, and (unless bound to an external worker via
-     * {@link #bindExternalWorker(Thread)}) a dedicated high-priority platform drain thread.
+     * {@link #bindExternalWorker(Thread)} or operating with {@code inboundQueueEnabled == false}) a dedicated
+     * high-priority platform drain thread.
      */
     public void start() {
         if (running.compareAndSet(false, true)) {
             state.set(ConnectionState.CONNECTING);
-            if (externalWorkerThread == null) {
-                this.drainThread = Thread.ofPlatform()
-                        .daemon(true)
-                        .priority(Thread.MAX_PRIORITY)
-                        .name("ws-drain-" + streamName)
-                        .start(this::drainLoop);
+            if (externalWorkerThread == null && inboundQueueEnabled.get()) {
+                startInternalDrainWorkerIfNeeded();
             }
             connect();
+        }
+    }
+
+    private synchronized void startInternalDrainWorkerIfNeeded() {
+        if (running.get() && externalWorkerThread == null && inboundQueueEnabled.get() && drainThread == null) {
+            this.drainThread = Thread.ofPlatform()
+                    .daemon(true)
+                    .priority(Thread.MAX_PRIORITY)
+                    .name("ws-drain-" + streamName)
+                    .start(this::drainLoop);
         }
     }
 
@@ -383,6 +624,7 @@ public class ReconnectingWebSocketStream {
      */
     public void stop() {
         running.set(false);
+        pendingRemoteIp.set("");
         inboundQueue.clear();
         Thread worker = this.drainThread;
         this.drainThread = null;
@@ -405,7 +647,7 @@ public class ReconnectingWebSocketStream {
             } catch (Exception ignored) {
             }
         }
-        httpClient.close();
+        webSocketClient.close();
     }
 
     /**
@@ -626,6 +868,7 @@ public class ReconnectingWebSocketStream {
 
         try {
             URI uri = URI.create(wsUrl);
+            String host = uri.getHost();
             boolean isSsl = "wss".equalsIgnoreCase(uri.getScheme());
             int port = uri.getPort() == -1 ? (isSsl ? 443 : 80) : uri.getPort();
             String path = uri.getRawPath() == null || uri.getRawPath().isEmpty() ? "/" : uri.getRawPath();
@@ -634,38 +877,52 @@ public class ReconnectingWebSocketStream {
             }
 
             WebSocketConnectOptions connectOptions = new WebSocketConnectOptions()
-                    .setHost(uri.getHost())
+                    .setHost(host)
                     .setPort(port)
                     .setSsl(isSsl)
                     .setURI(path);
 
             MarketWebSocketRuntime slotRuntime = this.addressSlotRuntime;
             int slot = this.preferredAddressSlot;
-            Future<SocketAddress> serverAddrFuture = (slotRuntime != null && slot >= 0)
-                    ? slotRuntime.resolveDistinctIpv4Server(uri.getHost(), port, slot, consecutiveReconnectAttempts.get())
-                    : Future.succeededFuture(null);
+            int attempt = consecutiveReconnectAttempts.get();
+            String failedIp = lastFailedIp.get();
+            boolean forceRefresh = attempt > 0 || !failedIp.isEmpty();
 
-            serverAddrFuture
-                    .compose(serverAddr -> {
+            Future<Void> pinTargetFuture = (slotRuntime != null && slot >= 0)
+                    ? slotRuntime.resolveIpv4Pool(host, forceRefresh)
+                            .map(pool -> {
+                                Supplier<String> peerSupplier = this.excludedPeerIpSupplier;
+                                String peerIp = peerSupplier != null ? peerSupplier.get() : null;
+                                String selectedIp = MarketWebSocketRuntime.selectIpv4ForSlot(
+                                        pool, slot, attempt, peerIp, failedIp);
+                                pendingRemoteIp.set(selectedIp != null ? selectedIp : "");
+                                return null;
+                            })
+                    : Future.succeededFuture();
+
+            state.set(ConnectionState.CONNECTING);
+            pinTargetFuture
+                    .compose(ignored -> {
                         if (!running.get()) {
+                            pendingRemoteIp.set("");
                             return Future.failedFuture("Stream stopped before connect");
                         }
-                        if (serverAddr != null) {
-                            connectOptions.setServer(serverAddr);
-                        }
-                        return httpClient.webSocket(connectOptions);
+                        return webSocketClient.connect(connectOptions);
                     })
                     .onSuccess(this::onWebSocketConnected)
                     .onFailure(err -> {
                         if (!running.get()) {
+                            pendingRemoteIp.set("");
                             return;
                         }
+                        recordFailedIp();
                         lastCloseCode.set(-1);
                         lastCloseReason.set(err.getMessage() != null ? err.getMessage() : "connect_failed");
                         Log.errorf("[%s] WebSocket connect failed (%s): %s", streamName, wsUrl, err.getMessage());
                         scheduleReconnect();
                     });
         } catch (Exception e) {
+            recordFailedIp();
             Log.errorf("[%s] Error initiating WebSocket connection (%s): %s", streamName, wsUrl, e.getMessage());
             scheduleReconnect();
         }
@@ -673,6 +930,7 @@ public class ReconnectingWebSocketStream {
 
     private void onWebSocketConnected(WebSocket ws) {
         if (!running.get() || ws.isClosed()) {
+            pendingRemoteIp.set("");
             if (!ws.isClosed()) {
                 ws.close();
             }
@@ -690,6 +948,7 @@ public class ReconnectingWebSocketStream {
 
         String remote = formatRemoteAddress(ws.remoteAddress());
         this.lastRemoteAddress.set(remote);
+        this.pendingRemoteIp.set(extractHostPart(remote));
         this.state.set(ConnectionState.CONNECTED);
         Log.infof("[%s] WebSocket connected to %s (remote=%s) on thread %s (reconnectCount=%d)",
                 streamName, wsUrl, remote.isEmpty() ? "unknown" : remote, currentThread.getName(), reconnectCount.get());
@@ -869,7 +1128,7 @@ public class ReconnectingWebSocketStream {
 
     private void closeHttpClientQuietly() {
         try {
-            httpClient.close();
+            webSocketClient.close();
         } catch (Exception ignored) {
         }
     }
@@ -907,25 +1166,34 @@ public class ReconnectingWebSocketStream {
                         streamName, count, recvTs);
             }
         }
-        if (messageListener != null || batchListener != null) {
+        Consumer<TimestampedFrame> tap = this.collectorTap;
+        boolean enqueuePrimary = inboundQueueEnabled.getOpaque() && (messageListener != null || batchListener != null);
+        if (tap != null || enqueuePrimary) {
             if (consecutiveReconnectAttempts.getOpaque() != 0) {
                 consecutiveReconnectAttempts.set(0);
+                lastFailedIp.set("");
             }
             byte[] rawUtf8Bytes = payloadBuffer.getBytes();
             if (Log.isTraceEnabled()) {
                 Log.tracef("[%s] Received WebSocket frame at %d ms (%d bytes)", streamName, recvTs, rawUtf8Bytes.length);
             }
-            inboundQueue.offer(new TimestampedFrame(rawUtf8Bytes, recvTs));
-            int depth = inboundQueue.size();
-            if (depth > maxQueueDepth.getOpaque()) {
-                updateMaxInt(maxQueueDepth, depth);
-            }
+            TimestampedFrame frame = new TimestampedFrame(rawUtf8Bytes, recvTs);
             totalFramesReceived.incrementAndGet();
+            if (tap != null) {
+                tap.accept(frame);
+            }
+            if (enqueuePrimary) {
+                inboundQueue.offer(frame);
+                int depth = inboundQueue.size();
+                if (depth > maxQueueDepth.getOpaque()) {
+                    updateMaxInt(maxQueueDepth, depth);
+                }
 
-            if (workerParked.getOpaque() && workerParked.compareAndSet(true, false)) {
-                Thread target = this.externalWorkerThread != null ? this.externalWorkerThread : this.drainThread;
-                if (target != null) {
-                    LockSupport.unpark(target);
+                if (workerParked.getOpaque() && workerParked.compareAndSet(true, false)) {
+                    Thread target = this.externalWorkerThread != null ? this.externalWorkerThread : this.drainThread;
+                    if (target != null) {
+                        LockSupport.unpark(target);
+                    }
                 }
             }
         }
@@ -1015,6 +1283,7 @@ public class ReconnectingWebSocketStream {
             return;
         }
         running.set(false);
+        pendingRemoteIp.set("");
         cancelPingTimer();
         this.currentWebSocket = null;
         state.set(ConnectionState.DISCONNECTED);
@@ -1042,9 +1311,31 @@ public class ReconnectingWebSocketStream {
     private void onConnectionClosed(WebSocket closedWs) {
         if (this.currentWebSocket == closedWs) {
             this.currentWebSocket = null;
+            recordFailedIp();
             cancelPingTimer();
             scheduleReconnect();
         }
+    }
+
+    private void recordFailedIp() {
+        String failed = pendingRemoteIp.getAndSet("");
+        if (failed == null || failed.isEmpty()) {
+            failed = extractHostPart(lastRemoteAddress.get());
+        }
+        if (failed != null && !failed.isEmpty()) {
+            lastFailedIp.set(failed);
+        }
+    }
+
+    private static String extractHostPart(String remoteAddr) {
+        if (remoteAddr == null || remoteAddr.isEmpty()) {
+            return "";
+        }
+        int lastColon = remoteAddr.lastIndexOf(':');
+        if (lastColon > 0 && remoteAddr.indexOf(':') == lastColon) {
+            return remoteAddr.substring(0, lastColon);
+        }
+        return remoteAddr;
     }
 
     private void scheduleReconnect() {
@@ -1075,23 +1366,24 @@ public class ReconnectingWebSocketStream {
 
     private void drainLoop() {
         List<TimestampedFrame> scratchBatch = new ArrayList<>(64);
-        while (running.get() && externalWorkerThread == null) {
+        while (running.get() && externalWorkerThread == null && inboundQueueEnabled.get()) {
             int drained = drainAvailableBatch(scratchBatch);
             if (drained > 0) {
                 continue;
             }
-            spinWaitBeforePark(() -> !running.get() || externalWorkerThread != null || !inboundQueue.isEmpty());
-            if (!running.get() || externalWorkerThread != null || !inboundQueue.isEmpty()) {
+            spinWaitBeforePark(() -> !running.get() || externalWorkerThread != null || !inboundQueueEnabled.get() || !inboundQueue.isEmpty());
+            if (!running.get() || externalWorkerThread != null || !inboundQueueEnabled.get() || !inboundQueue.isEmpty()) {
                 continue;
             }
             if (prepareToParkAndCheckQueuedFrames()) {
                 continue;
             }
-            if (running.get() && externalWorkerThread == null) {
+            if (running.get() && externalWorkerThread == null && inboundQueueEnabled.get()) {
                 LockSupport.parkNanos(this, IDLE_PARK_TIMEOUT_NS);
             }
             workerParked.set(false);
         }
+        this.drainThread = null;
         if (normalCloseTriggered.get()) {
             completeTerminalCloseDrain(lastCloseCode.get(), lastCloseReason.get());
         }

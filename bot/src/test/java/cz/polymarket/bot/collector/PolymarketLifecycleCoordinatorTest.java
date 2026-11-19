@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 /**
  * Unit tests for {@link PolymarketLifecycleCoordinator} verifying:
  * <ol>
- *   <li>Tracking of current market + {@code lookahead-count = 2} future markets (3 total) via single-leg collector streams</li>
+ *   <li>Tracking of current market + {@code lookahead-count = 1} future market (2 total), immediately opening the next lookahead upon {@code closeCode=1000}</li>
  *   <li>Finalizing the ended market archive upon {@code closeCode=1000}, {@code +300s} safeguard, or post-end disconnect</li>
  *   <li>Appending across instance restarts without emitting duplicate {@code market_discovered} lines</li>
  * </ol>
@@ -46,7 +46,7 @@ class PolymarketLifecycleCoordinatorTest {
     Path tempDir;
 
     @Test
-    void shouldTrackCurrentPlusTwoFutureMarketsFinalizeOnCloseCode1000AndAvoidDuplicateMarketDiscoveredOnRestart() throws Exception {
+    void shouldTrackCurrentPlusOneFutureMarketFinalizeOnCloseCode1000AndImmediatelyOpenNextLookahead() throws Exception {
         PolymarketGammaClient gammaClient = mock(PolymarketGammaClient.class);
         PolymarketClobClient clobClient = mock(PolymarketClobClient.class);
 
@@ -88,18 +88,17 @@ class PolymarketLifecycleCoordinatorTest {
                 storage1,
                 "BTCUSDT",
                 "15m",
-                2
+                1
         );
 
         String slug0 = "btc-updown-15m-" + baseStartSec;
         String slug1 = "btc-updown-15m-" + (baseStartSec + durationSec);
         String slug2 = "btc-updown-15m-" + (baseStartSec + 2 * durationSec);
-        String slug3 = "btc-updown-15m-" + (baseStartSec + 3 * durationSec);
 
-        // 1. Start with lookaheadCount = 2 -> tracks current (0) + 2 future (1, 2) = 3 markets
+        // 1. Start with lookaheadCount = 1 -> tracks current (0) + 1 future (1) = 2 markets
         coordinator1.start(baseStartSec + 5L);
-        assertThat(coordinator1.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug0, slug1, slug2);
-        assertThat(coordinator1.getTrackedMarketSlugs()).doesNotContain(slug3);
+        assertThat(coordinator1.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug0, slug1);
+        assertThat(coordinator1.getTrackedMarketSlugs()).doesNotContain(slug2);
 
         clobListenersBySlug.get(slug0).onMessageBytes(new TimestampedFrame(
                 "[{\"event_type\":\"book\",\"asset_id\":\"token_up_0\"}]".getBytes(StandardCharsets.UTF_8),
@@ -117,13 +116,14 @@ class PolymarketLifecycleCoordinatorTest {
                 storage2,
                 "BTCUSDT",
                 "15m",
-                2
+                1
         );
         coordinator2.start(baseStartSec + 9L);
 
-        // Emit post-restart CLOB message and closeCode=1000 after cycle 0 ends
+        // During post-end resolution tail of slug0 (now = endSec + 5s), slug2 is held back so tracked count stays <= 2
         coordinator2.discoverAndRefreshMarkets(baseStartSec + durationSec + 5L);
         assertThat(shouldReconnectBySlug.get(slug0).getAsBoolean()).isFalse();
+        assertThat(coordinator2.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug0, slug1);
         verify(clobClient, never()).closeCollectorMarketStream(slug0);
 
         clobListenersBySlug.get(slug0).onMessageBytes(new TimestampedFrame(
@@ -131,7 +131,7 @@ class PolymarketLifecycleCoordinatorTest {
                 (baseStartSec + durationSec + 10L) * 1000L
         ));
         closeListenersBySlug.get(slug0).accept(new WebSocketStreamTelemetry(
-                "COLLECTOR-CLOB-" + slug0,
+                "POLYMARKET-CLOB-" + slug0,
                 ConnectionState.DISCONNECTED,
                 "ws-subscriptions-clob.polymarket.com:443",
                 0, 10, 0L, 2L, 5L, 20L, 2L, 0L, 0L,
@@ -140,12 +140,9 @@ class PolymarketLifecycleCoordinatorTest {
                 "all subscribed assets resolved"
         ));
 
+        // Immediately upon closeCode=1000, slug0 is finalized AND slug2 (next lookahead) is opened without waiting 30s!
         verify(clobClient).closeCollectorMarketStream(slug0);
-        assertThat(coordinator2.getTrackedMarketSlugs()).doesNotContain(slug0);
-
-        // Next refresh opens slug3 (current 1 + 2 future = 1, 2, 3)
-        coordinator2.discoverAndRefreshMarkets(baseStartSec + durationSec + 15L);
-        assertThat(coordinator2.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug1, slug2, slug3);
+        assertThat(coordinator2.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug1, slug2);
 
         // Verify slug0 archive has strictly ONE market_discovered record despite restart
         Path market0File = tempDir.resolve("polymarket/btc-updown-15m/" + slug0 + ".jsonl.zst");
@@ -187,12 +184,12 @@ class PolymarketLifecycleCoordinatorTest {
                 storage,
                 "BTCUSDT",
                 "15m",
-                2
+                1
         );
         coordinator.start(baseStartSec + 10L);
 
         String slug0 = "btc-updown-15m-" + baseStartSec;
-        String slug3 = "btc-updown-15m-" + (baseStartSec + 3 * durationSec);
+        String slug2 = "btc-updown-15m-" + (baseStartSec + 2 * durationSec);
         long market0EndSec = baseStartSec + durationSec;
 
         coordinator.discoverAndRefreshMarkets(market0EndSec + 299L);
@@ -202,7 +199,7 @@ class PolymarketLifecycleCoordinatorTest {
         coordinator.discoverAndRefreshMarkets(market0EndSec + 300L);
         verify(clobClient).closeCollectorMarketStream(slug0);
         assertThat(coordinator.getTrackedMarketSlugs()).doesNotContain(slug0);
-        assertThat(coordinator.getTrackedMarketSlugs()).contains(slug3);
+        assertThat(coordinator.getTrackedMarketSlugs()).contains(slug2);
 
         coordinator.stop();
         storage.closeAll();

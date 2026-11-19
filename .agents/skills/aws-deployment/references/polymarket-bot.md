@@ -3,7 +3,7 @@
 ## Compute, Storage & Runtime Profile
 - **Instance**: Dedicated non-throttled **`c8gn.xlarge`** (4 vCPU Graviton4 ARM64, 8 GiB RAM, 30 Gbps Enhanced Networking / Nitro v5).
 - **Persistent Storage**: Encrypted **100 GiB `gp3` EBS** (`DeletionPolicy: Retain`) mounted at `/mnt/ebs/polymarket-bot` via `/usr/local/bin/mount-polymarket-ebs.sh`:
-  - `/mnt/ebs/polymarket-bot/collector`: Continuous `.jsonl.zst` archives (PolyBolt + single-leg CLOB `current + 2` lookahead markets).
+  - `/mnt/ebs/polymarket-bot/collector`: Continuous `.jsonl.zst` archives (PolyBolt + deduplicated CLOB `current + 1` lookahead market, max `3` CLOB market connections).
   - `/mnt/ebs/polymarket-bot/paper`: Paper trading `trades.jsonl` + `metrics.json`.
   - `/mnt/ebs/polymarket-bot/state/runtime-state.json`: Persisted `RuntimeStateSnapshot` (`twapOpenPrice`, `strategyMode`, active market tokens, open `Position`s).
 - **Core Mapping**:

@@ -74,7 +74,7 @@ public class MockMarketStreamsTestResource implements QuarkusTestResourceLifecyc
                     Map.entry("polymarket.collector.streams-enabled", "true"),
                     Map.entry("polymarket.collector.data-dir", tempDataDir.resolve("collector").toString()),
                     Map.entry("polymarket.runtime.state-file", tempDataDir.resolve("state/runtime-state.json").toString()),
-                    Map.entry("polymarket.collector.lookahead-count", "2"),
+                    Map.entry("polymarket.collector.lookahead-count", "1"),
                     Map.entry("polymarket.collector.flush-interval", "1s"),
                     Map.entry("polymarket.strategy.mode", "OFF"),
                     Map.entry("polymarket.connector.binance.spot-ws-base-url", "ws://localhost:" + port + "/binance/spot"),

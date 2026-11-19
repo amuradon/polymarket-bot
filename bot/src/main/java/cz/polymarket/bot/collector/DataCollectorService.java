@@ -29,12 +29,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Orchestrates continuous Zstandard ({@code .jsonl.zst}) recording of Polymarket PolyBolt
- * ({@code price.crypto} and {@code price.crypto.twap}) and single-leg per-market CLOB streams
- * ({@code current + lookahead-count}), plus optional (default inactive) Binance Spot/Futures
- * {@code bookTicker} streams.
+ * ({@code price.crypto} and {@code price.crypto.twap}) and deduplicated per-market CLOB streams
+ * ({@code current + lookahead-count}, default {@code lookahead-count = 1}), plus optional (default inactive)
+ * Binance Spot/Futures {@code bookTicker} streams.
  * <p>
- * Runs exclusively on {@code CPU #0} off the strategy hot path and never subscribes to dual
- * {@code PRIMARY + BACKUP} strategy connections, guaranteeing zero duplicate records in archives.
+ * Runs exclusively on {@code CPU #0} off the strategy hot path and deduplicates shared active-market CLOB
+ * frames independently on {@code CPU #0}, guaranteeing zero duplicate records in archives.
  */
 @ApplicationScoped
 public class DataCollectorService {
