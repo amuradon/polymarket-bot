@@ -4,7 +4,7 @@ All global rules for **Polymarket Bot** live here.
 
 ## 1. Progressive Context Disclosure & Exclusions (CRITICAL)
 
-- **Never Preload Docs**: Do NOT read skill files, reference manuals, or unrelated configs upfront. Load workspace skills (`.agents/skills/<name>/SKILL.md`) and their `references/` **only just-in-time** when your task directly requires them (`project-architecture`, `aws-deployment`, `data-and-backtest-ops`).
+- **Never Preload Docs**: Do NOT read skill files, reference manuals, or unrelated configs upfront. Load workspace skills (`.agents/skills/<name>/SKILL.md`) and their `references/` **only just-in-time** when your task directly requires them (`project-architecture`, `aws-deployment`, `data-and-backtest-ops`, `network-and-performance-analysis`).
 - **Strict `./docs/` Prohibition**: **NEVER** read, scan, grep, or load any files inside `./docs/` unless the user explicitly asks to edit those specific files.
 
 ---
