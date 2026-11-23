@@ -247,28 +247,29 @@ class PricingModelStrategyTest {
     }
 
     @Test
-    @DisplayName("Should scale shares inversely with ask price to equalize dollar risk and anchor venue basis")
-    void shouldScaleSharesForConstantDollarRiskAndAnchorVenueBasis() {
+    @DisplayName("Should apply exact Fractional Kelly c*(1-c) variance scaling and anchor venue basis")
+    void shouldScaleSharesByFractionalKellyVarianceAndAnchorVenueBasis() {
         double strike = 80_000.0;
         double venueBias = 40.0;
 
-        // 1. Cheap OTM entry (ask = 0.30) receives larger share count for equivalent dollar risk
+        // 1. Neutral ATM entry (ask = 0.50, maximum binary variance c*(1-c) = 0.25) with modest +46 mc net edge
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
         long t0 = CANDLE_END_MS - 180_000L;
         for (int s = 0; s <= 25; s++) {
             long ts = t0 + s * 1_000L;
-            double clPrice = strike - 45.0 + ((s % 2 == 0) ? 1.5 : -1.5);
-            strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias - 45.0);
+            double clPrice = strike + ((s % 2 == 0) ? 1.5 : -1.5);
+            strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias);
             strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
         }
-        long otmTs = t0 + 26_500L;
+        long atmTs = t0 + 26_500L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.30, 0.29, 0.71, 0.70, 400.0, 400.0, 0.30, 0.71, otmTs - 40L));
-        strategy.onSpotTwap(otmTs, "btcusd", strike + venueBias - 12.0, strike + venueBias - 30.0);
+                0.50, 0.49, 0.51, 0.50, 400.0, 400.0, 0.50, 0.51, atmTs - 40L));
+        strategy.onSpotTwap(atmTs, "btcusd", strike + venueBias + 23.0, strike + venueBias + 5.0);
         assertThat(submittedOrders).hasSize(1);
-        int otmShares = submittedOrders.getFirst().size().intValue();
+        int atmShares = submittedOrders.getFirst().size().intValue();
+        assertThat(atmShares).isBetween(50, 80);
 
-        // 2. Expensive near-expiry entry (ask = 0.86 at tau = 30s) receives fewer shares per dollar risked
+        // 2. Lower-variance near-expiry entry (ask = 0.86 at tau = 30s, c*(1-c) = 0.114) scales up Kelly conviction
         submittedOrders.clear();
         strategy.reset();
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
@@ -281,9 +282,44 @@ class PricingModelStrategyTest {
         long lateTs = CANDLE_END_MS - 30_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.15, 0.14, 0.86, 0.85, 400.0, 400.0, 0.15, 0.86, lateTs - 40L));
-        strategy.onSpotTwap(lateTs, "btcusd", strike + venueBias - 48.0, strike + venueBias - 25.0);
+        strategy.onSpotTwap(lateTs, "btcusd", strike + venueBias - 62.0, strike + venueBias - 32.0);
         assertThat(submittedOrders).hasSize(1);
-        int deepItmShares = submittedOrders.getFirst().size().intValue();
-        assertThat(otmShares).isGreaterThan(deepItmShares);
+        int kellyLowVarShares = submittedOrders.getFirst().size().intValue();
+        assertThat(kellyLowVarShares).isGreaterThan(atmShares);
+    }
+
+    @Test
+    @DisplayName("Should measure 1.25s impulse on unshrunk diffusive probability while pricing edge on Bayesian mixture")
+    void shouldDecoupleUnshrunkImpulseFromBayesianEdgeValuation() {
+        double strike = 80_000.0;
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
+
+        long t0 = CANDLE_END_MS - 390_000L;
+        for (int s = 0; s <= 30; s++) {
+            long ts = t0 + s * 1_000L;
+            double px = strike + s * 4.5;
+            strategy.onSpotTwap(ts, "btcusd", px, strike + s * 2.0);
+            if (s < 30) {
+                strategy.onPolymarketCryptoPrice(ts + 200L, "btcusd", "chainlink", px, ts - 1_000L);
+            }
+        }
+        // PolyBolt at preTs reflects lagged s = 29 ($80,130.5): pre-impulse rawT4 = 791 mc, Bayesian shrunk = 769 mc
+        long preTs = t0 + 30_000L;
+        strategy.onPolymarketCryptoPrice(preTs + 100L, "btcusd", "chainlink", strike + 130.5, preTs - 1_000L);
+
+        // Sub-second impulse to spot = strike + 148.0: rawT4 = 817 mc (raw jump +26 mc >= 25), Bayesian shrunk = 793 mc (shrunk jump +24 mc)
+        long evalTs = preTs + 500L;
+
+        // 1. Overpriced ask = 0.76 (cost ~773 mc) has +44 mc raw edge, but only +20 mc Bayesian edge (< 40 mc) -> REJECTED
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.76, 0.75, 0.25, 0.24, 300.0, 300.0, 0.76, 0.25, evalTs - 40L));
+        strategy.onSpotTwap(evalTs, "btcusd", strike + 148.0, strike + 65.0);
+        assertThat(submittedOrders).isEmpty();
+
+        // 2. Fair ask = 0.72 (cost ~735 mc, Bayesian edge +58 mc) passes because unshrunk jump is +26 mc (>= 25 mc)
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.72, 0.71, 0.29, 0.28, 300.0, 300.0, 0.72, 0.29, evalTs + 20L));
+        assertThat(submittedOrders).hasSize(1);
+        assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
     }
 }

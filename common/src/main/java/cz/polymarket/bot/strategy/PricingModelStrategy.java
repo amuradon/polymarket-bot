@@ -23,10 +23,10 @@ import java.math.BigDecimal;
  *       remaining variance without penalizing smooth one-way directional trends.</li>
  *   <li><b>Bayesian Merton Jump-Diffusion 60s TWAP Model</b>: Combines continuous two-regime {@code Student-t (df=4)}
  *       diffusion with time-decaying exogenous jump-reset shrinkage prior to final-minute TWAP lock-in,
- *       preventing multi-minute tail overconfidence without piecewise price-cap cliffs.</li>
- *   <li><b>Active Desynchronization & Constant-Dollar-Risk Sizing</b>: Rejects high-whipsaw candles, requires
- *       fresh 1.25s probability jump confirmation, normalizes share count by contract ask price so equal edge
- *       carries equal dollar risk, caps at 2 clips per market, and holds positions to settlement.</li>
+ *       while measuring fresh 1.25s impulses on unshrunk diffusive probabilities.</li>
+ *   <li><b>Active Desynchronization & Exact Fractional Kelly Sizing</b>: Rejects high-whipsaw candles, scales
+ *       position shares inversely with binary payoff variance {@code c * (1 - c)}, caps at 2 clips per market,
+ *       and holds positions to settlement without averaging down.</li>
  * </ol>
  */
 @ApplicationScoped
@@ -34,6 +34,8 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
 
     private static final int MAX_MC = 1_000;
     private static final int NEUTRAL_PROB_MC = 500;
+    private static final long NEUTRAL_VARIANCE_MC_SQ = 250_000L;
+    private static final int KELLY_EDGE_SLOPE_MC = 55;
     private static final int TICK_STEP_MC = 10;
     private static final long TWAP_WINDOW_MS = 60_000L;
     private static final long JUMP_HAZARD_ZERO_TAU_MS = 45_000L;
@@ -117,6 +119,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private long lockedAnchorStartMs = 0L;
     private long lastIntegratedTsMs = 0L;
     private double lastIntegratedSHatUsd = Double.NaN;
+    private int latestRawProbUpMc = NEUTRAL_PROB_MC;
     private int latestModelProbUpMc = NEUTRAL_PROB_MC;
 
     // Latest valid CLOB quote snapshot
@@ -264,6 +267,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         lockedAnchorStartMs = 0L;
         lastIntegratedTsMs = 0L;
         lastIntegratedSHatUsd = Double.NaN;
+        latestRawProbUpMc = NEUTRAL_PROB_MC;
         latestModelProbUpMc = NEUTRAL_PROB_MC;
         lastQuoteTsMs = 0L;
         lastAskUpMc = 0;
@@ -693,8 +697,9 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         double z = (muTwapUsd - targetTwapOpenUsd) / sdRemUsd;
 
         int rawT4Mc = studentT4ProbMc(z);
+        latestRawProbUpMc = rawT4Mc;
         latestModelProbUpMc = bayesianJumpMixtureProbMc(rawT4Mc, remMs, maxJumpHazardRatio);
-        recordProbSample(nowMs, latestModelProbUpMc);
+        recordProbSample(nowMs, rawT4Mc);
     }
 
     private void recordProbSample(long tsMs, int probUpMc) {
@@ -722,7 +727,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
                 return probRingUpMc[idx];
             }
         }
-        return probRingLen > 0 ? probRingUpMc[probRingHead] : latestModelProbUpMc;
+        return probRingLen > 0 ? probRingUpMc[probRingHead] : latestRawProbUpMc;
     }
 
     private void evaluateSignal(long nowMs, double sHatUsd) {
@@ -773,9 +778,9 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         int pUpMc = latestModelProbUpMc;
         int pDownMc = MAX_MC - pUpMc;
 
-        int prevUpMc = lookupProbUpMcAtOrBefore(nowMs - config.modelJumpWindowMs());
-        int jumpUpMc = pUpMc - prevUpMc;
-        int jumpDownMc = prevUpMc - pUpMc;
+        int prevRawUpMc = lookupProbUpMcAtOrBefore(nowMs - config.modelJumpWindowMs());
+        int jumpUpMc = latestRawProbUpMc - prevRawUpMc;
+        int jumpDownMc = prevRawUpMc - latestRawProbUpMc;
 
         long rawLeadCentiBps = Math.round(((sHatUsd - lastPbSpotUsd) / lastPbSpotUsd) * CENTI_BPS_SCALE);
 
@@ -865,9 +870,11 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private int computeOrderShares(int netEdgeMc, int askMc, int depth1cShares, int remainingInventory) {
         int extraEdgeMc = Math.max(0, netEdgeMc - config.minNetEdgeMc());
         int baseShares = config.minOrderShares()
-                + ((extraEdgeMc * (config.maxOrderShares() - config.minOrderShares())) / 80);
-        int riskAdjustedShares = (baseShares * NEUTRAL_PROB_MC) / Math.max(1, askMc);
-        int clampedTarget = Math.clamp(riskAdjustedShares, config.minOrderShares(), config.maxOrderShares());
+                + ((extraEdgeMc * (config.maxOrderShares() - config.minOrderShares())) / KELLY_EDGE_SLOPE_MC);
+        int costMc = Math.clamp(askMc + takerFeeMc(askMc, takerFeeRate), 10, MAX_MC - 10);
+        int varianceDenom = costMc * (MAX_MC - costMc);
+        int kellyShares = (int) (((long) baseShares * NEUTRAL_VARIANCE_MC_SQ) / Math.max(1, varianceDenom));
+        int clampedTarget = Math.clamp(kellyShares, config.minOrderShares(), config.maxOrderShares());
         int depthCap = Math.max(config.minOrderShares(), depth1cShares / 2);
         return Math.min(clampedTarget, Math.min(depthCap, remainingInventory));
     }
