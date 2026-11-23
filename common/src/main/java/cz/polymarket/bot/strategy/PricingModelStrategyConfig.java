@@ -11,13 +11,13 @@ import java.util.Locale;
  * Immutable configuration bean for {@link PricingModelStrategy}.
  * <p>
  * Governs the basis-anchored multi-exchange spot nowcast, continuous 60-second settlement TWAP
- * integrator, EWMA + retracement-adjusted Parkinson range volatility estimator, heavy-tailed
- * {@code Student-t (df=4)} fair-value model, non-directional whipsaw filter, time-dependent
- * entry price caps, and non-averaging-down position sizing.
+ * integrator, EWMA + retracement-adjusted Parkinson range volatility estimator, Bayesian
+ * Merton jump-diffusion {@code Student-t (df=4)} fair-value model, non-directional whipsaw filter,
+ * and cost-normalized constant-dollar-risk position sizing.
  * <p>
- * All underlying dispersion, whipsaw-range, bridge-floor, and lead-gap parameters are expressed
- * in asset-agnostic basis points ({@code bps}) or centi-basis points ({@code 0.01 bps}) so the
- * strategy operates identically across {@code BTC}, {@code ETH}, and {@code SOL}.
+ * All underlying dispersion, whipsaw-range, jump-hazard, bridge-floor, and lead-gap parameters
+ * are expressed in asset-agnostic basis points ({@code bps}) or centi-basis points ({@code 0.01 bps})
+ * so the strategy operates identically across {@code BTC}, {@code ETH}, and {@code SOL}.
  */
 @ApplicationScoped
 public class PricingModelStrategyConfig {
@@ -37,11 +37,10 @@ public class PricingModelStrategyConfig {
     private final int maxWhipsawRangeBps;
     private final double parkinsonScale;
     private final double bridgeFloorBps;
+    private final int maxJumpHazardBps;
     private final int minWarmupSamples;
     private final int minOpenPriceMc;
-    private final int maxEarlyOpenPriceMc;
     private final int maxOpenPriceMc;
-    private final long earlyPriceCapTauMs;
     private final int maxSpreadMc;
     private final int minDepthShares;
     private final int minNetEdgeMc;
@@ -77,11 +76,10 @@ public class PricingModelStrategyConfig {
      * @param maxWhipsawRangeBps maximum non-directional intra-candle retracement/whipsaw range in bps pre-final-minute (default {@code 45})
      * @param parkinsonScale scaling factor in {@code [0, 2]} applied to retracement-adjusted Parkinson range volatility (default {@code 0.85})
      * @param bridgeFloorBps continuous baseline uncertainty floor in basis points across remaining horizon (default {@code 0.70})
+     * @param maxJumpHazardBps maximum exogenous jump-reset probability in bps at {@code tau >= 300s} (default {@code 750})
      * @param minWarmupSamples minimum 1-second volatility samples required before trading (default {@code 15})
      * @param minOpenPriceMc minimum best-ask entry price in millicents (default {@code 250})
-     * @param maxEarlyOpenPriceMc maximum best-ask entry price in millicents when {@code tau >= earlyPriceCapTauMs} (default {@code 850})
-     * @param maxOpenPriceMc maximum best-ask entry price in millicents near expiry (default {@code 920})
-     * @param earlyPriceCapTauMs remaining time threshold in ms above which {@code maxEarlyOpenPriceMc} applies in full (default {@code 180000})
+     * @param maxOpenPriceMc maximum best-ask entry price in millicents (default {@code 920})
      * @param maxSpreadMc maximum allowed BBO spread on traded token in millicents (default {@code 25})
      * @param minDepthShares minimum 1-cent ask depth in shares required for entry (default {@code 25})
      * @param minNetEdgeMc minimum post-fee model edge over best ask in millicents (default {@code 40})
@@ -116,11 +114,10 @@ public class PricingModelStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-whipsaw-range-bps", defaultValue = "45") int maxWhipsawRangeBps,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.parkinson-scale", defaultValue = "0.85") double parkinsonScale,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.bridge-floor-bps", defaultValue = "0.70") double bridgeFloorBps,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-jump-hazard-bps", defaultValue = "750") int maxJumpHazardBps,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-warmup-samples", defaultValue = "15") int minWarmupSamples,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-open-price-mc", defaultValue = "250") int minOpenPriceMc,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-early-open-price-mc", defaultValue = "850") int maxEarlyOpenPriceMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-open-price-mc", defaultValue = "920") int maxOpenPriceMc,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.early-price-cap-tau-ms", defaultValue = "180000") long earlyPriceCapTauMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-spread-mc", defaultValue = "25") int maxSpreadMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-depth-shares", defaultValue = "25") int minDepthShares,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-net-edge-mc", defaultValue = "40") int minNetEdgeMc,
@@ -159,16 +156,15 @@ public class PricingModelStrategyConfig {
                 || Double.isNaN(maxSingleReturnBps) || maxSingleReturnBps <= minSigma1sBps
                 || maxWhipsawRangeBps <= 0
                 || Double.isNaN(parkinsonScale) || parkinsonScale < 0.0 || parkinsonScale > 2.0
-                || Double.isNaN(bridgeFloorBps) || bridgeFloorBps < 0.0) {
-            throw new IllegalArgumentException("Volatility floor, return cap, whipsaw range, parkinson scale, and bridge floor bounds must be valid");
+                || Double.isNaN(bridgeFloorBps) || bridgeFloorBps < 0.0
+                || maxJumpHazardBps < 0 || maxJumpHazardBps > 3_000) {
+            throw new IllegalArgumentException("Volatility floor, return cap, whipsaw range, parkinson scale, bridge floor, and jump hazard bounds must be valid");
         }
         if (minWarmupSamples < 1) {
             throw new IllegalArgumentException("minWarmupSamples must be >= 1");
         }
-        if (minOpenPriceMc <= 0 || maxEarlyOpenPriceMc < minOpenPriceMc
-                || maxOpenPriceMc < maxEarlyOpenPriceMc || maxOpenPriceMc >= 1_000
-                || earlyPriceCapTauMs <= 45_000L) {
-            throw new IllegalArgumentException("Open price bounds must satisfy 0 < minOpenPriceMc <= maxEarlyOpenPriceMc <= maxOpenPriceMc < 1000 and earlyPriceCapTauMs > 45000");
+        if (minOpenPriceMc <= 0 || maxOpenPriceMc < minOpenPriceMc || maxOpenPriceMc >= 1_000) {
+            throw new IllegalArgumentException("Open price bounds must satisfy 0 < minOpenPriceMc <= maxOpenPriceMc < 1000");
         }
         if (maxSpreadMc <= 0 || maxSpreadMc >= 500 || minDepthShares < 1) {
             throw new IllegalArgumentException("Spread and depth bounds must be valid");
@@ -200,11 +196,10 @@ public class PricingModelStrategyConfig {
         this.maxWhipsawRangeBps = maxWhipsawRangeBps;
         this.parkinsonScale = parkinsonScale;
         this.bridgeFloorBps = bridgeFloorBps;
+        this.maxJumpHazardBps = maxJumpHazardBps;
         this.minWarmupSamples = minWarmupSamples;
         this.minOpenPriceMc = minOpenPriceMc;
-        this.maxEarlyOpenPriceMc = maxEarlyOpenPriceMc;
         this.maxOpenPriceMc = maxOpenPriceMc;
-        this.earlyPriceCapTauMs = earlyPriceCapTauMs;
         this.maxSpreadMc = maxSpreadMc;
         this.minDepthShares = minDepthShares;
         this.minNetEdgeMc = minNetEdgeMc;
@@ -224,7 +219,7 @@ public class PricingModelStrategyConfig {
     }
 
     /**
-     * Returns calibrated Iteration 3 configuration constants.
+     * Returns calibrated Iteration 4 configuration constants.
      *
      * @return default {@link PricingModelStrategyConfig}
      */
@@ -245,11 +240,10 @@ public class PricingModelStrategyConfig {
                 45,
                 0.85,
                 0.70,
+                750,
                 15,
                 250,
-                850,
                 920,
-                180_000L,
                 25,
                 25,
                 40,
@@ -299,11 +293,10 @@ public class PricingModelStrategyConfig {
                 config.maxWhipsawRangeBps(),
                 config.parkinsonScale(),
                 config.bridgeFloorBps(),
+                config.maxJumpHazardBps(),
                 config.minWarmupSamples(),
                 config.minOpenPriceMc(),
-                config.maxEarlyOpenPriceMc(),
                 config.maxOpenPriceMc(),
-                config.earlyPriceCapTauMs(),
                 config.maxSpreadMc(),
                 config.minDepthShares(),
                 config.minNetEdgeMc(),
@@ -381,20 +374,17 @@ public class PricingModelStrategyConfig {
     /** Continuous baseline uncertainty floor in basis points. */
     public double bridgeFloorBps() { return bridgeFloorBps; }
 
+    /** Maximum exogenous jump-reset probability in basis points at {@code tau >= 300s}. */
+    public int maxJumpHazardBps() { return maxJumpHazardBps; }
+
     /** Minimum 1-second volatility samples required before trading. */
     public int minWarmupSamples() { return minWarmupSamples; }
 
     /** Minimum best-ask price for directional entry in millicents. */
     public int minOpenPriceMc() { return minOpenPriceMc; }
 
-    /** Maximum best-ask price in millicents for early entries ({@code tau >= earlyPriceCapTauMs}). */
-    public int maxEarlyOpenPriceMc() { return maxEarlyOpenPriceMc; }
-
-    /** Maximum best-ask price for near-expiry directional entry in millicents. */
+    /** Maximum best-ask price for directional entry in millicents. */
     public int maxOpenPriceMc() { return maxOpenPriceMc; }
-
-    /** Remaining time threshold in milliseconds above which {@code maxEarlyOpenPriceMc} applies in full. */
-    public long earlyPriceCapTauMs() { return earlyPriceCapTauMs; }
 
     /** Maximum allowed BBO spread on traded token in millicents. */
     public int maxSpreadMc() { return maxSpreadMc; }

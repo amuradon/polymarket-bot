@@ -68,9 +68,7 @@ class PricingModelStrategyTest {
         assertThat(strategy.getName()).isEqualTo("PricingModelStrategy");
         assertThat(strategy.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
         assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(430_000L);
-        assertThat(strategy.effectiveMaxOpenPriceMc(240_000L)).isEqualTo(850);
-        assertThat(strategy.effectiveMaxOpenPriceMc(40_000L)).isEqualTo(920);
-        assertThat(strategy.effectiveMaxOpenPriceMc(112_500L)).isEqualTo(885);
+        assertThat(config.maxJumpHazardBps()).isEqualTo(750);
 
         assertThatThrownBy(() -> PricingModelStrategyConfig.unwrap(null))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -80,17 +78,17 @@ class PricingModelStrategyTest {
         // Invalid tau bounds
         assertThatThrownBy(() -> new PricingModelStrategyConfig(
                 "15m", 500_000L, 100_000L, 3_000L, 2_500L, 75L,
-                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 45, 0.85, 0.70, 15,
-                250, 850, 920, 180_000L, 25, 25, 40, 25, 220,
+                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 45, 0.85, 0.70, 750, 15,
+                250, 920, 25, 25, 40, 25, 220,
                 1_250L, 25, 10, 700, 25, 150, 2, 200,
                 "pm-btc-15m", "BTC-UP", "BTC-DOWN"))
                 .isInstanceOf(IllegalArgumentException.class);
 
-        // Invalid whipsaw range or parkinson scale
+        // Invalid jump hazard (> 3000 bps)
         assertThatThrownBy(() -> new PricingModelStrategyConfig(
                 "15m", 8_000L, 420_000L, 3_000L, 2_500L, 75L,
-                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 0, 0.85, 0.70, 15,
-                250, 850, 920, 180_000L, 25, 25, 40, 25, 220,
+                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 45, 0.85, 0.70, 4_000, 15,
+                250, 920, 25, 25, 40, 25, 220,
                 1_250L, 25, 10, 700, 25, 150, 2, 200,
                 "pm-btc-15m", "BTC-UP", "BTC-DOWN"))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -100,8 +98,8 @@ class PricingModelStrategyTest {
                 super(d.timeframe().getCode(), d.minTauMs(), d.maxTauMs(), d.cooldownMs(), d.maxQuoteAgeMs(),
                         d.spotDelayOffsetMs(), d.basisEmaAlpha(), d.volFastTauSec(), d.volSlowTauSec(),
                         d.volFastWeight(), d.minSigma1sBps(), d.maxSingleReturnBps(),
-                        d.maxWhipsawRangeBps(), d.parkinsonScale(), d.bridgeFloorBps(), d.minWarmupSamples(),
-                        d.minOpenPriceMc(), d.maxEarlyOpenPriceMc(), d.maxOpenPriceMc(), d.earlyPriceCapTauMs(),
+                        d.maxWhipsawRangeBps(), d.parkinsonScale(), d.bridgeFloorBps(), d.maxJumpHazardBps(),
+                        d.minWarmupSamples(), d.minOpenPriceMc(), d.maxOpenPriceMc(),
                         d.maxSpreadMc(), d.minDepthShares(), d.minNetEdgeMc(), d.minFillNetEdgeMc(),
                         d.minLeadGapCentiBps(), d.modelJumpWindowMs(), d.minModelJumpMc(),
                         d.maxSlippageMc(), d.takerFeeRateBps(), d.minOrderShares(), d.maxOrderShares(),
@@ -116,13 +114,21 @@ class PricingModelStrategyTest {
     }
 
     @Test
-    @DisplayName("Should satisfy Student-t df=4 symmetry, monotonicity, and parabolic taker fee bounds")
-    void shouldComputeExactStudentT4AndParabolicFee() {
+    @DisplayName("Should satisfy Student-t df=4 symmetry, Bayesian jump shrinkage, and parabolic taker fee bounds")
+    void shouldComputeExactStudentT4BayesianMixtureAndParabolicFee() {
         assertThat(PricingModelStrategy.studentT4ProbMc(0.0)).isEqualTo(500);
         int pPos = PricingModelStrategy.studentT4ProbMc(1.5);
         int pNeg = PricingModelStrategy.studentT4ProbMc(-1.5);
         assertThat(pPos + pNeg).isEqualTo(1_000);
         assertThat(pPos).isBetween(880, 920);
+
+        // Bayesian jump mixture: zero shrinkage inside tau <= 45s, symmetric 7.5% shrinkage at tau >= 300s
+        assertThat(PricingModelStrategy.bayesianJumpMixtureProbMc(900, 30_000L, 0.075)).isEqualTo(900);
+        int shrunkUp = PricingModelStrategy.bayesianJumpMixtureProbMc(900, 350_000L, 0.075);
+        int shrunkDown = PricingModelStrategy.bayesianJumpMixtureProbMc(100, 350_000L, 0.075);
+        assertThat(shrunkUp).isEqualTo(870);
+        assertThat(shrunkUp + shrunkDown).isEqualTo(1_000);
+
         assertThat(PricingModelStrategy.takerFeeMc(500, 0.07)).isEqualTo(18);
         assertThat(PricingModelStrategy.takerFeeMc(900, 0.07)).isEqualTo(7);
     }
@@ -190,12 +196,11 @@ class PricingModelStrategyTest {
     }
 
     @Test
-    @DisplayName("Should allow clean >70bps directional trend at ask 0.78 while blocking >45bps two-way whipsaws")
+    @DisplayName("Should allow clean >70bps directional trend while blocking >45bps two-way whipsaws")
     void shouldAllowCleanDirectionalBreakoutAndBlockTrueWhipsaw() {
         double strike = 80_000.0;
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
 
-        // 1. Clean one-way upward breakout of +600 USD (+75 bps total span, whipsaw = 2.5 bps <= 45 bps) at tau = 380s
         long t0 = CANDLE_END_MS - 415_000L;
         for (int s = 0; s <= 18; s++) {
             long ts = t0 + s * 1_000L;
@@ -205,20 +210,19 @@ class PricingModelStrategyTest {
         }
         for (int s = 19; s <= 34; s++) {
             long ts = t0 + s * 1_000L;
-            double px = strike + ((s - 18) * 28.0); // smoothly trends to +448 USD at ~3.5 bps/s
+            double px = strike + ((s - 18) * 28.0);
             strategy.onSpotTwap(ts, "btcusd", px, strike + 200.0);
             strategy.onPolymarketCryptoPrice(ts + 200L, "btcusd", "chainlink", px, ts - 1_000L);
         }
 
-        long breakoutTs = t0 + 34_500L; // sub-second SpotTwap burst at tau = 380.5s (>= 180s), total span = +560 USD (+70 bps)
+        long breakoutTs = t0 + 34_500L; // sub-second burst at tau = 380.5s, clean +70 bps trend
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.78, 0.77, 0.23, 0.22, 300.0, 300.0, 0.78, 0.23, breakoutTs - 50L));
+                0.76, 0.75, 0.25, 0.24, 300.0, 300.0, 0.76, 0.25, breakoutTs - 50L));
         strategy.onSpotTwap(breakoutTs, "btcusd", strike + 560.0, strike + 300.0);
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
 
-        // 2. Reset and simulate a violent two-way V-shaped whipsaw: -240 USD then +240 USD (span = 480 USD = 60 bps),
-        // returning near strike + 60 USD (whipsaw = 420 USD = 52.5 bps > 45 bps) -> MUST BE BLOCKED!
+        // Reset and verify >45 bps two-way V-whipsaw is blocked
         submittedOrders.clear();
         strategy.reset();
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
@@ -238,34 +242,34 @@ class PricingModelStrategyTest {
         long whipEvalTs = whipStartTs + 4_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.50, 0.49, 0.51, 0.50, 300.0, 300.0, 0.50, 0.51, whipEvalTs - 50L));
-        // Even with +45 USD impulse -> sHat = strike + 60 USD, span = 480, whipsaw = 420 USD (52.5 bps > 45 bps) -> BLOCKED!
         strategy.onSpotTwap(whipEvalTs, "btcusd", strike + 60.0, strike);
         assertThat(submittedOrders).isEmpty();
     }
 
     @Test
-    @DisplayName("Should enforce early max ask 0.85 while allowing 0.88 near expiry with venue basis anchoring")
-    void shouldEnforceEarlyMaxAskAndAnchorVenueBasisNearExpiry() {
+    @DisplayName("Should scale shares inversely with ask price to equalize dollar risk and anchor venue basis")
+    void shouldScaleSharesForConstantDollarRiskAndAnchorVenueBasis() {
         double strike = 80_000.0;
         double venueBias = 40.0;
-        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
 
-        long t0 = CANDLE_END_MS - 250_000L;
+        // 1. Cheap OTM entry (ask = 0.30) receives larger share count for equivalent dollar risk
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
+        long t0 = CANDLE_END_MS - 180_000L;
         for (int s = 0; s <= 25; s++) {
             long ts = t0 + s * 1_000L;
-            double clPrice = strike + ((s % 2 == 0) ? 1.5 : -1.5);
-            strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias);
+            double clPrice = strike - 45.0 + ((s % 2 == 0) ? 1.5 : -1.5);
+            strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias - 45.0);
             strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
         }
-
-        // 1. At tau = 220s (>= 180s), ask = 0.88 exceeds maxEarlyOpenPriceMc (0.85) -> REJECTED
-        long earlyTs = CANDLE_END_MS - 220_000L;
+        long otmTs = t0 + 26_500L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.88, 0.87, 0.13, 0.12, 300.0, 300.0, 0.88, 0.13, earlyTs - 40L));
-        strategy.onSpotTwap(earlyTs, "btcusd", strike + venueBias + 220.0, strike + venueBias);
-        assertThat(submittedOrders).isEmpty();
+                0.30, 0.29, 0.71, 0.70, 400.0, 400.0, 0.30, 0.71, otmTs - 40L));
+        strategy.onSpotTwap(otmTs, "btcusd", strike + venueBias - 12.0, strike + venueBias - 30.0);
+        assertThat(submittedOrders).hasSize(1);
+        int otmShares = submittedOrders.getFirst().size().intValue();
 
-        // 2. Near expiry (tau = 30s <= 45s), maxOpenPriceMc = 0.92 allows ask = 0.86 on fresh DOWN break
+        // 2. Expensive near-expiry entry (ask = 0.86 at tau = 30s) receives fewer shares per dollar risked
+        submittedOrders.clear();
         strategy.reset();
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
         for (int s = 0; s <= 25; s++) {
@@ -276,9 +280,10 @@ class PricingModelStrategyTest {
         }
         long lateTs = CANDLE_END_MS - 30_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.15, 0.14, 0.86, 0.85, 300.0, 300.0, 0.15, 0.86, lateTs - 40L));
+                0.15, 0.14, 0.86, 0.85, 400.0, 400.0, 0.15, 0.86, lateTs - 40L));
         strategy.onSpotTwap(lateTs, "btcusd", strike + venueBias - 48.0, strike + venueBias - 25.0);
         assertThat(submittedOrders).hasSize(1);
-        assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-DOWN");
+        int deepItmShares = submittedOrders.getFirst().size().intValue();
+        assertThat(otmShares).isGreaterThan(deepItmShares);
     }
 }

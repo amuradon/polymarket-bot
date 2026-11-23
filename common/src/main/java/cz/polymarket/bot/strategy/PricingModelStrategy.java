@@ -21,22 +21,23 @@ import java.math.BigDecimal;
  *   <li><b>EWMA + Retracement-Adjusted Parkinson Volatility</b>: Blends two-horizon 1s return EWMA with a
  *       drift-adjusted Parkinson intra-candle range floor so genuine two-way whipsaws immediately raise
  *       remaining variance without penalizing smooth one-way directional trends.</li>
- *   <li><b>Continuous Two-Regime 60s TWAP Pricing Model</b>: Evaluates heavy-tailed {@code Student-t (df=4)}
- *       settlement probabilities using continuous variance {@code sigma^2 * (tau - 40s) + bridgeFloor^2} prior to
- *       the final minute and locked-in path integration with {@code sigma^2 * (tau^3 / 10800) + bridgeFloor^2}
- *       inside the final 60 seconds.</li>
- *   <li><b>Active Desynchronization & Discipline Gate</b>: Rejects high-whipsaw candles, enforces time-dependent
- *       maximum entry prices, requires fresh 1.25s probability jump confirmation, caps at 2 clips per market,
- *       and forbids averaging down while holding positions to settlement.</li>
+ *   <li><b>Bayesian Merton Jump-Diffusion 60s TWAP Model</b>: Combines continuous two-regime {@code Student-t (df=4)}
+ *       diffusion with time-decaying exogenous jump-reset shrinkage prior to final-minute TWAP lock-in,
+ *       preventing multi-minute tail overconfidence without piecewise price-cap cliffs.</li>
+ *   <li><b>Active Desynchronization & Constant-Dollar-Risk Sizing</b>: Rejects high-whipsaw candles, requires
+ *       fresh 1.25s probability jump confirmation, normalizes share count by contract ask price so equal edge
+ *       carries equal dollar risk, caps at 2 clips per market, and holds positions to settlement.</li>
  * </ol>
  */
 @ApplicationScoped
 public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
 
     private static final int MAX_MC = 1_000;
+    private static final int NEUTRAL_PROB_MC = 500;
     private static final int TICK_STEP_MC = 10;
     private static final long TWAP_WINDOW_MS = 60_000L;
-    private static final long LATE_FULL_PRICE_TAU_MS = 45_000L;
+    private static final long JUMP_HAZARD_ZERO_TAU_MS = 45_000L;
+    private static final long JUMP_HAZARD_SPAN_MS = 255_000L;
     private static final long MAX_TARGET_OFFSET_MS = 10_000L;
     private static final double FOUR_LN_2 = 2.772588722239781;
     private static final double BPS_INV = 1e-4;
@@ -71,6 +72,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private final double maxSingleReturnSq;
     private final double parkinsonScale;
     private final double bridgeFloorSq;
+    private final double maxJumpHazardRatio;
     private final double takerFeeRate;
 
     // Pre-allocated zero-GC circular buffers
@@ -115,7 +117,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private long lockedAnchorStartMs = 0L;
     private long lastIntegratedTsMs = 0L;
     private double lastIntegratedSHatUsd = Double.NaN;
-    private int latestModelProbUpMc = 500;
+    private int latestModelProbUpMc = NEUTRAL_PROB_MC;
 
     // Latest valid CLOB quote snapshot
     private long lastQuoteTsMs = 0L;
@@ -170,6 +172,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         this.parkinsonScale = unwrapped.parkinsonScale();
         double bf = unwrapped.bridgeFloorBps() * BPS_INV;
         this.bridgeFloorSq = bf * bf;
+        this.maxJumpHazardRatio = unwrapped.maxJumpHazardBps() * BPS_INV;
         this.takerFeeRate = unwrapped.takerFeeRateBps() * BPS_INV;
     }
 
@@ -209,14 +212,14 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         }
         this.context = context;
         if (Log.isInfoEnabled()) {
-            Log.infof("Initialized %s (tau=[%d..%d ms], earlyMaxAsk=%d mc, maxWhipsaw=%d bps, minSigma=%.2f bps, edge>=%d mc, maxClips=%d)",
+            Log.infof("Initialized %s (tau=[%d..%d ms], maxAsk=%d mc, maxWhipsaw=%d bps, jumpHazard=%d bps, minSigma=%.2f bps, maxClips=%d)",
                     getName(),
                     config.minTauMs(),
                     config.maxTauMs(),
-                    config.maxEarlyOpenPriceMc(),
+                    config.maxOpenPriceMc(),
                     config.maxWhipsawRangeBps(),
+                    config.maxJumpHazardBps(),
                     config.minSigma1sBps(),
-                    config.minNetEdgeMc(),
                     config.maxOrdersPerMarket());
         }
     }
@@ -261,7 +264,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         lockedAnchorStartMs = 0L;
         lastIntegratedTsMs = 0L;
         lastIntegratedSHatUsd = Double.NaN;
-        latestModelProbUpMc = 500;
+        latestModelProbUpMc = NEUTRAL_PROB_MC;
         lastQuoteTsMs = 0L;
         lastAskUpMc = 0;
         lastBidUpMc = 0;
@@ -504,7 +507,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
      */
     public static int studentT4ProbMc(double z) {
         if (Double.isNaN(z)) {
-            return 500;
+            return NEUTRAL_PROB_MC;
         }
         double z2 = z * z;
         double denom = Math.sqrt(4.0 + z2);
@@ -512,6 +515,25 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         double p = 0.5 + 0.5 * u * (1.0 + 2.0 / (4.0 + z2));
         int mc = (int) Math.round(p * 1_000.0);
         return Math.clamp(mc, 1, MAX_MC - 1);
+    }
+
+    /**
+     * Applies Bayesian Merton jump-diffusion shrinkage to a diffusive {@code Student-t} probability
+     * in millicents as a continuous function of remaining time {@code tauMs}.
+     *
+     * @param rawT4ProbMc diffusive probability in millicents {@code [1..999]}
+     * @param tauMs remaining milliseconds to candle expiry
+     * @param maxJumpHazardRatio maximum jump-reset probability at {@code tau >= 300s}
+     * @return posterior probability in millicents {@code [1..999]}
+     */
+    public static int bayesianJumpMixtureProbMc(int rawT4ProbMc, long tauMs, double maxJumpHazardRatio) {
+        if (maxJumpHazardRatio <= 0.0 || tauMs <= JUMP_HAZARD_ZERO_TAU_MS) {
+            return Math.clamp(rawT4ProbMc, 1, MAX_MC - 1);
+        }
+        double spanFrac = Math.min(1.0, (double) (tauMs - JUMP_HAZARD_ZERO_TAU_MS) / (double) JUMP_HAZARD_SPAN_MS);
+        double eta = maxJumpHazardRatio * spanFrac;
+        int mixed = (int) Math.round((1.0 - eta) * rawT4ProbMc + eta * NEUTRAL_PROB_MC);
+        return Math.clamp(mixed, 1, MAX_MC - 1);
     }
 
     /**
@@ -527,25 +549,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         }
         double p = priceMc * 1e-3;
         return (int) Math.ceil(feeRate * p * (1.0 - p) * 1_000.0);
-    }
-
-    /**
-     * Computes the time-dependent maximum acceptable best-ask price in millicents for a given {@code tauMs}.
-     *
-     * @param tauMs remaining milliseconds to candle expiry
-     * @return maximum entry ask price in millicents
-     */
-    public int effectiveMaxOpenPriceMc(long tauMs) {
-        if (tauMs >= config.earlyPriceCapTauMs()) {
-            return config.maxEarlyOpenPriceMc();
-        }
-        if (tauMs <= LATE_FULL_PRICE_TAU_MS) {
-            return config.maxOpenPriceMc();
-        }
-        long spanMs = config.earlyPriceCapTauMs() - LATE_FULL_PRICE_TAU_MS;
-        long progressMs = config.earlyPriceCapTauMs() - tauMs;
-        return config.maxEarlyOpenPriceMc()
-                + (int) (((config.maxOpenPriceMc() - config.maxEarlyOpenPriceMc()) * progressMs) / spanMs);
     }
 
     private double currentAnchoredSpotUsd() {
@@ -689,7 +692,8 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         double sdRemUsd = sHatUsd * Math.sqrt(Math.max(1e-12, relVarRem));
         double z = (muTwapUsd - targetTwapOpenUsd) / sdRemUsd;
 
-        latestModelProbUpMc = studentT4ProbMc(z);
+        int rawT4Mc = studentT4ProbMc(z);
+        latestModelProbUpMc = bayesianJumpMixtureProbMc(rawT4Mc, remMs, maxJumpHazardRatio);
         recordProbSample(nowMs, latestModelProbUpMc);
     }
 
@@ -765,7 +769,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return;
         }
 
-        int maxAskMc = effectiveMaxOpenPriceMc(tauMs);
+        int maxAskMc = config.maxOpenPriceMc();
         int pUpMc = latestModelProbUpMc;
         int pDownMc = MAX_MC - pUpMc;
 
@@ -803,7 +807,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return;
         }
 
-        int shares = computeOrderShares(chosenEdgeMc, chosenDepthSh, remainingInv);
+        int shares = computeOrderShares(chosenEdgeMc, chosenAskMc, chosenDepthSh, remainingInv);
         if (shares < config.minOrderShares()) {
             return;
         }
@@ -858,12 +862,14 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         return netEdgeMc;
     }
 
-    private int computeOrderShares(int netEdgeMc, int depth1cShares, int remainingInventory) {
+    private int computeOrderShares(int netEdgeMc, int askMc, int depth1cShares, int remainingInventory) {
         int extraEdgeMc = Math.max(0, netEdgeMc - config.minNetEdgeMc());
-        int scaled = config.minOrderShares()
+        int baseShares = config.minOrderShares()
                 + ((extraEdgeMc * (config.maxOrderShares() - config.minOrderShares())) / 80);
+        int riskAdjustedShares = (baseShares * NEUTRAL_PROB_MC) / Math.max(1, askMc);
+        int clampedTarget = Math.clamp(riskAdjustedShares, config.minOrderShares(), config.maxOrderShares());
         int depthCap = Math.max(config.minOrderShares(), depth1cShares / 2);
-        return Math.min(Math.min(scaled, config.maxOrderShares()), Math.min(depthCap, remainingInventory));
+        return Math.min(clampedTarget, Math.min(depthCap, remainingInventory));
     }
 
     private void submitOrder(long nowMs, TradeDirection direction, int askMc, int limitPriceMc, int shares) {
