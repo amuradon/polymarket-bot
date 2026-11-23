@@ -2,6 +2,8 @@ package cz.polymarket.bot.backtest.engine;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.indicator.DailyIndicatorTrack;
+import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
@@ -39,7 +41,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * High-performance event-driven backtesting engine streaming historical market data directly from
- * converted collector Parquet archives ({@code D:\Crypto\data\Polymarket\collector}).
+ * converted collector Parquet archives ({@code D:\Crypto\data\Polymarket\collector}) and cached
+ * indicator Parquet archives ({@code D:\Crypto\data\Polymarket\cache\<indicator>\<hash>}).
  * <p>
  * Orders all events strictly by the local EC2 receipt timestamp ({@code ts}), simulates
  * time-varying execution latency derived from Polymarket CLOB server-vs-receipt timestamps
@@ -51,6 +54,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class BacktestEngine {
 
     private final CollectorParquetDatasetService datasetService;
+    private final IndicatorCacheService indicatorCacheService;
     private final StrategyRegistry strategyRegistry;
     private final PerformanceMetricsCalculator metricsCalculator;
     private final BacktestJsonExporter jsonExporter;
@@ -66,9 +70,11 @@ public class BacktestEngine {
     private final ExecutorService workerPool;
 
     /**
-     * Primary constructor with all dependencies, worker pool sizing, and simulated exchange delays injected.
+     * Primary constructor with all dependencies, indicator cache service, worker pool sizing,
+     * and simulated exchange delays injected.
      *
      * @param datasetService collector Parquet dataset discovery and path resolution service
+     * @param indicatorCacheService deterministic indicator Parquet cache and single-pass computation service
      * @param strategyRegistry registry resolving requested strategies
      * @param metricsCalculator performance metrics calculation service
      * @param jsonExporter exporter serializing backtest results to disk
@@ -85,6 +91,7 @@ public class BacktestEngine {
     @Inject
     public BacktestEngine(
             CollectorParquetDatasetService datasetService,
+            IndicatorCacheService indicatorCacheService,
             StrategyRegistry strategyRegistry,
             PerformanceMetricsCalculator metricsCalculator,
             BacktestJsonExporter jsonExporter,
@@ -109,6 +116,10 @@ public class BacktestEngine {
         if (datasetService == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: datasetService cannot be null");
             throw new IllegalArgumentException("datasetService cannot be null");
+        }
+        if (indicatorCacheService == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: indicatorCacheService cannot be null");
+            throw new IllegalArgumentException("indicatorCacheService cannot be null");
         }
         if (strategyRegistry == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: strategyRegistry cannot be null");
@@ -135,6 +146,7 @@ public class BacktestEngine {
             throw new IllegalArgumentException("coinbaseDelayMs must be non-negative");
         }
         this.datasetService = datasetService;
+        this.indicatorCacheService = indicatorCacheService;
         this.strategyRegistry = strategyRegistry;
         this.metricsCalculator = metricsCalculator;
         this.jsonExporter = jsonExporter;
@@ -258,7 +270,7 @@ public class BacktestEngine {
             throw new IllegalArgumentException(msg);
         }
 
-        // Group markets by UTC day so shared daily Polymarket streams are loaded strictly once per day
+        // Group markets by UTC day so shared daily Polymarket streams and cached indicators are loaded strictly once per day
         Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
         for (CollectorMarketMetadata market : markets) {
             String dayKey = market.dateStr() != null ? market.dateStr() : "";
@@ -283,12 +295,17 @@ public class BacktestEngine {
                         !dateStr.isBlank() ? dateStr : "UNKNOWN", dayMarketCount, sym);
             }
 
-            // 1. Load shared daily streams strictly ONCE for this UTC day
+            // 1. Load shared daily Polymarket streams strictly ONCE for this UTC day
             BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
                     ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr)
                     : new BacktestEvent[0];
 
-            // 2. Process the day's 15-minute Polymarket markets across the dedicated worker pool
+            // 2. Load cached daily indicator tracks (or compute and cache missing indicators in a single raw pass)
+            List<DailyIndicatorTrack> dailyIndicatorTracks = !dateStr.isBlank()
+                    ? indicatorCacheService.loadOrComputeDailyIndicators(datasetService, sym, dateStr)
+                    : List.of();
+
+            // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
             MarketSimulationOutcome[] dayOutcomes = new MarketSimulationOutcome[dayMarketCount];
             int numWorkers = parallelCapable ? Math.min(dayMarketCount, workerCount) : 1;
 
@@ -297,11 +314,11 @@ public class BacktestEngine {
                         new AtomicInteger(0),
                         dayMarkets,
                         sharedDailyEvents,
+                        dailyIndicatorTracks,
                         dayOutcomes,
                         strategy,
                         parallelCapable,
-                        resolvedLatencyFactor,
-                        sym
+                        resolvedLatencyFactor
                 );
             } else {
                 AtomicInteger cursor = new AtomicInteger(0);
@@ -311,11 +328,11 @@ public class BacktestEngine {
                             cursor,
                             dayMarkets,
                             sharedDailyEvents,
+                            dailyIndicatorTracks,
                             dayOutcomes,
                             strategy,
                             true,
-                            resolvedLatencyFactor,
-                            sym
+                            resolvedLatencyFactor
                     ), workerPool);
                 }
                 CompletableFuture.allOf(workers).join();
@@ -404,18 +421,17 @@ public class BacktestEngine {
             AtomicInteger cursor,
             List<CollectorMarketMetadata> dayMarkets,
             BacktestEvent[] sharedDailyEvents,
+            List<DailyIndicatorTrack> dailyIndicatorTracks,
             MarketSimulationOutcome[] dayOutcomes,
             TradingStrategy templateStrategy,
             boolean createWorkerStrategyCopy,
-            double resolvedLatencyFactor,
-            String symbol) {
+            double resolvedLatencyFactor) {
 
         int total = dayMarkets.size();
         PolymarketOrderBook orderBook = new PolymarketOrderBook();
         SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
 
-        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(
-                datasetService.getDuckDbSessionManager(), binanceDelayMs, krakenDelayMs, coinbaseDelayMs)) {
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(datasetService.getDuckDbSessionManager())) {
             matchingEngine.setEventScheduler(streamer::scheduleEvent);
             BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine);
 
@@ -462,7 +478,7 @@ public class BacktestEngine {
                 context.resetForCandle();
 
                 streamer.clear();
-                streamer.loadCandleEvents(market, sharedDailyEvents, datasetService, symbol, clobLookbackMs);
+                streamer.loadCandleEvents(market, sharedDailyEvents, dailyIndicatorTracks, clobLookbackMs);
 
                 List<TradeRecord> marketTrades = List.of();
                 double brierDiffSq = 0.0;

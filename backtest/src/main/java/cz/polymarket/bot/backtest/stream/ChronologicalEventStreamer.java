@@ -1,9 +1,9 @@
 package cz.polymarket.bot.backtest.stream;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
+import cz.polymarket.bot.backtest.indicator.DailyIndicatorTrack;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
-import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
 
@@ -13,7 +13,6 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -25,32 +24,28 @@ import java.util.function.BiConsumer;
 /**
  * High-performance chronological event multiplexer and streamer for backtesting.
  * <p>
- * Streams captured events from typed collector Parquet archives ordered strictly by the local EC2
- * capture timestamp {@code ts} ({@link BacktestEvent#timestampMs()}) using a zero-copy 3-way merge
- * over:
+ * Streams captured events from typed collector Parquet archives and cached daily indicator tracks
+ * ordered strictly by the local EC2 capture or simulated arrival timestamp {@code ts}
+ * ({@link BacktestEvent#timestampMs()}) using a zero-copy 4-way merge over:
  * <ol>
  *   <li>Lazy DuckDB streaming cursor grouping typed Polymarket CLOB {@code frame_id} rows,</li>
- *   <li>Direct array cursor over shared daily stream events ({@code O(log N)} binary search slice), and</li>
+ *   <li>Direct array cursor over shared daily Polymarket stream events ({@code O(log N)} binary search slice),</li>
+ *   <li>Direct columnar cursors over cached daily indicator tracks ({@code O(log N)} binary search slice), and</li>
  *   <li>Small priority queue for candle lifecycle milestones and dynamically scheduled pending orders.</li>
  * </ol>
  */
 public class ChronologicalEventStreamer implements AutoCloseable {
 
     private static final BacktestEvent[] EMPTY_EVENTS = new BacktestEvent[0];
+    private static final IndicatorSliceCursor[] EMPTY_INDICATOR_CURSORS = new IndicatorSliceCursor[0];
     private static final boolean[] EMPTY_BOOLEANS = new boolean[0];
     private static final int[] EMPTY_INTS = new int[0];
     private static final double[] EMPTY_DOUBLES = new double[0];
     private static final long BOUNDARY_TWAP_OFFSET_MS = 10_000L;
     private static final long FAST_SNAPSHOT_LOOKBACK_MS = 30_000L;
-    private static final long SPOT_TWAP_WARMUP_MS = 65_000L;
-    private static final long KRAKEN_USDT_WARMUP_MS = 1_800_000L;
 
     private final DuckDbSessionManager duckDbSessionManager;
-    private final long binanceDelayMs;
-    private final long krakenDelayMs;
-    private final long coinbaseDelayMs;
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(16);
-    private final SpotTwapIndicator calculatedSpotTwapEngine = new SpotTwapIndicator();
 
     private Connection sharedConnection;
     private Statement clobStatement;
@@ -58,86 +53,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private Path activeClobFile;
     private long clobSeq;
     private BacktestEvent.PolymarketClobFrameEvent nextClobEvent;
-
-    private final SpotVenueCursor[] venueCursors = {
-            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.BINANCE),
-            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.COINBASE),
-            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.KRAKEN)
-    };
-    private Connection calcKrakenConnection;
-    private Statement calcKrakenStatement;
-    private ResultSet calcKrakenResultSet;
-    private boolean hasNextKrakenRow;
-    private long nextKrakenTsMs;
-    private double nextKrakenPrice;
-    private String calcCryptoSymbol;
-    private long calcSpotSeq;
-    private BacktestEvent.CalculatedSpotTwapEvent nextCalculatedSpotTwapEvent;
-
-    private final class SpotVenueCursor {
-        final SpotTwapIndicator.SpotVenue venue;
-        Connection connection;
-        Statement statement;
-        ResultSet resultSet;
-        boolean hasNextRow;
-        long nextTsMs;
-        double nextPrice;
-        double nextQty;
-
-        SpotVenueCursor(SpotTwapIndicator.SpotVenue venue) {
-            this.venue = venue;
-        }
-
-        void open(String sql) throws SQLException {
-            closeStream();
-            if (connection == null || connection.isClosed()) {
-                connection = duckDbSessionManager.openSession();
-            }
-            statement = connection.createStatement();
-            resultSet = statement.executeQuery(sql);
-            advance();
-        }
-
-        void advance() throws SQLException {
-            if (resultSet != null && resultSet.next()) {
-                nextTsMs = resultSet.getLong(1);
-                nextPrice = resultSet.getDouble(2);
-                nextQty = resultSet.getDouble(3);
-                hasNextRow = true;
-            } else {
-                hasNextRow = false;
-            }
-        }
-
-        void closeStream() {
-            hasNextRow = false;
-            if (resultSet != null) {
-                try {
-                    resultSet.close();
-                } catch (SQLException ignored) {
-                }
-                resultSet = null;
-            }
-            if (statement != null) {
-                try {
-                    statement.close();
-                } catch (SQLException ignored) {
-                }
-                statement = null;
-            }
-        }
-
-        void closeConnection() {
-            closeStream();
-            if (connection != null) {
-                try {
-                    connection.close();
-                } catch (SQLException ignored) {
-                }
-                connection = null;
-            }
-        }
-    }
 
     // 1-row lookahead state and reusable scratch buffers for grouping consecutive frame_id rows
     private boolean hasLookaheadClobRow;
@@ -160,66 +75,67 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private int[] scratchTicks = new int[128];
     private double[] scratchSizes = new double[128];
 
-    // Zero-copy daily event array slice cursor
+    // Zero-copy daily Polymarket event array slice cursor
     private BacktestEvent[] activeDailyEvents = EMPTY_EVENTS;
     private int dailyCursorIdx = 0;
     private int dailyEndIdx = 0;
 
+    // Zero-copy daily indicator track slice cursors
+    private IndicatorSliceCursor[] activeIndicatorCursors = EMPTY_INDICATOR_CURSORS;
+    private BacktestEvent nextIndicatorEvent;
+
+    private static final class IndicatorSliceCursor {
+        final DailyIndicatorTrack track;
+        final int endIdx;
+        int cursorIdx;
+        BacktestEvent headEvent;
+
+        IndicatorSliceCursor(DailyIndicatorTrack track, int startIdx, int endIdx) {
+            this.track = track;
+            this.cursorIdx = startIdx;
+            this.endIdx = endIdx;
+            this.headEvent = startIdx < endIdx ? track.eventAt(startIdx) : null;
+        }
+
+        void advance() {
+            cursorIdx++;
+            headEvent = cursorIdx < endIdx ? track.eventAt(cursorIdx) : null;
+        }
+    }
+
     /**
-     * Constructs a chronological event streamer backed by the shared DuckDB session manager and
-     * per-exchange simulated feed delays.
+     * Constructs a chronological event streamer backed by the shared DuckDB session manager.
      *
      * @param duckDbSessionManager shared DuckDB session manager providing streaming connections
-     * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
-     * @param krakenDelayMs simulated Kraken one-way feed delay in milliseconds
-     * @param coinbaseDelayMs simulated Coinbase one-way feed delay in milliseconds
      */
-    public ChronologicalEventStreamer(
-            DuckDbSessionManager duckDbSessionManager,
-            long binanceDelayMs,
-            long krakenDelayMs,
-            long coinbaseDelayMs) {
+    public ChronologicalEventStreamer(DuckDbSessionManager duckDbSessionManager) {
         if (duckDbSessionManager == null) {
             Log.error("Invalid argument in ChronologicalEventStreamer: duckDbSessionManager cannot be null");
             throw new IllegalArgumentException("duckDbSessionManager cannot be null");
         }
-        if (binanceDelayMs < 0L) {
-            Log.error("Invalid argument in ChronologicalEventStreamer: binanceDelayMs must be non-negative");
-            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
-        }
-        if (krakenDelayMs < 0L) {
-            Log.error("Invalid argument in ChronologicalEventStreamer: krakenDelayMs must be non-negative");
-            throw new IllegalArgumentException("krakenDelayMs must be non-negative");
-        }
-        if (coinbaseDelayMs < 0L) {
-            Log.error("Invalid argument in ChronologicalEventStreamer: coinbaseDelayMs must be non-negative");
-            throw new IllegalArgumentException("coinbaseDelayMs must be non-negative");
-        }
         this.duckDbSessionManager = duckDbSessionManager;
-        this.binanceDelayMs = binanceDelayMs;
-        this.krakenDelayMs = krakenDelayMs;
-        this.coinbaseDelayMs = coinbaseDelayMs;
     }
 
     /**
-     * Checks if there are pending events in the CLOB stream, calculated Spot/TWAP stream, daily slice cursor, or priority queue.
+     * Checks if there are pending events in the CLOB stream, indicator track cursors, daily slice cursor, or priority queue.
      *
      * @return true if more events exist
      */
     public boolean hasNext() {
-        return nextClobEvent != null || nextCalculatedSpotTwapEvent != null || dailyCursorIdx < dailyEndIdx || !queue.isEmpty();
+        return nextClobEvent != null || nextIndicatorEvent != null || dailyCursorIdx < dailyEndIdx || !queue.isEmpty();
     }
 
     /**
      * Retrieves and removes the next chronological event via {@code O(1)} merge across
-     * the active CLOB cursor, the zero-copy daily stream cursor, the calculated Spot/TWAP cursor, and the dynamic priority queue.
+     * the active CLOB cursor, the zero-copy daily stream cursor, the daily indicator track cursors,
+     * and the dynamic priority queue.
      *
      * @return next event, or null if no events remain
      */
     public BacktestEvent next() {
         BacktestEvent a = nextClobEvent;
         BacktestEvent b = (dailyCursorIdx < dailyEndIdx) ? activeDailyEvents[dailyCursorIdx] : null;
-        BacktestEvent c = nextCalculatedSpotTwapEvent;
+        BacktestEvent c = nextIndicatorEvent;
         BacktestEvent d = queue.peek();
 
         int winner = 0;
@@ -250,7 +166,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 yield b;
             }
             case 3 -> {
-                advanceCalculatedSpotTwapCursor();
+                advanceIndicatorCursor();
                 yield c;
             }
             case 4 -> queue.poll();
@@ -270,11 +186,12 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Clears all pending events, resets the daily slice cursor, and closes any active CLOB and calculated Spot/TWAP cursors.
+     * Clears all pending events, resets the daily and indicator slice cursors, and closes any active CLOB cursor.
      */
     public void clear() {
         closeClobStream();
-        closeCalculatedSpotTwapStream();
+        activeIndicatorCursors = EMPTY_INDICATOR_CURSORS;
+        nextIndicatorEvent = null;
         activeDailyEvents = EMPTY_EVENTS;
         dailyCursorIdx = 0;
         dailyEndIdx = 0;
@@ -379,39 +296,19 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     }
 
     /**
-     * Loads chronological events for a specific 15-minute market interval using pre-loaded shared daily
-     * stream events (always covering the full {@code [tStartMs, tEndMs]} interval including boundary 60s TWAP)
-     * while optionally pruning Polymarket CLOB frames to the final {@code clobLookbackMs} window seeded
-     * from the latest pre-window {@code book} snapshots.
-     *
-     * @param metadata market metadata descriptor
-     * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
-     * @param clobLookbackMs lookback window before {@code tEndMs} in milliseconds (or {@link Long#MAX_VALUE} for full stream)
-     */
-    public void loadCandleEvents(
-            CollectorMarketMetadata metadata,
-            BacktestEvent[] sharedDailyStreamEvents,
-            long clobLookbackMs) {
-        loadCandleEvents(metadata, sharedDailyStreamEvents, null, null, clobLookbackMs);
-    }
-
-    /**
      * Loads all chronological events for a specific 15-minute market interval using pre-loaded
-     * shared daily stream events for the UTC day and lazily streaming the Polymarket CLOB file
-     * (optionally pruned to {@code clobLookbackMs}) plus the calculated USD Spot &amp; 60s TWAP
-     * from Binance, Coinbase, and Kraken Spot Parquet files.
+     * shared daily Polymarket stream events, pre-loaded or cached daily indicator tracks, and lazily
+     * streaming the Polymarket CLOB file (optionally pruned to {@code clobLookbackMs}).
      *
      * @param metadata market metadata descriptor
-     * @param sharedDailyStreamEvents pre-loaded sorted daily stream events for the market's UTC day
-     * @param datasetService optional collector Parquet dataset service for streaming Binance/Coinbase/Kraken files
-     * @param symbol optional trading asset symbol
+     * @param sharedDailyStreamEvents pre-loaded sorted daily Polymarket stream events for the market's UTC day
+     * @param dailyIndicatorTracks pre-loaded or cached daily indicator tracks for the market's UTC day
      * @param clobLookbackMs lookback window before {@code tEndMs} in milliseconds (or {@link Long#MAX_VALUE} for full stream)
      */
     public void loadCandleEvents(
             CollectorMarketMetadata metadata,
             BacktestEvent[] sharedDailyStreamEvents,
-            CollectorParquetDatasetService datasetService,
-            String symbol,
+            List<DailyIndicatorTrack> dailyIndicatorTracks,
             long clobLookbackMs) {
 
         if (metadata == null) {
@@ -426,10 +323,8 @@ public class ChronologicalEventStreamer implements AutoCloseable {
 
         scheduleMandatoryLifecycleEvents(tStart, tEnd, tStartMs, tEndMs, actualOutcome);
         prepareDailySlice(sharedDailyStreamEvents, tStartMs, tEndMs, metadata);
+        prepareIndicatorSlices(dailyIndicatorTracks, tStartMs, tEndMs);
         openPolymarketClobStream(metadata.marketParquetFile(), tStartMs, tEndMs, clobLookbackMs);
-        if (datasetService != null && metadata.dateStr() != null && !metadata.dateStr().isBlank()) {
-            openCalculatedSpotTwapStream(datasetService, symbol, metadata.dateStr(), tStartMs, tEndMs);
-        }
     }
 
     private void scheduleMandatoryLifecycleEvents(
@@ -452,224 +347,73 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         ));
     }
 
-    private void openCalculatedSpotTwapStream(
-            CollectorParquetDatasetService datasetService,
-            String symbol,
-            String dateStr,
-            long tStartMs,
-            long tEndMs) {
-        closeCalculatedSpotTwapStream();
-        if (datasetService == null || dateStr == null || dateStr.isBlank()) {
+    private void prepareIndicatorSlices(List<DailyIndicatorTrack> tracks, long tStartMs, long tEndMs) {
+        if (tracks == null || tracks.isEmpty()) {
+            this.activeIndicatorCursors = EMPTY_INDICATOR_CURSORS;
+            this.nextIndicatorEvent = null;
             return;
         }
 
-        String prevDateStr = null;
-        try {
-            prevDateStr = LocalDate.parse(dateStr.trim()).minusDays(1).toString();
-        } catch (Exception ignored) {
+        int trackCount = tracks.size();
+        IndicatorSliceCursor[] cursors = new IndicatorSliceCursor[trackCount];
+        int activeCount = 0;
+
+        for (int i = 0; i < trackCount; i++) {
+            DailyIndicatorTrack track = tracks.get(i);
+            if (track == null || track.isEmpty()) {
+                continue;
+            }
+            int startIdx = track.findFirstIndexAtOrAfter(tStartMs);
+            int endIdx = track.findFirstIndexAfter(tEndMs);
+            if (startIdx < endIdx) {
+                cursors[activeCount++] = new IndicatorSliceCursor(track, startIdx, endIdx);
+            }
         }
 
-        Path curBinanceFile = datasetService.getBinanceSpotAggTradesFile(symbol, dateStr);
-        Path prevBinanceFile = prevDateStr != null ? datasetService.getBinanceSpotAggTradesFile(symbol, prevDateStr) : null;
-        String binanceReadExpr = buildParquetReadExpression(prevBinanceFile, curBinanceFile);
-
-        Path curCoinbaseFile = datasetService.getCoinbaseSpotTradesFile(symbol, dateStr);
-        Path prevCoinbaseFile = prevDateStr != null ? datasetService.getCoinbaseSpotTradesFile(symbol, prevDateStr) : null;
-        String coinbaseReadExpr = buildParquetReadExpression(prevCoinbaseFile, curCoinbaseFile);
-
-        Path curKrakenSpotFile = datasetService.getKrakenSpotTradesFile(symbol, dateStr);
-        Path prevKrakenSpotFile = prevDateStr != null ? datasetService.getKrakenSpotTradesFile(symbol, prevDateStr) : null;
-        String krakenSpotReadExpr = buildParquetReadExpression(prevKrakenSpotFile, curKrakenSpotFile);
-
-        if (binanceReadExpr == null && coinbaseReadExpr == null && krakenSpotReadExpr == null) {
+        if (activeCount == 0) {
+            this.activeIndicatorCursors = EMPTY_INDICATOR_CURSORS;
+            this.nextIndicatorEvent = null;
             return;
         }
 
-        long spotWarmupStartMs = Math.max(0L, tStartMs - SPOT_TWAP_WARMUP_MS);
-        long krakenWarmupStartMs = Math.max(0L, tStartMs - KRAKEN_USDT_WARMUP_MS);
-
-        Path curKrakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
-        Path prevKrakenUsdtFile = prevDateStr != null ? datasetService.getKrakenSpotUsdtUsdTradesFile(prevDateStr) : null;
-        String krakenUsdtReadExpr = buildParquetReadExpression(prevKrakenUsdtFile, curKrakenUsdtFile);
-
-        this.calculatedSpotTwapEngine.reset();
-        this.calcCryptoSymbol = CollectorParquetDatasetService.extractBaseAsset(symbol).toLowerCase(Locale.ROOT) + "usd";
-        this.calcSpotSeq = 0L;
-
-        try {
-            if (krakenUsdtReadExpr != null && tEndMs >= krakenDelayMs) {
-                long minKrakenUsdtServerMs = Math.max(0L, krakenWarmupStartMs - krakenDelayMs);
-                long maxKrakenUsdtServerMs = tEndMs - krakenDelayMs;
-                String krakenUsdtSql = "SELECT (CAST(trade_timestamp AS BIGINT) + " + krakenDelayMs + ") AS eff_ts, price FROM " +
-                        krakenUsdtReadExpr +
-                        " WHERE trade_timestamp >= " + minKrakenUsdtServerMs +
-                        " AND trade_timestamp <= " + maxKrakenUsdtServerMs +
-                        " AND price IS NOT NULL" +
-                        " ORDER BY eff_ts ASC, trade_id ASC";
-                this.calcKrakenStatement = getOrCreateCalcKrakenStatement();
-                this.calcKrakenResultSet = this.calcKrakenStatement.executeQuery(krakenUsdtSql);
-                advanceKrakenRow();
-            }
-
-            String binanceSql = buildSpotTradesSql(
-                    binanceReadExpr, "COALESCE(event_time, trade_time)", "COALESCE(quantity, 1.0)",
-                    "aggregate_trade_id", spotWarmupStartMs, tEndMs, binanceDelayMs);
-            if (binanceSql != null) {
-                venueCursors[0].open(binanceSql);
-            }
-
-            String coinbaseSql = buildSpotTradesSql(
-                    coinbaseReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
-                    "trade_id", spotWarmupStartMs, tEndMs, coinbaseDelayMs);
-            if (coinbaseSql != null) {
-                venueCursors[1].open(coinbaseSql);
-            }
-
-            String krakenSpotSql = buildSpotTradesSql(
-                    krakenSpotReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
-                    "trade_id", spotWarmupStartMs, tEndMs, krakenDelayMs);
-            if (krakenSpotSql != null) {
-                venueCursors[2].open(krakenSpotSql);
-            }
-
-            // Advance through the pre-candle warm-up window [spotWarmupStartMs, tStartMs) and stop at first event >= tStartMs
-            while (true) {
-                SpotVenueCursor bestCursor = pickEarliestVenueCursor();
-                if (bestCursor == null) {
-                    break;
-                }
-                long ts = bestCursor.nextTsMs;
-                double price = bestCursor.nextPrice;
-                double qty = bestCursor.nextQty;
-                SpotTwapIndicator.SpotVenue venue = bestCursor.venue;
-                bestCursor.advance();
-
-                consumeKrakenUpTo(ts);
-                double twap60s = calculatedSpotTwapEngine.onVenueTrade(venue, ts, price, qty);
-                if (ts >= tStartMs) {
-                    double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
-                    nextCalculatedSpotTwapEvent = new BacktestEvent.CalculatedSpotTwapEvent(
-                            ts, ++calcSpotSeq, calcCryptoSymbol, spotUsd, twap60s
-                    );
-                    return;
-                }
-            }
-            closeCalculatedSpotTwapStream();
-        } catch (SQLException e) {
-            Log.warnf("Could not stream multi-exchange spot TWAP events for %s on %s: %s", symbol, dateStr, e.getMessage());
-            closeCalculatedSpotTwapStream();
-        }
+        this.activeIndicatorCursors = activeCount == trackCount
+                ? cursors
+                : Arrays.copyOf(cursors, activeCount);
+        advanceIndicatorCursor();
     }
 
-    private void advanceCalculatedSpotTwapCursor() {
-        try {
-            SpotVenueCursor bestCursor = pickEarliestVenueCursor();
-            if (bestCursor != null) {
-                long ts = bestCursor.nextTsMs;
-                double price = bestCursor.nextPrice;
-                double qty = bestCursor.nextQty;
-                SpotTwapIndicator.SpotVenue venue = bestCursor.venue;
-                bestCursor.advance();
-
-                consumeKrakenUpTo(ts);
-                double twap60s = calculatedSpotTwapEngine.onVenueTrade(venue, ts, price, qty);
-                double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
-                nextCalculatedSpotTwapEvent = new BacktestEvent.CalculatedSpotTwapEvent(
-                        ts, ++calcSpotSeq, calcCryptoSymbol, spotUsd, twap60s
-                );
-                return;
-            }
-        } catch (SQLException e) {
-            Log.warnf("Error advancing multi-exchange spot TWAP stream: %s", e.getMessage());
+    private void advanceIndicatorCursor() {
+        IndicatorSliceCursor[] cursors = this.activeIndicatorCursors;
+        int len = cursors.length;
+        if (len == 0) {
+            nextIndicatorEvent = null;
+            return;
         }
-        closeCalculatedSpotTwapStream();
-    }
+        if (len == 1) {
+            IndicatorSliceCursor single = cursors[0];
+            BacktestEvent ev = single.headEvent;
+            if (ev != null) {
+                single.advance();
+            }
+            nextIndicatorEvent = ev;
+            return;
+        }
 
-    private SpotVenueCursor pickEarliestVenueCursor() {
-        SpotVenueCursor best = null;
-        for (int i = 0; i < venueCursors.length; i++) {
-            SpotVenueCursor c = venueCursors[i];
-            if (c.hasNextRow && (best == null || c.nextTsMs < best.nextTsMs)) {
-                best = c;
+        IndicatorSliceCursor bestCursor = null;
+        BacktestEvent bestEvent = null;
+        for (int i = 0; i < len; i++) {
+            IndicatorSliceCursor c = cursors[i];
+            BacktestEvent ev = c.headEvent;
+            if (ev != null && (bestEvent == null || ev.compareTo(bestEvent) < 0)) {
+                bestEvent = ev;
+                bestCursor = c;
             }
         }
-        return best;
-    }
 
-    private void consumeKrakenUpTo(long targetTimestampMs) throws SQLException {
-        while (hasNextKrakenRow && nextKrakenTsMs <= targetTimestampMs) {
-            calculatedSpotTwapEngine.onUsdtUsdTrade(nextKrakenTsMs, nextKrakenPrice);
-            advanceKrakenRow();
+        if (bestCursor != null) {
+            bestCursor.advance();
         }
-    }
-
-    private void advanceKrakenRow() throws SQLException {
-        if (calcKrakenResultSet != null && calcKrakenResultSet.next()) {
-            nextKrakenTsMs = calcKrakenResultSet.getLong(1);
-            nextKrakenPrice = calcKrakenResultSet.getDouble(2);
-            hasNextKrakenRow = true;
-        } else {
-            hasNextKrakenRow = false;
-        }
-    }
-
-    private static String buildSpotTradesSql(
-            String readExpr,
-            String serverTsExpr,
-            String qtyExpr,
-            String tieBreakerCol,
-            long warmupStartMs,
-            long tEndMs,
-            long delayMs) {
-        if (readExpr == null || tEndMs < delayMs) {
-            return null;
-        }
-        long minServerMs = Math.max(0L, warmupStartMs - delayMs);
-        long maxServerMs = tEndMs - delayMs;
-        return "SELECT (CAST(" + serverTsExpr + " AS BIGINT) + " + delayMs + ") AS eff_ts, " +
-                "price, " + qtyExpr + " FROM " + readExpr +
-                " WHERE " + serverTsExpr + " >= " + minServerMs +
-                " AND " + serverTsExpr + " <= " + maxServerMs +
-                " AND price IS NOT NULL" +
-                " ORDER BY eff_ts ASC, " + tieBreakerCol + " ASC";
-    }
-
-    private static String buildParquetReadExpression(Path prevFile, Path curFile) {
-        boolean hasPrev = prevFile != null && Files.exists(prevFile);
-        boolean hasCur = curFile != null && Files.exists(curFile);
-        if (!hasPrev && !hasCur) {
-            return null;
-        }
-        if (hasPrev && hasCur) {
-            String p1 = prevFile.toAbsolutePath().toString().replace('\\', '/');
-            String p2 = curFile.toAbsolutePath().toString().replace('\\', '/');
-            return "read_parquet(['" + p1 + "', '" + p2 + "'])";
-        }
-        Path single = hasCur ? curFile : prevFile;
-        String norm = single.toAbsolutePath().toString().replace('\\', '/');
-        return "read_parquet('" + norm + "')";
-    }
-
-    private void closeCalculatedSpotTwapStream() {
-        nextCalculatedSpotTwapEvent = null;
-        hasNextKrakenRow = false;
-        for (int i = 0; i < venueCursors.length; i++) {
-            venueCursors[i].closeStream();
-        }
-        if (calcKrakenResultSet != null) {
-            try {
-                calcKrakenResultSet.close();
-            } catch (SQLException ignored) {
-            }
-            calcKrakenResultSet = null;
-        }
-        if (calcKrakenStatement != null) {
-            try {
-                calcKrakenStatement.close();
-            } catch (SQLException ignored) {
-            }
-            calcKrakenStatement = null;
-        }
+        nextIndicatorEvent = bestEvent;
     }
 
     private void prepareDailySlice(
@@ -1036,13 +780,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         return sharedConnection.createStatement();
     }
 
-    private Statement getOrCreateCalcKrakenStatement() throws SQLException {
-        if (calcKrakenConnection == null || calcKrakenConnection.isClosed()) {
-            calcKrakenConnection = duckDbSessionManager.openSession();
-        }
-        return calcKrakenConnection.createStatement();
-    }
-
     @Override
     public void close() {
         clear();
@@ -1052,16 +789,6 @@ public class ChronologicalEventStreamer implements AutoCloseable {
             } catch (SQLException ignored) {
             }
             sharedConnection = null;
-        }
-        for (int i = 0; i < venueCursors.length; i++) {
-            venueCursors[i].closeConnection();
-        }
-        if (calcKrakenConnection != null) {
-            try {
-                calcKrakenConnection.close();
-            } catch (SQLException ignored) {
-            }
-            calcKrakenConnection = null;
         }
     }
 }

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
+import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
@@ -188,9 +190,16 @@ class BacktestEngineTest {
                 polymarketOnlyStrategy.getName(), polymarketOnlyStrategy,
                 utterStrategy.getName(), utterStrategy
         ));
+        IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
+                tempDir.resolve("cache"),
+                new ObjectMapper(),
+                List.of(new SpotTwapBacktestIndicator()),
+                100L, 50L, 50L
+        );
 
         backtestEngine = new BacktestEngine(
                 datasetService,
+                indicatorCacheService,
                 strategyRegistry,
                 metricsCalculator,
                 jsonExporter,
@@ -332,8 +341,15 @@ class BacktestEngineTest {
 
             UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             StrategyRegistry localRegistry = new StrategyRegistry(Map.of(utterStrategy.getName(), utterStrategy));
+            IndicatorCacheService localCacheService = new IndicatorCacheService(
+                    tempDir.resolve("cache_utter"),
+                    new ObjectMapper(),
+                    List.of(new SpotTwapBacktestIndicator()),
+                    100L, 50L, 50L
+            );
             BacktestEngine utterEngine = new BacktestEngine(
                     datasetService,
+                    localCacheService,
                     localRegistry,
                     new PerformanceMetricsCalculator(),
                     new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_utter").toString()),
@@ -481,8 +497,15 @@ class BacktestEngineTest {
                     windowedStrategy.getName(), windowedStrategy,
                     fullReplayStrategy.getName(), fullReplayStrategy
             ));
+            IndicatorCacheService eqCacheService = new IndicatorCacheService(
+                    tempDir.resolve("cache_eq"),
+                    new ObjectMapper(),
+                    List.of(new SpotTwapBacktestIndicator()),
+                    100L, 50L, 50L
+            );
             BacktestEngine engine = new BacktestEngine(
                     datasetService,
+                    eqCacheService,
                     registry,
                     new PerformanceMetricsCalculator(),
                     new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_eq").toString()),
@@ -567,29 +590,140 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when any configured exchange delay is negative")
     void shouldThrowWhenExchangeDelayIsNegative(@TempDir Path tempDir) {
         CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDbSessionManager);
+        IndicatorCacheService cacheService = new IndicatorCacheService(
+                tempDir.resolve("cache"), new ObjectMapper(), List.of(new SpotTwapBacktestIndicator()), 100L, 50L, 50L);
         StrategyRegistry registry = new StrategyRegistry(Map.of());
         PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
         BacktestJsonExporter exporter = new BacktestJsonExporter(new ObjectMapper(), tempDir.toString());
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, registry, calc, exporter,
+                datasetService, cacheService, registry, calc, exporter,
                 "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
                 -1L, 50L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("binanceDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, registry, calc, exporter,
+                datasetService, cacheService, registry, calc, exporter,
                 "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
                 100L, -1L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("krakenDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, registry, calc, exporter,
+                datasetService, cacheService, registry, calc, exporter,
                 "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
                 100L, 50L, -1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("coinbaseDelayMs");
+    }
+
+    @Test
+    @DisplayName("Should populate indicator Parquet cache and config.json on first backtest run and reuse cached indicator values after raw exchange files are deleted")
+    void shouldPopulateAndReuseIndicatorCacheAcrossBacktestRuns(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector_cache_e2e");
+            Path cacheDir = tempDir.resolve("cache_e2e");
+            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+
+            long c1Start = BASE_START;
+            String dateStr = "2026-08-01";
+            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
+            Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
+
+            Files.createDirectories(pmDir);
+            Files.createDirectories(twap60sFile.getParent());
+            Files.createDirectories(spotFile.getParent());
+
+            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
+
+            try (Connection conn = localDuckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
+                        "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60100.0::DOUBLE, '60100.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
+                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+                String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60010.0::DOUBLE, 2.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 500L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
+                        "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 60040.0::DOUBLE, 3.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + (c1Start * 1000L + 1500L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
+
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
+                        ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
+                ));
+            }
+
+            List<String> observedSpotTwapTicks = new ArrayList<>();
+            class SpotTwapRecordingStrategy implements TradingStrategy, cz.polymarket.bot.indicators.SpotTwapListener {
+                @Override
+                public String getName() {
+                    return "SpotTwapRecordingStrategy";
+                }
+
+                @Override
+                public void init(StrategyContext context) {}
+
+                @Override
+                public void onSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
+                    observedSpotTwapTicks.add(timestampMs + ":" + symbol + ":" + Math.round(spotPrice) + ":" + Math.round(twap60sPrice));
+                }
+
+                @Override
+                public void onExecutionReport(ExecutionReport report) {}
+            }
+
+            SpotTwapRecordingStrategy recordingStrategy = new SpotTwapRecordingStrategy();
+            SpotTwapBacktestIndicator spotTwapIndicator = new SpotTwapBacktestIndicator();
+            IndicatorCacheService cacheService = new IndicatorCacheService(
+                    cacheDir, new ObjectMapper(), List.of(spotTwapIndicator), 100L, 50L, 50L);
+            StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
+
+            BacktestEngine localEngine = new BacktestEngine(
+                    datasetService,
+                    cacheService,
+                    localRegistry,
+                    new PerformanceMetricsCalculator(),
+                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_cache_e2e").toString()),
+                    recordingStrategy.getName(),
+                    dateStr,
+                    tempDir.resolve("export_cache_e2e").toString(),
+                    10000.0,
+                    1.0,
+                    1,
+                    100L,
+                    50L,
+                    50L
+            );
+
+            try {
+                // First run: Cache Miss -> computes and caches indicator values
+                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
+                        tempDir.resolve("export_cache_e2e_1").toString(), 1.0);
+                List<String> firstRunTicks = new ArrayList<>(observedSpotTwapTicks);
+                assertThat(firstRunTicks).hasSize(2);
+
+                Path cachedParquet = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", dateStr);
+                Path configJson = cacheService.resolveConfigJsonFile(spotTwapIndicator);
+                assertThat(Files.isRegularFile(cachedParquet)).isTrue();
+                assertThat(Files.isRegularFile(configJson)).isTrue();
+
+                // Delete raw exchange Parquet file and re-run -> must read purely from cache
+                Files.delete(spotFile);
+                observedSpotTwapTicks.clear();
+
+                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
+                        tempDir.resolve("export_cache_e2e_2").toString(), 1.0);
+
+                assertThat(observedSpotTwapTicks).isEqualTo(firstRunTicks);
+            } finally {
+                localEngine.shutdown();
+            }
+        }
     }
 }

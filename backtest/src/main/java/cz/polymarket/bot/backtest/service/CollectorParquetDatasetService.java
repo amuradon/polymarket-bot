@@ -69,6 +69,15 @@ public class CollectorParquetDatasetService {
     }
 
     /**
+     * Returns the configured collector root directory path.
+     *
+     * @return collector root {@link Path}
+     */
+    public Path getCollectorRootDir() {
+        return collectorRootDir;
+    }
+
+    /**
      * Returns the shared DuckDB session manager used for reading Parquet archives.
      *
      * @return shared {@link DuckDbSessionManager}

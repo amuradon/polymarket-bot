@@ -7,6 +7,8 @@ import cz.polymarket.bot.backtest.data.BacktestJobStatus;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
 import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
+import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
@@ -365,8 +367,15 @@ class BacktestLoggingTest {
         };
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(testStrategy.getName(), testStrategy));
+        IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
+                tempDir.resolve("cache_log_test"),
+                new ObjectMapper(),
+                List.of(new SpotTwapBacktestIndicator()),
+                100L, 50L, 50L
+        );
         activeEngine = new BacktestEngine(
                 datasetService,
+                indicatorCacheService,
                 registry,
                 new PerformanceMetricsCalculator(),
                 new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("out").toString()),

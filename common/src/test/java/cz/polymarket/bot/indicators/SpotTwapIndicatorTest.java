@@ -155,4 +155,29 @@ class SpotTwapIndicatorTest {
         indicator.notifyListeners(3_000L, "btcusd");
         assertThat(secondEvents).hasSize(2);
     }
+
+    @Test
+    @DisplayName("Should expose canonical indicator name and deterministic configuration parameter map")
+    void shouldExposeIndicatorNameAndDeterministicConfigParameters() {
+        SpotTwapIndicatorConfig config = SpotTwapIndicatorConfig.defaults();
+        SpotTwapIndicator indicator = new SpotTwapIndicator(config);
+
+        assertThat(indicator.getName()).isEqualTo("SpotTwapIndicator");
+        assertThat(indicator.getConfig()).isSameAs(config);
+        assertThat(indicator.getConfigurationParameters())
+                .containsEntry("binanceBaseWeight", 0.45)
+                .containsEntry("coinbaseBaseWeight", 0.35)
+                .containsEntry("krakenBaseWeight", 0.20)
+                .containsEntry("twapWindowMs", 60_000L)
+                .containsEntry("spotWarmupMs", 65_000L)
+                .containsEntry("krakenUsdtWarmupMs", 1_800_000L);
+        assertThat(new ArrayList<>(indicator.getConfigurationParameters().keySet()))
+                .isSorted();
+
+        assertThatThrownBy(() -> SpotTwapIndicatorConfig.unwrap(null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new SpotTwapIndicatorConfig(
+                0.0, 0.35, 0.20, 5000.0, 250.0, 10000.0, 5000.0, 300000L, 1e-4, 0.70, 0.30, 0.001, 60000L, 65000L, 1800000L))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

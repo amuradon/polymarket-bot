@@ -1,8 +1,12 @@
 package cz.polymarket.bot.backtest.stream;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
+import cz.polymarket.bot.backtest.indicator.DailyIndicatorTrack;
+import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
+import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.domain.Timeframe;
@@ -29,7 +33,7 @@ class ChronologicalEventStreamerTest {
     @DisplayName("Should pop events strictly in ascending receipt timestamp (ts) order")
     void shouldPopEventsInAscendingOrder() {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
             streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(3000L, 1L, "btcusd", "chainlink", 60200.0, 2995L));
             streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(1000L, 2L, "btcusd", "chainlink", 60000.0, 995L));
             streamer.scheduleEvent(new BacktestEvent.CalculatedSpotTwapEvent(2000L, 3L, "btcusd", 60100.0, 60050.0));
@@ -44,10 +48,16 @@ class ChronologicalEventStreamerTest {
     }
 
     @Test
-    @DisplayName("Should stream typed Polymarket CLOB frames, price_crypto, price_crypto_twap_60s, and CalculatedSpotTwapEvents")
+    @DisplayName("Should stream typed Polymarket CLOB frames, price_crypto, price_crypto_twap_60s, and cached CalculatedSpotTwapEvents")
     void shouldStreamPolymarketAndCalculatedSpotTwapStreams(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
+            IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
+                    tempDir.resolve("cache"),
+                    new ObjectMapper(),
+                    List.of(new SpotTwapBacktestIndicator()),
+                    100L, 50L, 50L
+            );
 
             long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
             long tEnd = tStart + 900L;
@@ -105,8 +115,11 @@ class ChronologicalEventStreamerTest {
 
             BacktestEvent[] sharedDaily = ChronologicalEventStreamer.loadSharedDailyStreams(
                     datasetService, "BTCUSDT", dateStr);
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-                streamer.loadCandleEvents(metadata, sharedDaily, datasetService, "BTCUSDT", Long.MAX_VALUE);
+            List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", dateStr);
+
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+                streamer.loadCandleEvents(metadata, sharedDaily, dailyIndicators, Long.MAX_VALUE);
 
                 int clobCount = 0;
                 int clobLevelSum = 0;
@@ -140,7 +153,7 @@ class ChronologicalEventStreamerTest {
     }
 
     @Test
-    @DisplayName("Should lazily 3-way merge CLOB frames, daily cursor, and dynamically scheduled pending orders")
+    @DisplayName("Should lazily merge CLOB frames, daily cursor, and dynamically scheduled pending orders")
     void shouldLazilyMergeStreamClobEventsWithDynamicEvents(@TempDir Path tempDir) throws Exception {
         long tStart = 1785542400L;
         long tEnd = tStart + 900L;
@@ -165,8 +178,8 @@ class ChronologicalEventStreamerTest {
         };
 
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-            streamer.loadCandleEvents(metadata, daily, Long.MAX_VALUE);
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+            streamer.loadCandleEvents(metadata, daily, List.of(), Long.MAX_VALUE);
 
             List<BacktestEvent> observed = new ArrayList<>();
             boolean scheduledDynamicOrder = false;
@@ -201,7 +214,7 @@ class ChronologicalEventStreamerTest {
             );
 
             // Verify clear() mid-stream closes active ResultSet cleanly and resets daily cursor
-            streamer.loadCandleEvents(metadata, daily, Long.MAX_VALUE);
+            streamer.loadCandleEvents(metadata, daily, List.of(), Long.MAX_VALUE);
             assertThat(streamer.hasNext()).isTrue();
             streamer.clear();
             assertThat(streamer.hasNext()).isFalse();
@@ -209,10 +222,16 @@ class ChronologicalEventStreamerTest {
     }
 
     @Test
-    @DisplayName("Should merge-stream Binance, Coinbase, and Kraken spot trades with Kraken USDT/USD peg into CalculatedSpotTwapEvents")
+    @DisplayName("Should merge-stream Binance, Coinbase, and Kraken spot trades with Kraken USDT/USD peg into cached CalculatedSpotTwapEvents")
     void shouldMergeStreamMultiExchangeSpotTradesIntoCalculatedSpotTwapEvents(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
+            IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
+                    tempDir.resolve("cache"),
+                    new ObjectMapper(),
+                    List.of(new SpotTwapBacktestIndicator()),
+                    100L, 50L, 50L
+            );
 
             long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
             long tEnd = tStart + 900L;
@@ -276,8 +295,11 @@ class ChronologicalEventStreamerTest {
                     "1001", "1002", 70000.0, 70030.0, TradeDirection.UP
             );
 
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-                streamer.loadCandleEvents(metadata, new BacktestEvent[0], datasetService, "BTCUSDT", Long.MAX_VALUE);
+            List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", dateStr);
+
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+                streamer.loadCandleEvents(metadata, new BacktestEvent[0], dailyIndicators, Long.MAX_VALUE);
 
                 List<BacktestEvent.CalculatedSpotTwapEvent> calcEvents = new ArrayList<>();
                 while (streamer.hasNext()) {
@@ -335,9 +357,9 @@ class ChronologicalEventStreamerTest {
 
         PolymarketOrderBook book = new PolymarketOrderBook();
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
-             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
+             ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
 
-            streamer.loadCandleEvents(metadata, daily, 76_000L);
+            streamer.loadCandleEvents(metadata, daily, List.of(), 76_000L);
 
             List<Long> clobTimestamps = new ArrayList<>();
             List<Double> twapPrices = new ArrayList<>();
@@ -378,6 +400,12 @@ class ChronologicalEventStreamerTest {
     void shouldReorderSpotTradesByExchangeDelayAndRespectBoundaries(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
+            IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
+                    tempDir.resolve("cache"),
+                    new ObjectMapper(),
+                    List.of(new SpotTwapBacktestIndicator()),
+                    100L, 50L, 50L
+            );
 
             long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
             long tEnd = tStart + 900L;
@@ -415,7 +443,7 @@ class ChronologicalEventStreamerTest {
                 // Binance Spot:
                 // 1) event_time populated (-60ms + 100ms = baseMs + 40ms -> shifted INTO candle!)
                 // 2) event_time NULL, trade_time (+1000ms + 100ms = baseMs + 1100ms -> arrives AFTER Coinbase & Kraken!)
-                // 3) trade_time near candle close (endMs - 50ms + 100ms = endMs + 50ms -> excluded!)
+                // 3) trade_time near candle close (endMs - 50ms + 100ms = endMs + 50ms -> excluded from candle 1!)
                 String normBinance = binanceSpotFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
                         "(" + (baseMs - 60L) + "::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 69950.0::DOUBLE, 1.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (baseMs - 70L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
@@ -441,8 +469,11 @@ class ChronologicalEventStreamerTest {
                     "1001", "1002", 70000.0, 70100.0, TradeDirection.UP
             );
 
-            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb, 100L, 50L, 50L)) {
-                streamer.loadCandleEvents(metadata, new BacktestEvent[0], datasetService, "BTCUSDT", Long.MAX_VALUE);
+            List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", dateStr);
+
+            try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
+                streamer.loadCandleEvents(metadata, new BacktestEvent[0], dailyIndicators, Long.MAX_VALUE);
 
                 List<BacktestEvent.CalculatedSpotTwapEvent> calcEvents = new ArrayList<>();
                 while (streamer.hasNext()) {

@@ -1,9 +1,11 @@
 package cz.polymarket.bot.indicators;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Zero-allocation multi-exchange spot & 60-second Time-Weighted Average Price (TWAP) indicator
@@ -21,7 +23,10 @@ import java.util.List;
  * without heap allocations on the hot path.
  */
 @ApplicationScoped
-public class SpotTwapIndicator {
+public class SpotTwapIndicator implements Indicator {
+
+    /** Canonical indicator name used for cache paths and metadata descriptors. */
+    public static final String INDICATOR_NAME = "SpotTwapIndicator";
 
     /**
      * Constituent spot exchanges contributing to the Chainlink-emulated USD spot price.
@@ -73,7 +78,7 @@ public class SpotTwapIndicator {
     public static final long MAX_VENUE_AGE_MS = 300_000L;
 
     /** Minimum staleness weight floor for active venues. */
-    private static final double MIN_STALENESS_FACTOR = 1e-4;
+    public static final double MIN_STALENESS_FACTOR = 1e-4;
 
     /** Share of structural baseline weight in the venue liquidity blend (70%). */
     public static final double BASE_WEIGHT_SHARE = 0.70;
@@ -87,12 +92,13 @@ public class SpotTwapIndicator {
     /** Rolling window length (60,000 ms) for the calculated USD 60-second TWAP. */
     public static final long TWAP_WINDOW_MS = 60_000L;
 
+    /** Default pre-day / pre-session spot trade warm-up window (65,000 ms). */
+    public static final long DEFAULT_SPOT_WARMUP_MS = 65_000L;
+
+    /** Default pre-day / pre-session Kraken {@code USDT/USD} peg warm-up window (1,800,000 ms = 30 minutes). */
+    public static final long DEFAULT_KRAKEN_USDT_WARMUP_MS = 1_800_000L;
+
     private static final int VENUE_COUNT = 3;
-    private static final double[] BASE_WEIGHTS = {
-            SpotVenue.BINANCE.baseWeight(),
-            SpotVenue.COINBASE.baseWeight(),
-            SpotVenue.KRAKEN.baseWeight()
-    };
 
     /**
      * Power-of-two circular buffer capacity (65,536 entries).
@@ -101,6 +107,19 @@ public class SpotTwapIndicator {
      */
     private static final int CAPACITY = 65_536;
     private static final int MASK = CAPACITY - 1;
+
+    private final SpotTwapIndicatorConfig config;
+    private final double[] baseWeights;
+    private final double usdtEmaTauMs;
+    private final double microVwapTauMs;
+    private final double rollingVolTauMs;
+    private final double stalenessTauMs;
+    private final long maxVenueAgeMs;
+    private final double minStalenessFactor;
+    private final double baseWeightShare;
+    private final double volumeWeightShare;
+    private final double outlierToleranceRatio;
+    private final long twapWindowMs;
 
     private final long[] timestampsMs = new long[CAPACITY];
     private final double[] pricesUsd = new double[CAPACITY];
@@ -124,6 +143,59 @@ public class SpotTwapIndicator {
     private long lastAssetTimestampMs = -1L;
 
     private final List<SpotTwapListener> listeners = new ArrayList<>();
+
+    /**
+     * Constructs a {@link SpotTwapIndicator} with default calibrated configuration constants.
+     */
+    public SpotTwapIndicator() {
+        this(SpotTwapIndicatorConfig.defaults());
+    }
+
+    /**
+     * Constructs a {@link SpotTwapIndicator} with the supplied configuration bean,
+     * unwrapping any CDI client proxy into primitive hot-path fields.
+     *
+     * @param config indicator configuration bean
+     */
+    @Inject
+    public SpotTwapIndicator(SpotTwapIndicatorConfig config) {
+        SpotTwapIndicatorConfig unwrapped = SpotTwapIndicatorConfig.unwrap(config);
+        this.config = unwrapped;
+        this.baseWeights = new double[] {
+                unwrapped.binanceBaseWeight(),
+                unwrapped.coinbaseBaseWeight(),
+                unwrapped.krakenBaseWeight()
+        };
+        this.usdtEmaTauMs = unwrapped.usdtEmaTauMs();
+        this.microVwapTauMs = unwrapped.microVwapTauMs();
+        this.rollingVolTauMs = unwrapped.rollingVolTauMs();
+        this.stalenessTauMs = unwrapped.stalenessTauMs();
+        this.maxVenueAgeMs = unwrapped.maxVenueAgeMs();
+        this.minStalenessFactor = unwrapped.minStalenessFactor();
+        this.baseWeightShare = unwrapped.baseWeightShare();
+        this.volumeWeightShare = unwrapped.volumeWeightShare();
+        this.outlierToleranceRatio = unwrapped.outlierToleranceRatio();
+        this.twapWindowMs = unwrapped.twapWindowMs();
+    }
+
+    @Override
+    public String getName() {
+        return INDICATOR_NAME;
+    }
+
+    @Override
+    public Map<String, Object> getConfigurationParameters() {
+        return config.toParameterMap();
+    }
+
+    /**
+     * Returns the immutable configuration governing this indicator instance.
+     *
+     * @return {@link SpotTwapIndicatorConfig}
+     */
+    public SpotTwapIndicatorConfig getConfig() {
+        return config;
+    }
 
     /**
      * Registers a {@link SpotTwapListener} to receive spot & 60s TWAP updates.
@@ -180,6 +252,7 @@ public class SpotTwapIndicator {
     /**
      * Resets all internal venue, EMA, and 60s TWAP state.
      */
+    @Override
     public void reset() {
         head = 0;
         len = 0;
@@ -201,11 +274,11 @@ public class SpotTwapIndicator {
     }
 
     /**
-     * Updates the 5-second time-weighted EMA of the {@code USDT/USD} peg from a Kraken spot trade.
+     * Updates the time-weighted EMA of the {@code USDT/USD} peg from a Kraken spot trade.
      *
      * @param timestampMs receipt timestamp in milliseconds UTC
      * @param usdtUsdPrice Kraken {@code USDT/USD} trade price
-     * @return updated 5-second {@code USDT/USD} EMA
+     * @return updated {@code USDT/USD} EMA
      */
     public double onUsdtUsdTrade(long timestampMs, double usdtUsdPrice) {
         if (Double.isNaN(usdtUsdPrice) || usdtUsdPrice <= 0.0 || timestampMs < 0L) {
@@ -219,11 +292,11 @@ public class SpotTwapIndicator {
         }
         long dtMs = Math.max(0L, timestampMs - lastUsdtUsdTimestampMs);
         if (dtMs > 0L) {
-            double alpha = dtMs >= 50_000L ? 1.0 : (1.0 - Math.exp(-dtMs / USDT_EMA_TAU_MS));
+            double alpha = dtMs >= (long) (10.0 * usdtEmaTauMs) ? 1.0 : (1.0 - Math.exp(-dtMs / usdtEmaTauMs));
             usdtUsdEma += alpha * (usdtUsdPrice - usdtUsdEma);
             lastUsdtUsdTimestampMs = timestampMs;
         } else {
-            double alpha = 1.0 - Math.exp(-1.0 / USDT_EMA_TAU_MS);
+            double alpha = 1.0 - Math.exp(-1.0 / usdtEmaTauMs);
             usdtUsdEma += alpha * (usdtUsdPrice - usdtUsdEma);
         }
         return usdtUsdEma;
@@ -307,12 +380,12 @@ public class SpotTwapIndicator {
             venueLastTsMs[vIdx] = timestampMs;
         } else {
             long dtMs = Math.max(0L, timestampMs - prevVenueTs);
-            double microDecay = dtMs >= 5_000L ? 0.0 : Math.exp(-dtMs / MICRO_VWAP_TAU_MS);
+            double microDecay = dtMs >= (long) (20.0 * microVwapTauMs) ? 0.0 : Math.exp(-dtMs / microVwapTauMs);
             double newMicroVol = venueMicroVol[vIdx] * microDecay + qty;
             venuePriceUsd[vIdx] += (qty / newMicroVol) * (tradePriceUsd - venuePriceUsd[vIdx]);
             venueMicroVol[vIdx] = newMicroVol;
 
-            double volDecay = dtMs >= 100_000L ? 0.0 : Math.exp(-dtMs / ROLLING_VOL_TAU_MS);
+            double volDecay = dtMs >= (long) (10.0 * rollingVolTauMs) ? 0.0 : Math.exp(-dtMs / rollingVolTauMs);
             venueRollingVol[vIdx] = venueRollingVol[vIdx] * volDecay + qty;
             if (timestampMs > prevVenueTs) {
                 venueLastTsMs[vIdx] = timestampMs;
@@ -331,16 +404,18 @@ public class SpotTwapIndicator {
         int singleActiveIdx = latestVenueIdx;
         double activeBaseWeightSum = 0.0;
         double totalDecayedVol = 0.0;
+        long volCutoffMs = (long) (10.0 * rollingVolTauMs);
+        long staleCutoffMs = (long) (10.0 * stalenessTauMs);
 
         for (int i = 0; i < VENUE_COUNT; i++) {
             long vTs = venueLastTsMs[i];
-            if (vTs >= 0L && (evalTsMs - vTs) <= MAX_VENUE_AGE_MS) {
+            if (vTs >= 0L && (evalTsMs - vTs) <= maxVenueAgeMs) {
                 scratchActive[i] = true;
                 activeCount++;
                 singleActiveIdx = i;
-                activeBaseWeightSum += BASE_WEIGHTS[i];
+                activeBaseWeightSum += baseWeights[i];
                 long ageMs = Math.max(0L, evalTsMs - vTs);
-                double decVol = venueRollingVol[i] * (ageMs >= 100_000L ? 0.0 : Math.exp(-ageMs / ROLLING_VOL_TAU_MS));
+                double decVol = venueRollingVol[i] * (ageMs >= volCutoffMs ? 0.0 : Math.exp(-ageMs / rollingVolTauMs));
                 scratchDecayedVol[i] = decVol;
                 totalDecayedVol += decVol;
             } else {
@@ -356,7 +431,7 @@ public class SpotTwapIndicator {
         double refMedian = activeCount == 3
                 ? median3(venuePriceUsd[0], venuePriceUsd[1], venuePriceUsd[2])
                 : 0.0;
-        double toleranceUsd = refMedian * OUTLIER_TOLERANCE_RATIO;
+        double toleranceUsd = refMedian * outlierToleranceRatio;
 
         double weightedPriceSum = 0.0;
         double weightSum = 0.0;
@@ -366,13 +441,13 @@ public class SpotTwapIndicator {
                 continue;
             }
             long ageMs = Math.max(0L, evalTsMs - venueLastTsMs[i]);
-            double staleFactor = ageMs >= 50_000L
-                    ? MIN_STALENESS_FACTOR
-                    : Math.max(MIN_STALENESS_FACTOR, Math.exp(-ageMs / STALENESS_TAU_MS));
+            double staleFactor = ageMs >= staleCutoffMs
+                    ? minStalenessFactor
+                    : Math.max(minStalenessFactor, Math.exp(-ageMs / stalenessTauMs));
 
-            double normBaseW = BASE_WEIGHTS[i] / activeBaseWeightSum;
+            double normBaseW = baseWeights[i] / activeBaseWeightSum;
             double volShare = totalDecayedVol > 0.0 ? (scratchDecayedVol[i] / totalDecayedVol) : normBaseW;
-            double liqWeight = BASE_WEIGHT_SHARE * normBaseW + VOLUME_WEIGHT_SHARE * volShare;
+            double liqWeight = baseWeightShare * normBaseW + volumeWeightShare * volShare;
 
             double outlierFactor = 1.0;
             if (activeCount == 3 && toleranceUsd > 0.0) {
@@ -438,7 +513,7 @@ public class SpotTwapIndicator {
         }
         lastAssetTimestampMs = effectiveTsMs;
 
-        long windowStartMs = effectiveTsMs - TWAP_WINDOW_MS;
+        long windowStartMs = effectiveTsMs - twapWindowMs;
         while (len >= 2) {
             int nextIdx = (head + 1) & MASK;
             if (timestampsMs[nextIdx] <= windowStartMs) {
@@ -472,7 +547,7 @@ public class SpotTwapIndicator {
     }
 
     /**
-     * Returns the current 5-second time-weighted EMA of the {@code USDT/USD} peg.
+     * Returns the current time-weighted EMA of the {@code USDT/USD} peg.
      */
     public double getUsdtUsdEma() {
         return usdtUsdEma;
@@ -486,7 +561,7 @@ public class SpotTwapIndicator {
     }
 
     /**
-     * Returns the most recently calculated 60-second time-weighted average USD price.
+     * Returns the most recently calculated time-weighted average USD price.
      */
     public double getLastTwap60sPriceUsd() {
         return lastTwap60sPriceUsd;
