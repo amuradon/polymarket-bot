@@ -11,12 +11,12 @@ import java.util.Locale;
  * Immutable configuration bean for {@link PricingModelStrategy}.
  * <p>
  * Governs the basis-anchored multi-exchange spot nowcast, continuous 60-second settlement TWAP
- * integrator, EWMA + Parkinson range volatility estimator, heavy-tailed {@code Student-t (df=4)}
- * fair-value model, time-dependent entry price caps, dual-horizon jump filters, and non-averaging-down
- * position sizing.
+ * integrator, EWMA + retracement-adjusted Parkinson range volatility estimator, heavy-tailed
+ * {@code Student-t (df=4)} fair-value model, non-directional whipsaw filter, time-dependent
+ * entry price caps, and non-averaging-down position sizing.
  * <p>
- * All underlying price dispersion, range, bridge-floor, and lead-gap parameters are expressed in
- * asset-agnostic basis points ({@code bps}) or centi-basis points ({@code 0.01 bps}) so the
+ * All underlying dispersion, whipsaw-range, bridge-floor, and lead-gap parameters are expressed
+ * in asset-agnostic basis points ({@code bps}) or centi-basis points ({@code 0.01 bps}) so the
  * strategy operates identically across {@code BTC}, {@code ETH}, and {@code SOL}.
  */
 @ApplicationScoped
@@ -34,7 +34,8 @@ public class PricingModelStrategyConfig {
     private final double volFastWeight;
     private final double minSigma1sBps;
     private final double maxSingleReturnBps;
-    private final int maxCandleRangeBps;
+    private final int maxWhipsawRangeBps;
+    private final double parkinsonScale;
     private final double bridgeFloorBps;
     private final int minWarmupSamples;
     private final int minOpenPriceMc;
@@ -46,10 +47,7 @@ public class PricingModelStrategyConfig {
     private final int minNetEdgeMc;
     private final int minFillNetEdgeMc;
     private final int minLeadGapCentiBps;
-    private final int strongLeadThresholdCentiBps;
-    private final int strongLeadEdgeBonusMc;
     private final long modelJumpWindowMs;
-    private final long secondaryJumpWindowMs;
     private final int minModelJumpMc;
     private final int maxSlippageMc;
     private final int takerFeeRateBps;
@@ -66,7 +64,7 @@ public class PricingModelStrategyConfig {
      *
      * @param timeframeLabel market candle timeframe name or code (default {@code "15m"})
      * @param minTauMs minimum remaining time to candle expiry in milliseconds (default {@code 8000})
-     * @param maxTauMs maximum remaining time to candle expiry in milliseconds (default {@code 360000})
+     * @param maxTauMs maximum remaining time to candle expiry in milliseconds (default {@code 420000})
      * @param cooldownMs minimum interval between same-side scaling orders in milliseconds (default {@code 3000})
      * @param maxQuoteAgeMs maximum allowed age of resting CLOB quote for spot-triggered evaluation in ms (default {@code 2500})
      * @param spotDelayOffsetMs effective exchange delay offset in ms aligning {@code SpotTwapIndicator} to oracle origin time (default {@code 75})
@@ -74,13 +72,14 @@ public class PricingModelStrategyConfig {
      * @param volFastTauSec time constant in seconds for fast 1s return variance EWMA (default {@code 30.0})
      * @param volSlowTauSec time constant in seconds for slow 1s return variance EWMA (default {@code 180.0})
      * @param volFastWeight blend weight in {@code [0, 1]} assigned to fast variance EWMA (default {@code 0.55})
-     * @param minSigma1sBps floor on 1-second underlying volatility in basis points (default {@code 0.45})
+     * @param minSigma1sBps floor on 1-second underlying volatility in basis points (default {@code 0.58})
      * @param maxSingleReturnBps outlier cap on single 1-second return in basis points (default {@code 30.0})
-     * @param maxCandleRangeBps maximum intra-candle range in bps allowed for pre-final-minute entries (default {@code 60})
-     * @param bridgeFloorBps final-minute uncertainty floor in basis points preventing stationary knife-edge overconfidence (default {@code 0.70})
+     * @param maxWhipsawRangeBps maximum non-directional intra-candle retracement/whipsaw range in bps pre-final-minute (default {@code 45})
+     * @param parkinsonScale scaling factor in {@code [0, 2]} applied to retracement-adjusted Parkinson range volatility (default {@code 0.85})
+     * @param bridgeFloorBps continuous baseline uncertainty floor in basis points across remaining horizon (default {@code 0.70})
      * @param minWarmupSamples minimum 1-second volatility samples required before trading (default {@code 15})
      * @param minOpenPriceMc minimum best-ask entry price in millicents (default {@code 250})
-     * @param maxEarlyOpenPriceMc maximum best-ask entry price in millicents when {@code tau >= earlyPriceCapTauMs} (default {@code 680})
+     * @param maxEarlyOpenPriceMc maximum best-ask entry price in millicents when {@code tau >= earlyPriceCapTauMs} (default {@code 850})
      * @param maxOpenPriceMc maximum best-ask entry price in millicents near expiry (default {@code 920})
      * @param earlyPriceCapTauMs remaining time threshold in ms above which {@code maxEarlyOpenPriceMc} applies in full (default {@code 180000})
      * @param maxSpreadMc maximum allowed BBO spread on traded token in millicents (default {@code 25})
@@ -88,10 +87,7 @@ public class PricingModelStrategyConfig {
      * @param minNetEdgeMc minimum post-fee model edge over best ask in millicents (default {@code 40})
      * @param minFillNetEdgeMc minimum post-fee model edge over 100-share estimated fill price in millicents (default {@code 25})
      * @param minLeadGapCentiBps minimum favorable basis-anchored spot lead over last PolyBolt price in centi-bps (default {@code 220})
-     * @param strongLeadThresholdCentiBps strong favorable spot lead threshold in centi-bps granting edge relief (default {@code 350})
-     * @param strongLeadEdgeBonusMc required-edge reduction in millicents when {@code leadGap >= strongLeadThresholdCentiBps} (default {@code 8})
-     * @param modelJumpWindowMs primary lookback window in ms for measuring fresh fair-probability jump (default {@code 1250})
-     * @param secondaryJumpWindowMs secondary lookback window in ms capturing smooth 2-3s repricing impulses (default {@code 2750})
+     * @param modelJumpWindowMs lookback window in ms for measuring fresh fair-probability jump (default {@code 1250})
      * @param minModelJumpMc minimum fresh fair-probability increase in millicents (default {@code 25})
      * @param maxSlippageMc maximum limit price buffer above best ask in millicents (default {@code 10})
      * @param takerFeeRateBps Polymarket quadratic taker fee rate in basis points (default {@code 700})
@@ -107,7 +103,7 @@ public class PricingModelStrategyConfig {
     public PricingModelStrategyConfig(
             @ConfigProperty(name = "polymarket.strategy.pricing-model.timeframe", defaultValue = "15m") String timeframeLabel,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-tau-ms", defaultValue = "8000") long minTauMs,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-tau-ms", defaultValue = "360000") long maxTauMs,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-tau-ms", defaultValue = "420000") long maxTauMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.cooldown-ms", defaultValue = "3000") long cooldownMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-quote-age-ms", defaultValue = "2500") long maxQuoteAgeMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.spot-delay-offset-ms", defaultValue = "75") long spotDelayOffsetMs,
@@ -115,13 +111,14 @@ public class PricingModelStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.pricing-model.vol-fast-tau-sec", defaultValue = "30.0") double volFastTauSec,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.vol-slow-tau-sec", defaultValue = "180.0") double volSlowTauSec,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.vol-fast-weight", defaultValue = "0.55") double volFastWeight,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.min-sigma-1s-bps", defaultValue = "0.45") double minSigma1sBps,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.min-sigma-1s-bps", defaultValue = "0.58") double minSigma1sBps,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-single-return-bps", defaultValue = "30.0") double maxSingleReturnBps,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-candle-range-bps", defaultValue = "60") int maxCandleRangeBps,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-whipsaw-range-bps", defaultValue = "45") int maxWhipsawRangeBps,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.parkinson-scale", defaultValue = "0.85") double parkinsonScale,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.bridge-floor-bps", defaultValue = "0.70") double bridgeFloorBps,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-warmup-samples", defaultValue = "15") int minWarmupSamples,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-open-price-mc", defaultValue = "250") int minOpenPriceMc,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-early-open-price-mc", defaultValue = "680") int maxEarlyOpenPriceMc,
+            @ConfigProperty(name = "polymarket.strategy.pricing-model.max-early-open-price-mc", defaultValue = "850") int maxEarlyOpenPriceMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-open-price-mc", defaultValue = "920") int maxOpenPriceMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.early-price-cap-tau-ms", defaultValue = "180000") long earlyPriceCapTauMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-spread-mc", defaultValue = "25") int maxSpreadMc,
@@ -129,10 +126,7 @@ public class PricingModelStrategyConfig {
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-net-edge-mc", defaultValue = "40") int minNetEdgeMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-fill-net-edge-mc", defaultValue = "25") int minFillNetEdgeMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-lead-gap-centi-bps", defaultValue = "220") int minLeadGapCentiBps,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.strong-lead-threshold-centi-bps", defaultValue = "350") int strongLeadThresholdCentiBps,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.strong-lead-edge-bonus-mc", defaultValue = "8") int strongLeadEdgeBonusMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.model-jump-window-ms", defaultValue = "1250") long modelJumpWindowMs,
-            @ConfigProperty(name = "polymarket.strategy.pricing-model.secondary-jump-window-ms", defaultValue = "2750") long secondaryJumpWindowMs,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.min-model-jump-mc", defaultValue = "25") int minModelJumpMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.max-slippage-mc", defaultValue = "10") int maxSlippageMc,
             @ConfigProperty(name = "polymarket.strategy.pricing-model.taker-fee-rate-bps", defaultValue = "700") int takerFeeRateBps,
@@ -163,9 +157,10 @@ public class PricingModelStrategyConfig {
         }
         if (Double.isNaN(minSigma1sBps) || minSigma1sBps <= 0.0
                 || Double.isNaN(maxSingleReturnBps) || maxSingleReturnBps <= minSigma1sBps
-                || maxCandleRangeBps <= 0
+                || maxWhipsawRangeBps <= 0
+                || Double.isNaN(parkinsonScale) || parkinsonScale < 0.0 || parkinsonScale > 2.0
                 || Double.isNaN(bridgeFloorBps) || bridgeFloorBps < 0.0) {
-            throw new IllegalArgumentException("Volatility floor, return cap, candle range, and bridge floor bounds must be valid");
+            throw new IllegalArgumentException("Volatility floor, return cap, whipsaw range, parkinson scale, and bridge floor bounds must be valid");
         }
         if (minWarmupSamples < 1) {
             throw new IllegalArgumentException("minWarmupSamples must be >= 1");
@@ -179,9 +174,8 @@ public class PricingModelStrategyConfig {
             throw new IllegalArgumentException("Spread and depth bounds must be valid");
         }
         if (minNetEdgeMc < 0 || minFillNetEdgeMc < 0 || minLeadGapCentiBps < 0
-                || strongLeadThresholdCentiBps < minLeadGapCentiBps || strongLeadEdgeBonusMc < 0
-                || modelJumpWindowMs <= 0L || secondaryJumpWindowMs < modelJumpWindowMs || minModelJumpMc < 0) {
-            throw new IllegalArgumentException("Edge, lead-gap, and dual jump-window thresholds must be valid");
+                || modelJumpWindowMs <= 0L || minModelJumpMc < 0) {
+            throw new IllegalArgumentException("Edge, lead-gap, and jump-window thresholds must be valid");
         }
         if (maxSlippageMc < 0 || maxSlippageMc >= 200 || takerFeeRateBps < 0 || takerFeeRateBps > 5_000) {
             throw new IllegalArgumentException("Slippage and taker fee rate out of valid range");
@@ -203,7 +197,8 @@ public class PricingModelStrategyConfig {
         this.volFastWeight = volFastWeight;
         this.minSigma1sBps = minSigma1sBps;
         this.maxSingleReturnBps = maxSingleReturnBps;
-        this.maxCandleRangeBps = maxCandleRangeBps;
+        this.maxWhipsawRangeBps = maxWhipsawRangeBps;
+        this.parkinsonScale = parkinsonScale;
         this.bridgeFloorBps = bridgeFloorBps;
         this.minWarmupSamples = minWarmupSamples;
         this.minOpenPriceMc = minOpenPriceMc;
@@ -215,10 +210,7 @@ public class PricingModelStrategyConfig {
         this.minNetEdgeMc = minNetEdgeMc;
         this.minFillNetEdgeMc = minFillNetEdgeMc;
         this.minLeadGapCentiBps = minLeadGapCentiBps;
-        this.strongLeadThresholdCentiBps = strongLeadThresholdCentiBps;
-        this.strongLeadEdgeBonusMc = strongLeadEdgeBonusMc;
         this.modelJumpWindowMs = modelJumpWindowMs;
-        this.secondaryJumpWindowMs = secondaryJumpWindowMs;
         this.minModelJumpMc = minModelJumpMc;
         this.maxSlippageMc = maxSlippageMc;
         this.takerFeeRateBps = takerFeeRateBps;
@@ -232,7 +224,7 @@ public class PricingModelStrategyConfig {
     }
 
     /**
-     * Returns calibrated Iteration 2 configuration constants.
+     * Returns calibrated Iteration 3 configuration constants.
      *
      * @return default {@link PricingModelStrategyConfig}
      */
@@ -240,7 +232,7 @@ public class PricingModelStrategyConfig {
         return new PricingModelStrategyConfig(
                 "15m",
                 8_000L,
-                360_000L,
+                420_000L,
                 3_000L,
                 2_500L,
                 75L,
@@ -248,13 +240,14 @@ public class PricingModelStrategyConfig {
                 30.0,
                 180.0,
                 0.55,
-                0.45,
+                0.58,
                 30.0,
-                60,
+                45,
+                0.85,
                 0.70,
                 15,
                 250,
-                680,
+                850,
                 920,
                 180_000L,
                 25,
@@ -262,10 +255,7 @@ public class PricingModelStrategyConfig {
                 40,
                 25,
                 220,
-                350,
-                8,
                 1_250L,
-                2_750L,
                 25,
                 10,
                 700,
@@ -306,7 +296,8 @@ public class PricingModelStrategyConfig {
                 config.volFastWeight(),
                 config.minSigma1sBps(),
                 config.maxSingleReturnBps(),
-                config.maxCandleRangeBps(),
+                config.maxWhipsawRangeBps(),
+                config.parkinsonScale(),
                 config.bridgeFloorBps(),
                 config.minWarmupSamples(),
                 config.minOpenPriceMc(),
@@ -318,10 +309,7 @@ public class PricingModelStrategyConfig {
                 config.minNetEdgeMc(),
                 config.minFillNetEdgeMc(),
                 config.minLeadGapCentiBps(),
-                config.strongLeadThresholdCentiBps(),
-                config.strongLeadEdgeBonusMc(),
                 config.modelJumpWindowMs(),
-                config.secondaryJumpWindowMs(),
                 config.minModelJumpMc(),
                 config.maxSlippageMc(),
                 config.takerFeeRateBps(),
@@ -384,10 +372,13 @@ public class PricingModelStrategyConfig {
     /** Outlier cap on a single 1-second underlying return in basis points. */
     public double maxSingleReturnBps() { return maxSingleReturnBps; }
 
-    /** Maximum intra-candle high-low range in basis points allowed for pre-final-minute entries. */
-    public int maxCandleRangeBps() { return maxCandleRangeBps; }
+    /** Maximum non-directional intra-candle whipsaw/retracement range in basis points pre-final-minute. */
+    public int maxWhipsawRangeBps() { return maxWhipsawRangeBps; }
 
-    /** Final-minute uncertainty floor in basis points. */
+    /** Scaling factor applied to retracement-adjusted Parkinson range volatility floor. */
+    public double parkinsonScale() { return parkinsonScale; }
+
+    /** Continuous baseline uncertainty floor in basis points. */
     public double bridgeFloorBps() { return bridgeFloorBps; }
 
     /** Minimum 1-second volatility samples required before trading. */
@@ -420,17 +411,8 @@ public class PricingModelStrategyConfig {
     /** Minimum favorable basis-anchored spot lead over last PolyBolt price in centi-bps. */
     public int minLeadGapCentiBps() { return minLeadGapCentiBps; }
 
-    /** Strong favorable spot lead threshold in centi-bps granting edge relief. */
-    public int strongLeadThresholdCentiBps() { return strongLeadThresholdCentiBps; }
-
-    /** Required-edge reduction in millicents when {@code leadGap >= strongLeadThresholdCentiBps}. */
-    public int strongLeadEdgeBonusMc() { return strongLeadEdgeBonusMc; }
-
-    /** Primary lookback window in milliseconds for fresh model probability jump. */
+    /** Lookback window in milliseconds for fresh model probability jump. */
     public long modelJumpWindowMs() { return modelJumpWindowMs; }
-
-    /** Secondary lookback window in milliseconds capturing smooth 2-3s repricing impulses. */
-    public long secondaryJumpWindowMs() { return secondaryJumpWindowMs; }
 
     /** Minimum fresh model probability increase in millicents. */
     public int minModelJumpMc() { return minModelJumpMc; }

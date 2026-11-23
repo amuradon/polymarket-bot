@@ -18,15 +18,16 @@ import java.math.BigDecimal;
  *   <li><b>Basis-Anchored Spot Nowcast</b>: Dynamically anchors high-frequency {@code SpotTwapIndicator}
  *       updates (50-100ms venue delay) to the slow venue-basis EMA observed against {@code PolyBolt}
  *       Chainlink {@code crypto.price} (~1,200ms publication lag), cutting 60s TWAP tracking error below $0.40.</li>
- *   <li><b>EWMA + Parkinson Range Volatility</b>: Combines two-horizon 1s return EWMA with the non-parametric
- *       Parkinson (1980) intra-candle high-low range volatility floor so transient pauses inside violent
- *       whipsaw candles never understate remaining variance.</li>
- *   <li><b>Exact Two-Regime 60s TWAP Pricing Model</b>: Evaluates heavy-tailed {@code Student-t (df=4)}
- *       settlement probabilities using variance {@code sigma^2 * (tau - 40s)} prior to the final minute
- *       and continuous locked-in path integration with {@code tau^3 / 10800} variance decay inside the final 60s.</li>
- *   <li><b>Active Desynchronization & Discipline Gate</b>: Enforces time-dependent maximum entry prices,
- *       dual-horizon (1.25s / 2.75s) probability jump confirmation, max 2 clips per market, and strict
- *       non-averaging-down execution held to settlement.</li>
+ *   <li><b>EWMA + Retracement-Adjusted Parkinson Volatility</b>: Blends two-horizon 1s return EWMA with a
+ *       drift-adjusted Parkinson intra-candle range floor so genuine two-way whipsaws immediately raise
+ *       remaining variance without penalizing smooth one-way directional trends.</li>
+ *   <li><b>Continuous Two-Regime 60s TWAP Pricing Model</b>: Evaluates heavy-tailed {@code Student-t (df=4)}
+ *       settlement probabilities using continuous variance {@code sigma^2 * (tau - 40s) + bridgeFloor^2} prior to
+ *       the final minute and locked-in path integration with {@code sigma^2 * (tau^3 / 10800) + bridgeFloor^2}
+ *       inside the final 60 seconds.</li>
+ *   <li><b>Active Desynchronization & Discipline Gate</b>: Rejects high-whipsaw candles, enforces time-dependent
+ *       maximum entry prices, requires fresh 1.25s probability jump confirmation, caps at 2 clips per market,
+ *       and forbids averaging down while holding positions to settlement.</li>
  * </ol>
  */
 @ApplicationScoped
@@ -34,7 +35,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
 
     private static final int MAX_MC = 1_000;
     private static final int TICK_STEP_MC = 10;
-    private static final int STRONG_LEAD_MAX_ASK_MC = 780;
     private static final long TWAP_WINDOW_MS = 60_000L;
     private static final long LATE_FULL_PRICE_TAU_MS = 45_000L;
     private static final long MAX_TARGET_OFFSET_MS = 10_000L;
@@ -69,6 +69,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private final double slowVarWeight;
     private final double minSigma1sRatio;
     private final double maxSingleReturnSq;
+    private final double parkinsonScale;
     private final double bridgeFloorSq;
     private final double takerFeeRate;
 
@@ -166,6 +167,7 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         this.minSigma1sRatio = unwrapped.minSigma1sBps() * BPS_INV;
         double maxRet = unwrapped.maxSingleReturnBps() * BPS_INV;
         this.maxSingleReturnSq = maxRet * maxRet;
+        this.parkinsonScale = unwrapped.parkinsonScale();
         double bf = unwrapped.bridgeFloorBps() * BPS_INV;
         this.bridgeFloorSq = bf * bf;
         this.takerFeeRate = unwrapped.takerFeeRateBps() * BPS_INV;
@@ -207,16 +209,15 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         }
         this.context = context;
         if (Log.isInfoEnabled()) {
-            Log.infof("Initialized %s (tau=[%d..%d ms], earlyMaxAsk=%d mc, maxRange=%d bps, edge>=%d mc, leadGap>=%d cbps, maxClips=%d, maxInv=%d)",
+            Log.infof("Initialized %s (tau=[%d..%d ms], earlyMaxAsk=%d mc, maxWhipsaw=%d bps, minSigma=%.2f bps, edge>=%d mc, maxClips=%d)",
                     getName(),
                     config.minTauMs(),
                     config.maxTauMs(),
                     config.maxEarlyOpenPriceMc(),
-                    config.maxCandleRangeBps(),
+                    config.maxWhipsawRangeBps(),
+                    config.minSigma1sBps(),
                     config.minNetEdgeMc(),
-                    config.minLeadGapCentiBps(),
-                    config.maxOrdersPerMarket(),
-                    config.maxInventoryShares());
+                    config.maxOrdersPerMarket());
         }
     }
 
@@ -617,10 +618,12 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
 
     private double effectiveSigma1sRatio(long nowMs, double sHatUsd) {
         double ewmaSigma = Math.max(minSigma1sRatio, Math.sqrt(fastVarWeight * varFast + slowVarWeight * varSlow));
-        if (candleMaxSHatUsd > candleMinSHatUsd && candleMinSHatUsd < Double.MAX_VALUE && sHatUsd > 0.0) {
-            double relRange = (candleMaxSHatUsd - candleMinSHatUsd) / sHatUsd;
+        if (parkinsonScale > 0.0 && candleMaxSHatUsd > candleMinSHatUsd && candleMinSHatUsd < Double.MAX_VALUE && sHatUsd > 0.0) {
+            double spanUsd = candleMaxSHatUsd - candleMinSHatUsd;
+            double netDispUsd = targetTwapOpenUsd > 0.0 ? Math.abs(sHatUsd - targetTwapOpenUsd) : 0.0;
+            double effSpanUsd = Math.max(0.35 * spanUsd, spanUsd - 0.65 * netDispUsd);
             double elapsedSec = Math.max(30.0, (nowMs - activeCandleStartMs) * 1e-3);
-            double parkinsonSigma = relRange / Math.sqrt(FOUR_LN_2 * elapsedSec);
+            double parkinsonSigma = parkinsonScale * (effSpanUsd / sHatUsd) / Math.sqrt(FOUR_LN_2 * elapsedSec);
             if (parkinsonSigma > ewmaSigma) {
                 return parkinsonSigma;
             }
@@ -680,9 +683,9 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         }
 
         double sigma1sRatio = effectiveSigma1sRatio(nowMs, sHatUsd);
-        double relVarRem = tauSec >= 60.0
+        double relVarRem = (tauSec >= 60.0
                 ? (sigma1sRatio * sigma1sRatio) * (tauSec - 40.0)
-                : (sigma1sRatio * sigma1sRatio) * ((tauSec * tauSec * tauSec) / 10_800.0) + bridgeFloorSq;
+                : (sigma1sRatio * sigma1sRatio) * ((tauSec * tauSec * tauSec) / 10_800.0)) + bridgeFloorSq;
         double sdRemUsd = sHatUsd * Math.sqrt(Math.max(1e-12, relVarRem));
         double z = (muTwapUsd - targetTwapOpenUsd) / sdRemUsd;
 
@@ -747,8 +750,10 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return;
         }
         if (tauMs > TWAP_WINDOW_MS && candleMaxSHatUsd > candleMinSHatUsd && candleMinSHatUsd < Double.MAX_VALUE) {
-            double candleRangeBps = ((candleMaxSHatUsd - candleMinSHatUsd) / sHatUsd) * BPS_SCALE;
-            if (candleRangeBps > config.maxCandleRangeBps()) {
+            double spanUsd = candleMaxSHatUsd - candleMinSHatUsd;
+            double whipsawUsd = Math.max(0.0, spanUsd - Math.abs(sHatUsd - targetTwapOpenUsd));
+            double whipsawBps = (whipsawUsd / sHatUsd) * BPS_SCALE;
+            if (whipsawBps > config.maxWhipsawRangeBps()) {
                 return;
             }
         }
@@ -764,10 +769,9 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         int pUpMc = latestModelProbUpMc;
         int pDownMc = MAX_MC - pUpMc;
 
-        int prevFastUpMc = lookupProbUpMcAtOrBefore(nowMs - config.modelJumpWindowMs());
-        int prevSlowUpMc = lookupProbUpMcAtOrBefore(nowMs - config.secondaryJumpWindowMs());
-        int jumpUpMc = Math.max(pUpMc - prevFastUpMc, pUpMc - prevSlowUpMc);
-        int jumpDownMc = Math.max(prevFastUpMc - pUpMc, prevSlowUpMc - pUpMc);
+        int prevUpMc = lookupProbUpMcAtOrBefore(nowMs - config.modelJumpWindowMs());
+        int jumpUpMc = pUpMc - prevUpMc;
+        int jumpDownMc = prevUpMc - pUpMc;
 
         long rawLeadCentiBps = Math.round(((sHatUsd - lastPbSpotUsd) / lastPbSpotUsd) * CENTI_BPS_SCALE);
 
@@ -839,23 +843,16 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return -1;
         }
 
-        int reqEdgeMc = config.minNetEdgeMc();
-        int reqFillEdgeMc = config.minFillNetEdgeMc();
-        if (favorableLeadCentiBps >= config.strongLeadThresholdCentiBps() && askMc <= STRONG_LEAD_MAX_ASK_MC) {
-            reqEdgeMc = Math.max(0, reqEdgeMc - config.strongLeadEdgeBonusMc());
-            reqFillEdgeMc = Math.max(0, reqFillEdgeMc - config.strongLeadEdgeBonusMc());
-        }
-
         int feeAskMc = takerFeeMc(askMc, takerFeeRate);
         int netEdgeMc = modelProbMc - askMc - feeAskMc;
-        if (netEdgeMc < reqEdgeMc) {
+        if (netEdgeMc < config.minNetEdgeMc()) {
             return -1;
         }
 
         int effFillMc = Math.max(askMc, estFillMc);
         int feeFillMc = takerFeeMc(effFillMc, takerFeeRate);
         int fillNetEdgeMc = modelProbMc - effFillMc - feeFillMc;
-        if (fillNetEdgeMc < reqFillEdgeMc) {
+        if (fillNetEdgeMc < config.minFillNetEdgeMc()) {
             return -1;
         }
         return netEdgeMc;

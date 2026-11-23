@@ -67,10 +67,10 @@ class PricingModelStrategyTest {
         assertThat(strategy.getConfig()).isSameAs(config);
         assertThat(strategy.getName()).isEqualTo("PricingModelStrategy");
         assertThat(strategy.getTimeframe()).isEqualTo(Timeframe.FIFTEEN_MINUTES);
-        assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(370_000L);
-        assertThat(strategy.effectiveMaxOpenPriceMc(240_000L)).isEqualTo(680);
+        assertThat(strategy.getRequiredClobLookbackMs()).isEqualTo(430_000L);
+        assertThat(strategy.effectiveMaxOpenPriceMc(240_000L)).isEqualTo(850);
         assertThat(strategy.effectiveMaxOpenPriceMc(40_000L)).isEqualTo(920);
-        assertThat(strategy.effectiveMaxOpenPriceMc(112_500L)).isEqualTo(800);
+        assertThat(strategy.effectiveMaxOpenPriceMc(112_500L)).isEqualTo(885);
 
         assertThatThrownBy(() -> PricingModelStrategyConfig.unwrap(null))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -80,9 +80,18 @@ class PricingModelStrategyTest {
         // Invalid tau bounds
         assertThatThrownBy(() -> new PricingModelStrategyConfig(
                 "15m", 500_000L, 100_000L, 3_000L, 2_500L, 75L,
-                0.25, 30.0, 180.0, 0.55, 0.45, 30.0, 60, 0.70, 15,
-                250, 680, 920, 180_000L, 25, 25, 40, 25, 220, 350, 8,
-                1_250L, 2_750L, 25, 10, 700, 25, 150, 2, 200,
+                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 45, 0.85, 0.70, 15,
+                250, 850, 920, 180_000L, 25, 25, 40, 25, 220,
+                1_250L, 25, 10, 700, 25, 150, 2, 200,
+                "pm-btc-15m", "BTC-UP", "BTC-DOWN"))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        // Invalid whipsaw range or parkinson scale
+        assertThatThrownBy(() -> new PricingModelStrategyConfig(
+                "15m", 8_000L, 420_000L, 3_000L, 2_500L, 75L,
+                0.25, 30.0, 180.0, 0.55, 0.58, 30.0, 0, 0.85, 0.70, 15,
+                250, 850, 920, 180_000L, 25, 25, 40, 25, 220,
+                1_250L, 25, 10, 700, 25, 150, 2, 200,
                 "pm-btc-15m", "BTC-UP", "BTC-DOWN"))
                 .isInstanceOf(IllegalArgumentException.class);
 
@@ -90,12 +99,11 @@ class PricingModelStrategyTest {
             ProxiedConfig(PricingModelStrategyConfig d) {
                 super(d.timeframe().getCode(), d.minTauMs(), d.maxTauMs(), d.cooldownMs(), d.maxQuoteAgeMs(),
                         d.spotDelayOffsetMs(), d.basisEmaAlpha(), d.volFastTauSec(), d.volSlowTauSec(),
-                        d.volFastWeight(), d.minSigma1sBps(), d.maxSingleReturnBps(), d.maxCandleRangeBps(),
-                        d.bridgeFloorBps(), d.minWarmupSamples(), d.minOpenPriceMc(), d.maxEarlyOpenPriceMc(),
-                        d.maxOpenPriceMc(), d.earlyPriceCapTauMs(), d.maxSpreadMc(), d.minDepthShares(),
-                        d.minNetEdgeMc(), d.minFillNetEdgeMc(), d.minLeadGapCentiBps(),
-                        d.strongLeadThresholdCentiBps(), d.strongLeadEdgeBonusMc(),
-                        d.modelJumpWindowMs(), d.secondaryJumpWindowMs(), d.minModelJumpMc(),
+                        d.volFastWeight(), d.minSigma1sBps(), d.maxSingleReturnBps(),
+                        d.maxWhipsawRangeBps(), d.parkinsonScale(), d.bridgeFloorBps(), d.minWarmupSamples(),
+                        d.minOpenPriceMc(), d.maxEarlyOpenPriceMc(), d.maxOpenPriceMc(), d.earlyPriceCapTauMs(),
+                        d.maxSpreadMc(), d.minDepthShares(), d.minNetEdgeMc(), d.minFillNetEdgeMc(),
+                        d.minLeadGapCentiBps(), d.modelJumpWindowMs(), d.minModelJumpMc(),
                         d.maxSlippageMc(), d.takerFeeRateBps(), d.minOrderShares(), d.maxOrderShares(),
                         d.maxOrdersPerMarket(), d.maxInventoryShares(),
                         d.defaultMarketId(), d.upToken(), d.downToken());
@@ -135,16 +143,16 @@ class PricingModelStrategyTest {
 
         // 1. Static mispricing without active lead-gap -> NO ORDER
         long staticTs = t0 + 30_000L;
-        strategy.onSpotTwap(staticTs - 3_000L, "btcusd", basePrice + 35.0, basePrice + 10.0);
-        strategy.onSpotTwap(staticTs, "btcusd", basePrice + 35.0, basePrice + 15.0);
-        strategy.onPolymarketCryptoPrice(staticTs + 100L, "btcusd", "chainlink", basePrice + 35.0, staticTs - 1_000L);
+        strategy.onSpotTwap(staticTs - 3_000L, "btcusd", basePrice + 40.0, basePrice + 10.0);
+        strategy.onSpotTwap(staticTs, "btcusd", basePrice + 40.0, basePrice + 15.0);
+        strategy.onPolymarketCryptoPrice(staticTs + 100L, "btcusd", "chainlink", basePrice + 40.0, staticTs - 1_000L);
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.52, 0.51, 0.49, 0.48, 200.0, 200.0, 0.52, 0.49, staticTs + 150L));
         assertThat(submittedOrders).isEmpty();
 
         // 2. Clip #1 on active impulse at ask = 0.52
         long jump1Ts = staticTs + 500L;
-        strategy.onSpotTwap(jump1Ts, "btcusd", basePrice + 62.0, basePrice + 20.0);
+        strategy.onSpotTwap(jump1Ts, "btcusd", basePrice + 72.0, basePrice + 20.0);
         assertThat(submittedOrders).hasSize(1);
         OrderCommand c1 = submittedOrders.getFirst();
         assertThat(c1.price()).isEqualByComparingTo(new BigDecimal("0.530"));
@@ -158,15 +166,15 @@ class PricingModelStrategyTest {
         strategy.onSpotTwap(avgDownTs - 1_500L, "btcusd", basePrice + 10.0, basePrice + 10.0);
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.44, 0.43, 0.57, 0.56, 200.0, 200.0, 0.44, 0.57, avgDownTs - 50L));
-        strategy.onSpotTwap(avgDownTs, "btcusd", basePrice + 42.0, basePrice + 15.0);
+        strategy.onSpotTwap(avgDownTs, "btcusd", basePrice + 52.0, basePrice + 15.0);
         assertThat(submittedOrders).hasSize(1);
 
         // 4. Continuation Clip #2 at higher ask = 0.58 (>= 0.52 - 0.01) is ACCEPTED
         long jump2Ts = avgDownTs + 4_000L;
-        strategy.onPolymarketCryptoPrice(jump2Ts - 200L, "btcusd", "chainlink", basePrice + 42.0, jump2Ts - 1_400L);
+        strategy.onPolymarketCryptoPrice(jump2Ts - 200L, "btcusd", "chainlink", basePrice + 52.0, jump2Ts - 1_400L);
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.58, 0.57, 0.43, 0.42, 200.0, 200.0, 0.58, 0.43, jump2Ts - 50L));
-        strategy.onSpotTwap(jump2Ts, "btcusd", basePrice + 85.0, basePrice + 25.0);
+        strategy.onSpotTwap(jump2Ts, "btcusd", basePrice + 105.0, basePrice + 25.0);
         assertThat(submittedOrders).hasSize(2);
         OrderCommand c2 = submittedOrders.get(1);
         strategy.onExecutionReport(new ExecutionReport(
@@ -174,73 +182,102 @@ class PricingModelStrategyTest {
 
         // 5. Clip #3 must be BLOCKED by maxOrdersPerMarket = 2 even when inventory remains
         long jump3Ts = jump2Ts + 4_000L;
-        strategy.onPolymarketCryptoPrice(jump3Ts - 200L, "btcusd", "chainlink", basePrice + 85.0, jump3Ts - 1_400L);
+        strategy.onPolymarketCryptoPrice(jump3Ts - 200L, "btcusd", "chainlink", basePrice + 105.0, jump3Ts - 1_400L);
         strategy.onOrderBookQuote(new OrderBookQuote(
                 0.62, 0.61, 0.39, 0.38, 200.0, 200.0, 0.62, 0.39, jump3Ts - 50L));
-        strategy.onSpotTwap(jump3Ts, "btcusd", basePrice + 135.0, basePrice + 35.0);
+        strategy.onSpotTwap(jump3Ts, "btcusd", basePrice + 160.0, basePrice + 35.0);
         assertThat(submittedOrders).hasSize(2);
     }
 
     @Test
-    @DisplayName("Should block chaotic >60bps candles pre-final-minute and enforce early max ask cap 0.68")
-    void shouldEnforceEarlyPriceCapAndCandleChaosGuard() {
+    @DisplayName("Should allow clean >70bps directional trend at ask 0.78 while blocking >45bps two-way whipsaws")
+    void shouldAllowCleanDirectionalBreakoutAndBlockTrueWhipsaw() {
         double strike = 80_000.0;
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
 
-        long t0 = CANDLE_END_MS - 240_000L;
+        // 1. Clean one-way upward breakout of +600 USD (+75 bps total span, whipsaw = 2.5 bps <= 45 bps) at tau = 380s
+        long t0 = CANDLE_END_MS - 415_000L;
+        for (int s = 0; s <= 18; s++) {
+            long ts = t0 + s * 1_000L;
+            double px = strike + ((s % 2 == 0) ? 20.0 : 0.0);
+            strategy.onSpotTwap(ts, "btcusd", px, strike + 10.0);
+            strategy.onPolymarketCryptoPrice(ts + 200L, "btcusd", "chainlink", px, ts - 1_000L);
+        }
+        for (int s = 19; s <= 34; s++) {
+            long ts = t0 + s * 1_000L;
+            double px = strike + ((s - 18) * 28.0); // smoothly trends to +448 USD at ~3.5 bps/s
+            strategy.onSpotTwap(ts, "btcusd", px, strike + 200.0);
+            strategy.onPolymarketCryptoPrice(ts + 200L, "btcusd", "chainlink", px, ts - 1_000L);
+        }
+
+        long breakoutTs = t0 + 34_500L; // sub-second SpotTwap burst at tau = 380.5s (>= 180s), total span = +560 USD (+70 bps)
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.78, 0.77, 0.23, 0.22, 300.0, 300.0, 0.78, 0.23, breakoutTs - 50L));
+        strategy.onSpotTwap(breakoutTs, "btcusd", strike + 560.0, strike + 300.0);
+        assertThat(submittedOrders).hasSize(1);
+        assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
+
+        // 2. Reset and simulate a violent two-way V-shaped whipsaw: -240 USD then +240 USD (span = 480 USD = 60 bps),
+        // returning near strike + 60 USD (whipsaw = 420 USD = 52.5 bps > 45 bps) -> MUST BE BLOCKED!
+        submittedOrders.clear();
+        strategy.reset();
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
+
         for (int s = 0; s <= 20; s++) {
             long ts = t0 + s * 1_000L;
             double px = strike + ((s % 2 == 0) ? 2.0 : -2.0);
             strategy.onSpotTwap(ts, "btcusd", px, strike);
             strategy.onPolymarketCryptoPrice(ts + 200L, "btcusd", "chainlink", px, ts - 1_000L);
         }
+        long whipStartTs = t0 + 25_000L;
+        strategy.onSpotTwap(whipStartTs, "btcusd", strike - 240.0, strike);
+        strategy.onSpotTwap(whipStartTs + 1_000L, "btcusd", strike + 240.0, strike);
+        strategy.onSpotTwap(whipStartTs + 2_000L, "btcusd", strike + 15.0, strike);
+        strategy.onPolymarketCryptoPrice(whipStartTs + 3_500L, "btcusd", "chainlink", strike + 15.0, whipStartTs + 2_300L);
 
-        // At tau = 215s (>= 180s), ask = 0.74 exceeds maxEarlyOpenPriceMc (0.68) -> REJECTED
-        long earlyTs = t0 + 25_000L;
+        long whipEvalTs = whipStartTs + 4_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.74, 0.73, 0.27, 0.26, 300.0, 300.0, 0.74, 0.27, earlyTs - 50L));
-        strategy.onSpotTwap(earlyTs, "btcusd", strike + 70.0, strike + 10.0);
-        assertThat(submittedOrders).isEmpty();
-
-        // Simulate extreme >60 bps intra-candle swing (+260 / -260 USD = 65 bps) after resting quote expires,
-        // then verify that subsequent pre-final-minute entry is blocked by maxCandleRangeBps even at ask = 0.50!
-        long swingStartTs = earlyTs + 4_000L;
-        strategy.onSpotTwap(swingStartTs, "btcusd", strike - 260.0, strike);
-        strategy.onSpotTwap(swingStartTs + 1_000L, "btcusd", strike + 260.0, strike);
-        long chaosTs = swingStartTs + 4_000L;
-        strategy.onPolymarketCryptoPrice(chaosTs - 200L, "btcusd", "chainlink", strike + 10.0, chaosTs - 1_400L);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.50, 0.49, 0.51, 0.50, 300.0, 300.0, 0.50, 0.51, chaosTs - 50L));
-        strategy.onSpotTwap(chaosTs, "btcusd", strike + 120.0, strike);
+                0.50, 0.49, 0.51, 0.50, 300.0, 300.0, 0.50, 0.51, whipEvalTs - 50L));
+        // Even with +45 USD impulse -> sHat = strike + 60 USD, span = 480, whipsaw = 420 USD (52.5 bps > 45 bps) -> BLOCKED!
+        strategy.onSpotTwap(whipEvalTs, "btcusd", strike + 60.0, strike);
         assertThat(submittedOrders).isEmpty();
     }
 
     @Test
-    @DisplayName("Should capture 2.5s smooth impulses via secondary jump window and compensate venue basis")
-    void shouldCaptureSecondaryJumpWindowAndAnchorVenueBasis() {
+    @DisplayName("Should enforce early max ask 0.85 while allowing 0.88 near expiry with venue basis anchoring")
+    void shouldEnforceEarlyMaxAskAndAnchorVenueBasisNearExpiry() {
         double strike = 80_000.0;
         double venueBias = 40.0;
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
 
-        long t0 = CANDLE_END_MS - 95_000L;
-        for (int s = 0; s <= 40; s++) {
+        long t0 = CANDLE_END_MS - 250_000L;
+        for (int s = 0; s <= 25; s++) {
             long ts = t0 + s * 1_000L;
             double clPrice = strike + ((s % 2 == 0) ? 1.5 : -1.5);
             strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias);
             strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
         }
 
-        // Smooth 2.4-second DOWN move in two steps where the last 1.25s step alone is small (< 25 mc),
-        // but cumulative 2.75s jump is > 40 mc!
-        long step1Ts = CANDLE_END_MS - 32_400L;
-        strategy.onPolymarketCryptoPrice(step1Ts - 100L, "btcusd", "chainlink", strike, step1Ts - 1_300L);
-        strategy.onSpotTwap(step1Ts, "btcusd", strike + venueBias - 24.0, strike + venueBias);
-
-        long step2Ts = CANDLE_END_MS - 30_000L; // +2,400 ms after base!
+        // 1. At tau = 220s (>= 180s), ask = 0.88 exceeds maxEarlyOpenPriceMc (0.85) -> REJECTED
+        long earlyTs = CANDLE_END_MS - 220_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.30, 0.29, 0.71, 0.70, 300.0, 300.0, 0.30, 0.71, step2Ts - 40L));
-        strategy.onSpotTwap(step2Ts, "btcusd", strike + venueBias - 26.0, strike + venueBias);
+                0.88, 0.87, 0.13, 0.12, 300.0, 300.0, 0.88, 0.13, earlyTs - 40L));
+        strategy.onSpotTwap(earlyTs, "btcusd", strike + venueBias + 220.0, strike + venueBias);
+        assertThat(submittedOrders).isEmpty();
 
+        // 2. Near expiry (tau = 30s <= 45s), maxOpenPriceMc = 0.92 allows ask = 0.86 on fresh DOWN break
+        strategy.reset();
+        strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS + 200L, "btcusd", "chainlink", strike, 60, CANDLE_START_MS);
+        for (int s = 0; s <= 25; s++) {
+            long ts = (CANDLE_END_MS - 60_000L) + s * 1_000L;
+            double clPrice = strike - 6.0 + ((s % 2 == 0) ? 1.0 : -1.0);
+            strategy.onSpotTwap(ts, "btcusd", clPrice + venueBias, strike + venueBias - 6.0);
+            strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
+        }
+        long lateTs = CANDLE_END_MS - 30_000L;
+        strategy.onOrderBookQuote(new OrderBookQuote(
+                0.15, 0.14, 0.86, 0.85, 300.0, 300.0, 0.15, 0.86, lateTs - 40L));
+        strategy.onSpotTwap(lateTs, "btcusd", strike + venueBias - 48.0, strike + venueBias - 25.0);
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-DOWN");
     }
