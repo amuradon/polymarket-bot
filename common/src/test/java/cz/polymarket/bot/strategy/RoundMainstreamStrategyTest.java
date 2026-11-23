@@ -366,7 +366,7 @@ class RoundMainstreamStrategyTest {
         int i = 0;
         for (long ts = startMs; ts <= endMs; ts += 1_000L) {
             double p = basePrice + ((i++ % 2 == 0) ? tickStep : -tickStep);
-            strategy.onCalculatedSpotTwap(ts - 100L, symbol, p, basePrice);
+            strategy.onSpotTwap(ts - 100L, symbol, p, basePrice);
             strategy.onPolymarketCryptoPrice(ts, symbol, "chainlink", p, ts);
         }
     }

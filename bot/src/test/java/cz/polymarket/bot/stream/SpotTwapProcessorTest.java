@@ -1,15 +1,13 @@
 package cz.polymarket.bot.stream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
-import cz.polymarket.bot.strategy.ExecutionReport;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
+import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.strategy.ExecutionRouter;
 import cz.polymarket.bot.strategy.OrderCommand;
-import cz.polymarket.bot.strategy.StrategyContext;
-import cz.polymarket.bot.strategy.TradingStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,90 +22,88 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
 /**
- * Unit tests for {@link CalculatedSpotStreamProcessor} verifying zero-allocation parsing of
+ * Unit tests for {@link SpotTwapProcessor} verifying zero-allocation parsing of
  * Binance Spot {@code aggTrades}, Kraken Spot {@code trade} updates ({@code USDTUSD} + {@code <ASSET>USD}),
- * and Coinbase Spot {@code matches} frames into {@link CalculatedSpotTwapEngine} and {@link UtterParameciumStrategy}.
+ * and Coinbase Spot {@code matches} frames into {@link SpotTwapIndicator} and registered {@link SpotTwapListener}s.
  */
-class CalculatedSpotStreamProcessorTest {
+class SpotTwapProcessorTest {
 
     private ObjectMapper objectMapper;
-    private CalculatedSpotTwapEngine twapEngine;
-    private CalculatedSpotStreamProcessor processor;
+    private SpotTwapIndicator indicator;
+    private SpotTwapProcessor processor;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        twapEngine = new CalculatedSpotTwapEngine();
-        processor = new CalculatedSpotStreamProcessor(objectMapper, twapEngine, "BTCUSDT");
+        indicator = new SpotTwapIndicator();
+        processor = new SpotTwapProcessor(objectMapper, indicator, "BTCUSDT");
     }
 
     @Test
     void shouldValidateConstructorArguments() {
-        assertThatThrownBy(() -> new CalculatedSpotStreamProcessor(null, twapEngine, "BTCUSDT"))
+        assertThatThrownBy(() -> new SpotTwapProcessor(null, indicator, "BTCUSDT"))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new CalculatedSpotStreamProcessor(objectMapper, null, "BTCUSDT"))
+        assertThatThrownBy(() -> new SpotTwapProcessor(objectMapper, null, "BTCUSDT"))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void shouldProcessKrakenUsdtPegAndAggregateThreeVenueSpotTrades() {
+    void shouldProcessKrakenUsdtPegAndAggregateThreeVenueSpotTradesAcrossMultipleListeners() {
         List<double[]> recordedSpotTwap = new ArrayList<>();
         List<String> recordedSymbols = new ArrayList<>();
+        List<double[]> secondarySpotTwap = new ArrayList<>();
 
-        TradingStrategy recordingStrategy = new TradingStrategy() {
-            @Override
-            public void init(StrategyContext context) {
-            }
-
-            @Override
-            public void onExecutionReport(ExecutionReport report) {
-            }
-
-            @Override
-            public void onCalculatedSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
-                recordedSymbols.add(symbol);
-                recordedSpotTwap.add(new double[]{timestampMs, spotPrice, twap60sPrice});
-            }
+        SpotTwapListener primaryListener = (timestampMs, symbol, spotPrice, twap60sPrice) -> {
+            recordedSymbols.add(symbol);
+            recordedSpotTwap.add(new double[]{timestampMs, spotPrice, twap60sPrice});
         };
+        SpotTwapListener secondaryListener = (timestampMs, symbol, spotPrice, twap60sPrice) ->
+                secondarySpotTwap.add(new double[]{timestampMs, spotPrice, twap60sPrice});
+
+        indicator.addListener(primaryListener);
+        indicator.addListener(secondaryListener);
 
         byte[] krakenUsdtBytes = """
                 {"channel":"trade","type":"update","data":[{"symbol":"USDT/USD","side":"sell","price":0.9990,"qty":500.0,"trade_id":101}]}
                 """.getBytes(StandardCharsets.UTF_8);
-        processor.processKrakenFrameBytes("USDTUSD", krakenUsdtBytes, 1_000L, recordingStrategy);
-        assertThat(twapEngine.getUsdtUsdEma()).isCloseTo(0.9990, within(1e-8));
+        processor.processKrakenFrameBytes("USDTUSD", krakenUsdtBytes, 1_000L);
+        assertThat(indicator.getUsdtUsdEma()).isCloseTo(0.9990, within(1e-8));
         assertThat(recordedSpotTwap).isEmpty();
+        assertThat(secondarySpotTwap).isEmpty();
 
         byte[] bookTickerBytes = """
                 {"u":400900217,"s":"BTCUSDT","b":"70000.00","B":"1.25","a":"70000.10","A":"0.80"}
                 """.getBytes(StandardCharsets.UTF_8);
-        processor.processBinanceFrameBytes(BinanceStreamType.SPOT_BOOK_TICKER, bookTickerBytes, 1_000L, recordingStrategy);
+        processor.processBinanceFrameBytes(BinanceStreamType.SPOT_BOOK_TICKER, bookTickerBytes, 1_000L);
         assertThat(recordedSpotTwap).isEmpty();
 
         byte[] binanceAggTradeBytes = """
                 {"e":"aggTrade","E":1000,"s":"BTCUSDT","a":1001,"p":"70070.07007007","q":"1.00000000","m":true}
                 """.getBytes(StandardCharsets.UTF_8);
-        processor.processBinanceFrameBytes(
-                BinanceStreamType.SPOT_AGG_TRADES, binanceAggTradeBytes, 1_000L, recordingStrategy
-        );
+        processor.processBinanceFrameBytes(BinanceStreamType.SPOT_AGG_TRADES, binanceAggTradeBytes, 1_000L);
         assertThat(recordedSpotTwap).hasSize(1);
+        assertThat(secondarySpotTwap).hasSize(1);
         assertThat(recordedSymbols).containsExactly("btcusd");
         assertThat(recordedSpotTwap.getFirst()[1]).isCloseTo(70_000.0, within(1e-2));
 
         byte[] coinbaseMatchBytes = """
                 {"type":"match","trade_id":1120371409,"side":"buy","size":"1.00000000","price":"70020.00","product_id":"BTC-USD"}
                 """.getBytes(StandardCharsets.UTF_8);
-        processor.processCoinbaseFrameBytes("BTCUSD", coinbaseMatchBytes, 1_000L, recordingStrategy);
+        processor.processCoinbaseFrameBytes("BTCUSD", coinbaseMatchBytes, 1_000L);
         assertThat(recordedSpotTwap).hasSize(2);
+        assertThat(secondarySpotTwap).hasSize(2);
 
         byte[] krakenBtcBytes = """
                 {"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"buy","price":70040.0,"qty":1.0,"trade_id":202}]}
                 """.getBytes(StandardCharsets.UTF_8);
-        processor.processKrakenFrameBytes("BTCUSD", krakenBtcBytes, 1_000L, recordingStrategy);
+        processor.processKrakenFrameBytes("BTCUSD", krakenBtcBytes, 1_000L);
         assertThat(recordedSpotTwap).hasSize(3);
+        assertThat(secondarySpotTwap).hasSize(3);
 
         double expectedBlendedSpot = 0.415 * 70_000.0 + 0.345 * 70_020.0 + 0.240 * 70_040.0;
         assertThat(recordedSpotTwap.getLast()[1]).isCloseTo(expectedBlendedSpot, within(1e-2));
-        assertThat(twapEngine.getLastSpotPriceUsd()).isCloseTo(expectedBlendedSpot, within(1e-2));
+        assertThat(secondarySpotTwap.getLast()[1]).isCloseTo(expectedBlendedSpot, within(1e-2));
+        assertThat(indicator.getLastSpotPriceUsd()).isCloseTo(expectedBlendedSpot, within(1e-2));
     }
 
     @Test
@@ -124,6 +120,7 @@ class CalculatedSpotStreamProcessorTest {
             public void cancelOrder(String clientOrderId) {
             }
         });
+        indicator.addListener(strategy);
 
         long candleStartMs = 1_785_542_400_000L;
         long candleEndMs = candleStartMs + 900_000L;
@@ -132,8 +129,7 @@ class CalculatedSpotStreamProcessorTest {
         processor.processKrakenFrame(
                 "USDTUSD",
                 "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"price\":1.0000,\"qty\":500.0}]}",
-                candleEndMs - 61_000L,
-                strategy
+                candleEndMs - 61_000L
         );
 
         long windowStartMs = candleEndMs - 60_000L;
@@ -144,20 +140,17 @@ class CalculatedSpotStreamProcessorTest {
             processor.processBinanceFrame(
                     BinanceStreamType.SPOT_AGG_TRADES,
                     "{\"e\":\"aggTrade\",\"p\":\"" + spotVal + "\",\"q\":\"1.0\",\"m\":false}",
-                    ts - 250L,
-                    strategy
+                    ts - 250L
             );
             processor.processCoinbaseFrame(
                     "BTCUSD",
                     "{\"type\":\"match\",\"price\":\"" + spotVal + "\",\"size\":\"1.0\"}",
-                    ts - 220L,
-                    strategy
+                    ts - 220L
             );
             processor.processKrakenFrame(
                     "BTCUSD",
                     "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"price\":" + spotVal + ",\"qty\":1.0}]}",
-                    ts - 200L,
-                    strategy
+                    ts - 200L
             );
             strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_997.00 + osc, ts);
         }
@@ -172,20 +165,17 @@ class CalculatedSpotStreamProcessorTest {
         processor.processBinanceFrame(
                 BinanceStreamType.SPOT_AGG_TRADES,
                 "{\"e\":\"aggTrade\",\"p\":\"90018.00\",\"q\":\"2.5\",\"m\":false}",
-                breakoutTs,
-                strategy
+                breakoutTs
         );
         processor.processCoinbaseFrame(
                 "BTCUSD",
                 "{\"type\":\"match\",\"price\":\"90018.50\",\"size\":\"1.8\"}",
-                breakoutTs + 10L,
-                strategy
+                breakoutTs + 10L
         );
         processor.processKrakenFrame(
                 "BTCUSD",
                 "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"price\":90018.25,\"qty\":1.2}]}",
-                breakoutTs + 20L,
-                strategy
+                breakoutTs + 20L
         );
 
         assertThat(submittedOrders).hasSize(1);
@@ -194,22 +184,10 @@ class CalculatedSpotStreamProcessorTest {
     }
 
     @Test
-    void shouldProcessBinanceFrameBatchAndInvokeStrategyOncePerBatch() {
+    void shouldProcessBinanceFrameBatchAndInvokeListenersOncePerBatch() {
         List<double[]> callbacks = new ArrayList<>();
-        TradingStrategy recordingStrategy = new TradingStrategy() {
-            @Override
-            public void init(StrategyContext context) {
-            }
-
-            @Override
-            public void onExecutionReport(ExecutionReport report) {
-            }
-
-            @Override
-            public void onCalculatedSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
-                callbacks.add(new double[]{timestampMs, spotPrice, twap60sPrice});
-            }
-        };
+        indicator.addListener((timestampMs, symbol, spotPrice, twap60sPrice) ->
+                callbacks.add(new double[]{timestampMs, spotPrice, twap60sPrice}));
 
         List<TimestampedFrame> batch = List.of(
                 new TimestampedFrame("{\"e\":\"aggTrade\",\"a\":101,\"p\":\"85000.00\",\"q\":\"1.0\"}".getBytes(StandardCharsets.UTF_8), 10_000L),
@@ -217,7 +195,7 @@ class CalculatedSpotStreamProcessorTest {
                 new TimestampedFrame("{\"e\":\"aggTrade\",\"a\":103,\"p\":\"85030.00\",\"q\":\"2.0\"}".getBytes(StandardCharsets.UTF_8), 10_010L)
         );
 
-        processor.processBinanceFrameBatch(batch, recordingStrategy);
+        processor.processBinanceFrameBatch(batch);
         assertThat(callbacks).hasSize(1);
         assertThat((long) callbacks.getFirst()[0]).isEqualTo(10_010L);
     }

@@ -148,7 +148,7 @@ class UtterParameciumStrategyTest {
         for (int s = 0; s <= 14; s++) {
             long ts = windowStartMs + (s * 1000L);
             double osc = (s % 2 == 0) ? 0.75 : -0.75;
-            strategy.onCalculatedSpotTwap(ts - 200L, "btcusd", 89_995.00 + osc, 89_995.00);
+            strategy.onSpotTwap(ts - 200L, "btcusd", 89_995.00 + osc, 89_995.00);
             strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 89_997.00 + osc, ts);
         }
 
@@ -163,7 +163,7 @@ class UtterParameciumStrategyTest {
         // De-biased spot = $89,997.75 + 0.85 * $20 = $90,014.75 -> projected TWAP jumps solidly above $90,000 strike
         // BEFORE Chainlink publishes its next 1s tick!
         long breakoutTs = tau46Ms + 400L;
-        strategy.onCalculatedSpotTwap(breakoutTs, "btcusd", 90_015.75, 89_996.00);
+        strategy.onSpotTwap(breakoutTs, "btcusd", 90_015.75, 89_996.00);
 
         assertThat(submittedOrders).hasSize(1);
         OrderCommand snipeOrder = submittedOrders.getFirst();

@@ -3,7 +3,7 @@ package cz.polymarket.bot.backtest.stream;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
-import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
 
@@ -50,7 +50,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private final long krakenDelayMs;
     private final long coinbaseDelayMs;
     private final PriorityQueue<BacktestEvent> queue = new PriorityQueue<>(16);
-    private final CalculatedSpotTwapEngine calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
+    private final SpotTwapIndicator calculatedSpotTwapEngine = new SpotTwapIndicator();
 
     private Connection sharedConnection;
     private Statement clobStatement;
@@ -60,9 +60,9 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private BacktestEvent.PolymarketClobFrameEvent nextClobEvent;
 
     private final SpotVenueCursor[] venueCursors = {
-            new SpotVenueCursor(CalculatedSpotTwapEngine.SpotVenue.BINANCE),
-            new SpotVenueCursor(CalculatedSpotTwapEngine.SpotVenue.COINBASE),
-            new SpotVenueCursor(CalculatedSpotTwapEngine.SpotVenue.KRAKEN)
+            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.BINANCE),
+            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.COINBASE),
+            new SpotVenueCursor(SpotTwapIndicator.SpotVenue.KRAKEN)
     };
     private Connection calcKrakenConnection;
     private Statement calcKrakenStatement;
@@ -75,7 +75,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
     private BacktestEvent.CalculatedSpotTwapEvent nextCalculatedSpotTwapEvent;
 
     private final class SpotVenueCursor {
-        final CalculatedSpotTwapEngine.SpotVenue venue;
+        final SpotTwapIndicator.SpotVenue venue;
         Connection connection;
         Statement statement;
         ResultSet resultSet;
@@ -84,7 +84,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
         double nextPrice;
         double nextQty;
 
-        SpotVenueCursor(CalculatedSpotTwapEngine.SpotVenue venue) {
+        SpotVenueCursor(SpotTwapIndicator.SpotVenue venue) {
             this.venue = venue;
         }
 
@@ -541,7 +541,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 long ts = bestCursor.nextTsMs;
                 double price = bestCursor.nextPrice;
                 double qty = bestCursor.nextQty;
-                CalculatedSpotTwapEngine.SpotVenue venue = bestCursor.venue;
+                SpotTwapIndicator.SpotVenue venue = bestCursor.venue;
                 bestCursor.advance();
 
                 consumeKrakenUpTo(ts);
@@ -568,7 +568,7 @@ public class ChronologicalEventStreamer implements AutoCloseable {
                 long ts = bestCursor.nextTsMs;
                 double price = bestCursor.nextPrice;
                 double qty = bestCursor.nextQty;
-                CalculatedSpotTwapEngine.SpotVenue venue = bestCursor.venue;
+                SpotTwapIndicator.SpotVenue venue = bestCursor.venue;
                 bestCursor.advance();
 
                 consumeKrakenUpTo(ts);

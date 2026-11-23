@@ -2,7 +2,6 @@ package cz.polymarket.bot.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.collector.DataCollectorService;
 import cz.polymarket.bot.collector.PolymarketLifecycleCoordinator;
@@ -25,6 +24,7 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.service.RuntimeCoordinator;
 import cz.polymarket.bot.state.RuntimeStateStore;
@@ -35,7 +35,7 @@ import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
-import cz.polymarket.bot.stream.CalculatedSpotStreamProcessor;
+import cz.polymarket.bot.stream.SpotTwapProcessor;
 import cz.polymarket.bot.web.TelemetryDto;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -100,8 +100,8 @@ class StrategyTradingEngineTest {
     private BinanceStreamConnector binanceConnector;
     private KrakenStreamConnector krakenConnector;
     private CoinbaseStreamConnector coinbaseConnector;
-    private CalculatedSpotTwapEngine calculatedSpotTwapEngine;
-    private CalculatedSpotStreamProcessor spotStreamProcessor;
+    private SpotTwapIndicator spotTwapIndicator;
+    private SpotTwapProcessor spotStreamProcessor;
     private PaperTradeRepository paperRepository;
     private RuntimeStateStore stateStore;
 
@@ -250,8 +250,8 @@ class StrategyTradingEngineTest {
                 1000L,
                 10000L
         );
-        calculatedSpotTwapEngine = new CalculatedSpotTwapEngine();
-        spotStreamProcessor = new CalculatedSpotStreamProcessor(objectMapper, calculatedSpotTwapEngine, "BTCUSDT");
+        spotTwapIndicator = new SpotTwapIndicator();
+        spotStreamProcessor = new SpotTwapProcessor(objectMapper, spotTwapIndicator, "BTCUSDT");
     }
 
     private void handleMockWebSocket(ServerWebSocket ws) {

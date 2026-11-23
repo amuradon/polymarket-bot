@@ -3,13 +3,13 @@ package cz.polymarket.bot.stream;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import cz.polymarket.bot.calculator.CalculatedSpotTwapEngine;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
-import cz.polymarket.bot.strategy.TradingStrategy;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
+import cz.polymarket.bot.indicators.SpotTwapListener;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -24,14 +24,14 @@ import java.util.List;
  * Shared zero-allocation CDI bean that streams live Binance Spot ({@code aggTrades}),
  * Kraken Spot ({@code trade} updates for {@code USDT/USD} and {@code <ASSET>/USD}), and
  * Coinbase Spot ({@code matches} for {@code <ASSET>-USD}) WebSocket frames into
- * {@link CalculatedSpotTwapEngine} and forwards the resulting USD spot and 60-second TWAP
- * to the active {@link TradingStrategy}.
+ * {@link SpotTwapIndicator} and dispatches calculated USD spot and 60-second TWAP updates
+ * to all registered {@link SpotTwapListener} instances.
  */
 @ApplicationScoped
-public class CalculatedSpotStreamProcessor {
+public class SpotTwapProcessor {
 
     private final ObjectMapper objectMapper;
-    private final CalculatedSpotTwapEngine calculatedSpotTwapEngine;
+    private final SpotTwapIndicator spotTwapIndicator;
     private final String cryptoSymbol;
 
     private double[] scratchKrakenPrices = new double[32];
@@ -41,32 +41,39 @@ public class CalculatedSpotStreamProcessor {
     /**
      * Constructs the multi-exchange spot stream processor CDI bean.
      *
-     * @param objectMapper             shared Jackson {@link ObjectMapper} used to create streaming {@link JsonParser} instances
-     * @param calculatedSpotTwapEngine calculator aggregating Binance, Coinbase, and Kraken spot trades
-     * @param symbol                   configured trading asset symbol (e.g. {@code "BTCUSDT"}, {@code "ETHUSDT"})
+     * @param objectMapper      shared Jackson {@link ObjectMapper} used to create streaming {@link JsonParser} instances
+     * @param spotTwapIndicator indicator aggregating Binance, Coinbase, and Kraken spot trades
+     * @param symbol            configured trading asset symbol (e.g. {@code "BTCUSDT"}, {@code "ETHUSDT"})
      */
     @Inject
-    public CalculatedSpotStreamProcessor(
+    public SpotTwapProcessor(
             ObjectMapper objectMapper,
-            CalculatedSpotTwapEngine calculatedSpotTwapEngine,
+            SpotTwapIndicator spotTwapIndicator,
             @ConfigProperty(name = "polymarket.trading.symbol", defaultValue = "BTCUSDT")
             String symbol) {
         if (objectMapper == null) {
             throw new IllegalArgumentException("objectMapper cannot be null");
         }
-        if (calculatedSpotTwapEngine == null) {
-            throw new IllegalArgumentException("calculatedSpotTwapEngine cannot be null");
+        if (spotTwapIndicator == null) {
+            throw new IllegalArgumentException("spotTwapIndicator cannot be null");
         }
         this.objectMapper = objectMapper;
-        this.calculatedSpotTwapEngine = calculatedSpotTwapEngine;
+        this.spotTwapIndicator = spotTwapIndicator;
         this.cryptoSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
     }
 
     /**
-     * Resets the underlying {@link CalculatedSpotTwapEngine}.
+     * Returns the underlying {@link SpotTwapIndicator}.
+     */
+    public SpotTwapIndicator getIndicator() {
+        return spotTwapIndicator;
+    }
+
+    /**
+     * Resets the underlying {@link SpotTwapIndicator}.
      */
     public void reset() {
-        calculatedSpotTwapEngine.reset();
+        spotTwapIndicator.reset();
     }
 
     /**
@@ -75,21 +82,18 @@ public class CalculatedSpotStreamProcessor {
      * @param streamType      Binance stream type
      * @param rawJson         raw JSON text frame
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap}
      */
     public void processBinanceFrame(
             BinanceStreamType streamType,
             String rawJson,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (streamType != BinanceStreamType.SPOT_AGG_TRADES || rawJson == null || rawJson.isBlank()) {
             return;
         }
         processBinanceFrameBytes(
                 streamType,
                 rawJson.getBytes(StandardCharsets.UTF_8),
-                recvTimestampMs,
-                strategy
+                recvTimestampMs
         );
     }
 
@@ -100,13 +104,11 @@ public class CalculatedSpotStreamProcessor {
      * @param streamType      Binance stream type
      * @param rawUtf8Bytes    raw UTF-8 JSON bytes
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap}
      */
     public void processBinanceFrameBytes(
             BinanceStreamType streamType,
             byte[] rawUtf8Bytes,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (streamType != BinanceStreamType.SPOT_AGG_TRADES
                 || rawUtf8Bytes == null
                 || rawUtf8Bytes.length == 0
@@ -117,29 +119,22 @@ public class CalculatedSpotStreamProcessor {
         if (Double.isNaN(twap60sUsd)) {
             return;
         }
-        double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
         long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-        if (strategy != null && spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
-            strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, twap60sUsd);
-        }
+        spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
     }
 
     /**
      * Processes a batch of forward-progressing Binance {@code SPOT_AGG_TRADES} frames into
-     * {@link CalculatedSpotTwapEngine} without allocation and invokes {@code strategy.onCalculatedSpotTwap}
-     * at most once for the final aggregated state of the batch.
+     * {@link SpotTwapIndicator} without allocation and notifies registered {@link SpotTwapListener}
+     * instances at most once for the final aggregated state of the batch.
      *
-     * @param batch    chronological batch of deduplicated/fast-forwarded Binance {@code aggTrade} frames
-     * @param strategy active trading strategy receiving {@code onCalculatedSpotTwap}
+     * @param batch chronological batch of deduplicated/fast-forwarded Binance {@code aggTrade} frames
      */
-    public void processBinanceFrameBatch(
-            List<TimestampedFrame> batch,
-            TradingStrategy strategy) {
+    public void processBinanceFrameBatch(List<TimestampedFrame> batch) {
         if (batch == null || batch.isEmpty()) {
             return;
         }
         boolean anyApplied = false;
-        double latestTwap60sUsd = Double.NaN;
         long latestRecvTs = 0L;
 
         for (int i = 0, n = batch.size(); i < n; i++) {
@@ -155,19 +150,15 @@ public class CalculatedSpotStreamProcessor {
             double twap = applyBinanceAggTradeBytes(rawBytes, recvTs);
             if (!Double.isNaN(twap)) {
                 anyApplied = true;
-                latestTwap60sUsd = twap;
                 if (recvTs > latestRecvTs) {
                     latestRecvTs = recvTs;
                 }
             }
         }
 
-        if (anyApplied && strategy != null) {
-            double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+        if (anyApplied) {
             long effectiveTsMs = resolveEffectiveTimestampMs(latestRecvTs);
-            if (spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
-                strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, latestTwap60sUsd);
-            }
+            spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
         }
     }
 
@@ -200,7 +191,7 @@ public class CalculatedSpotStreamProcessor {
             if (price <= 0.0 || Double.isNaN(price)) {
                 return Double.NaN;
             }
-            return calculatedSpotTwapEngine.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
+            return spotTwapIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
         } catch (Exception e) {
             Log.warnf("Failed to parse Binance SPOT_AGG_TRADES frame: %s", e.getMessage());
             return Double.NaN;
@@ -213,21 +204,18 @@ public class CalculatedSpotStreamProcessor {
      * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
      * @param rawJson         raw JSON text frame
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap} for asset trades
      */
     public void processKrakenFrame(
             String streamSymbol,
             String rawJson,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (rawJson == null || rawJson.isBlank()) {
             return;
         }
         processKrakenFrameBytes(
                 streamSymbol,
                 rawJson.getBytes(StandardCharsets.UTF_8),
-                recvTimestampMs,
-                strategy
+                recvTimestampMs
         );
     }
 
@@ -237,13 +225,11 @@ public class CalculatedSpotStreamProcessor {
      * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
      * @param rawUtf8Bytes    raw UTF-8 JSON bytes
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap} for asset trades
      */
     public void processKrakenFrameBytes(
             String streamSymbol,
             byte[] rawUtf8Bytes,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (rawUtf8Bytes == null || rawUtf8Bytes.length == 0 || recvTimestampMs <= 0L) {
             return;
         }
@@ -294,24 +280,20 @@ public class CalculatedSpotStreamProcessor {
             }
 
             boolean updatedAssetSpot = false;
-            double latestTwap60sUsd = Double.NaN;
             for (int i = 0; i < tradeCount; i++) {
                 double price = scratchKrakenPrices[i];
                 double qty = scratchKrakenQtys[i];
                 if (scratchKrakenIsUsdt[i]) {
-                    calculatedSpotTwapEngine.onUsdtUsdTrade(recvTimestampMs, price);
+                    spotTwapIndicator.onUsdtUsdTrade(recvTimestampMs, price);
                 } else {
-                    latestTwap60sUsd = calculatedSpotTwapEngine.onKrakenUsdTrade(recvTimestampMs, price, qty);
+                    spotTwapIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty);
                     updatedAssetSpot = true;
                 }
             }
 
-            if (updatedAssetSpot && strategy != null) {
-                double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+            if (updatedAssetSpot) {
                 long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-                if (spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
-                    strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, latestTwap60sUsd);
-                }
+                spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
             }
         } catch (Exception e) {
             Log.warnf("Failed to parse Kraken Spot trade frame: %s", e.getMessage());
@@ -387,21 +369,18 @@ public class CalculatedSpotStreamProcessor {
      * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
      * @param rawJson         raw JSON text frame
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap}
      */
     public void processCoinbaseFrame(
             String streamSymbol,
             String rawJson,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (rawJson == null || rawJson.isBlank()) {
             return;
         }
         processCoinbaseFrameBytes(
                 streamSymbol,
                 rawJson.getBytes(StandardCharsets.UTF_8),
-                recvTimestampMs,
-                strategy
+                recvTimestampMs
         );
     }
 
@@ -411,13 +390,11 @@ public class CalculatedSpotStreamProcessor {
      * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
      * @param rawUtf8Bytes    raw UTF-8 JSON bytes
      * @param recvTimestampMs local receipt timestamp in milliseconds UTC
-     * @param strategy        active trading strategy receiving {@code onCalculatedSpotTwap}
      */
     public void processCoinbaseFrameBytes(
             String streamSymbol,
             byte[] rawUtf8Bytes,
-            long recvTimestampMs,
-            TradingStrategy strategy) {
+            long recvTimestampMs) {
         if (rawUtf8Bytes == null || rawUtf8Bytes.length == 0 || recvTimestampMs <= 0L) {
             return;
         }
@@ -457,19 +434,16 @@ public class CalculatedSpotStreamProcessor {
             if (!isMatchType || price <= 0.0 || Double.isNaN(price)) {
                 return;
             }
-            double twap60sUsd = calculatedSpotTwapEngine.onCoinbaseUsdTrade(recvTimestampMs, price, size);
-            double spotUsd = calculatedSpotTwapEngine.getLastSpotPriceUsd();
+            spotTwapIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size);
             long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-            if (strategy != null && spotUsd > 0.0 && !Double.isNaN(spotUsd)) {
-                strategy.onCalculatedSpotTwap(effectiveTsMs, cryptoSymbol, spotUsd, twap60sUsd);
-            }
+            spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
         } catch (Exception e) {
             Log.warnf("Failed to parse Coinbase Spot match frame: %s", e.getMessage());
         }
     }
 
     private long resolveEffectiveTimestampMs(long recvTimestampMs) {
-        long engineTs = calculatedSpotTwapEngine.getLastAssetTimestampMs();
+        long engineTs = spotTwapIndicator.getLastAssetTimestampMs();
         return engineTs > 0L ? Math.max(recvTimestampMs, engineTs) : recvTimestampMs;
     }
 }

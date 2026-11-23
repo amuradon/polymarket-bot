@@ -1,5 +1,7 @@
 package cz.polymarket.bot.strategy;
 
+import cz.polymarket.bot.indicators.SpotTwapListener;
+
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import io.quarkus.logging.Log;
@@ -27,7 +29,7 @@ import java.math.BigDecimal;
  * Orders are submitted immediately upon signal confirmation without artificial blockchain observation delay.
  */
 @ApplicationScoped
-public class RoundMainstreamStrategy implements TradingStrategy {
+public class RoundMainstreamStrategy implements TradingStrategy, SpotTwapListener {
 
     private static final int MAX_MC = 1_000;
     private static final int TICK_STEP_MC = 10;
@@ -329,7 +331,7 @@ public class RoundMainstreamStrategy implements TradingStrategy {
     }
 
     @Override
-    public void onCalculatedSpotTwap(
+    public void onSpotTwap(
             long timestampMs,
             String symbol,
             double spotPrice,

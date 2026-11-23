@@ -11,6 +11,7 @@ import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
@@ -495,7 +496,9 @@ public class BacktestEngine {
                         }
                         case BacktestEvent.CalculatedSpotTwapEvent e -> {
                             context.setLastReferencePrice(e.spotPrice());
-                            activeStrategy.onCalculatedSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
+                            if (activeStrategy instanceof SpotTwapListener listener) {
+                                listener.onSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
+                            }
                         }
                         case BacktestEvent.PolymarketCryptoPriceEvent e -> {
                             context.setLastReferencePrice(e.price());

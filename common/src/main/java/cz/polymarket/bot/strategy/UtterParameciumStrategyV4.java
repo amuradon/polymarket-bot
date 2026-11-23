@@ -1,5 +1,7 @@
 package cz.polymarket.bot.strategy;
 
+import cz.polymarket.bot.indicators.SpotTwapListener;
+
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import io.quarkus.logging.Log;
@@ -18,7 +20,7 @@ import java.math.BigDecimal;
  * deep-cushion pullback exemption, and conviction-scaled batch/inventory sizing.
  */
 @ApplicationScoped
-public class UtterParameciumStrategyV4 implements TradingStrategy {
+public class UtterParameciumStrategyV4 implements TradingStrategy, SpotTwapListener {
 
     /**
      * Pre-computed remaining 60s TWAP standard deviation weights {@code W_bps(tau)} for {@code tau = 0..66} seconds,
@@ -553,7 +555,7 @@ public class UtterParameciumStrategyV4 implements TradingStrategy {
     }
 
     @Override
-    public void onCalculatedSpotTwap(
+    public void onSpotTwap(
             long timestampMs,
             String symbol,
             double spotPrice,

@@ -31,6 +31,7 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor.SystemTelemetrySnapshot;
@@ -47,7 +48,7 @@ import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
-import cz.polymarket.bot.stream.CalculatedSpotStreamProcessor;
+import cz.polymarket.bot.stream.SpotTwapProcessor;
 import cz.polymarket.bot.web.TelemetryDto;
 import io.quarkus.logging.Log;
 import io.quarkus.scheduler.Scheduled;
@@ -85,7 +86,7 @@ import java.util.concurrent.locks.LockSupport;
  *       reader ({@link MarketWebSocketRuntime}) servicing all WebSocket sockets into lock-free MPSC queues.</li>
  *   <li><b>vCPU #2 ({@code market-strategy-worker})</b>: Fused lock-free L1-cache loop batch-draining CLOB orderbook
  *       deltas ({@link PolymarketLocalBook}), PolyBolt oracle ticks, and Binance/Kraken/Coinbase spot trades
- *       ({@code CalculatedSpotTwapEngine}) and immediately evaluating {@link TradingStrategy} with zero cross-thread
+ *       ({@code SpotTwapIndicator}) and immediately evaluating {@link TradingStrategy} with zero cross-thread
  *       quote handoff and adaptive user-space micro-spinning.</li>
  *   <li><b>vCPU #3 ({@code order-execution-io-worker})</b>: Dedicated isolated core exclusively executing EIP-712
  *       signing and HTTP {@code POST /order} / {@code DELETE /order} execution in {@link StrategyMode#LIVE}.</li>
@@ -112,7 +113,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
     private final KrakenStreamConnector krakenConnector;
     private final CoinbaseStreamConnector coinbaseConnector;
     private final PolymarketStreamParser streamParser;
-    private final CalculatedSpotStreamProcessor spotStreamProcessor;
+    private final SpotTwapProcessor spotStreamProcessor;
     private final PaperTradeRepository paperRepository;
     private final RuntimeStateStore stateStore;
     private final SystemNetworkTelemetryMonitor telemetryMonitor;
@@ -206,7 +207,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
      * @param krakenConnector        Kraken Spot {@code trade} WebSocket connector ({@code USDTUSD} + {@code <SYMBOL>})
      * @param coinbaseConnector      Coinbase Spot {@code matches} WebSocket connector
      * @param streamParser           JSON frame parser for PolyBolt and CLOB streams
-     * @param spotStreamProcessor    CDI processor parsing Binance, Kraken, and Coinbase spot trades into {@code CalculatedSpotTwapEngine}
+     * @param spotStreamProcessor    CDI processor parsing Binance, Kraken, and Coinbase spot trades into {@code SpotTwapIndicator}
      * @param paperRepository        persistent paper trade repository ({@code trades.jsonl} + {@code metrics.json})
      * @param stateStore             atomic disk persistence store for {@link RuntimeStateSnapshot}
      * @param telemetryMonitor       OS kernel TCP buffer, JVM ZGC, and per-thread CPU utilization monitor
@@ -232,7 +233,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             KrakenStreamConnector krakenConnector,
             CoinbaseStreamConnector coinbaseConnector,
             PolymarketStreamParser streamParser,
-            CalculatedSpotStreamProcessor spotStreamProcessor,
+            SpotTwapProcessor spotStreamProcessor,
             PaperTradeRepository paperRepository,
             RuntimeStateStore stateStore,
             SystemNetworkTelemetryMonitor telemetryMonitor,
@@ -324,6 +325,9 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
                 : strategyName.trim();
         this.activeStrategy = strategyRegistry.getStrategy(resolvedName);
         this.activeStrategy.init(this);
+        if (this.activeStrategy instanceof SpotTwapListener listener) {
+            this.spotStreamProcessor.getIndicator().addListener(listener);
+        }
         this.clobWsClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.binanceConnector.setDisconnectListener(this::onStreamUnexpectedDisconnect);
@@ -2154,7 +2158,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
 
     /**
      * Processes a batch of forward-progressing Binance Spot {@code aggTrades} frames into
-     * {@code CalculatedSpotTwapEngine} and invokes {@code activeStrategy.onCalculatedSpotTwap} once for the batch.
+     * {@code SpotTwapIndicator} and notifies registered {@link SpotTwapListener} instances once for the batch.
      *
      * @param batch chronological batch of fast-forwarded Binance {@code aggTrade} frames
      */
@@ -2167,14 +2171,14 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = lastRecvTs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processBinanceFrameBatch(batch, activeStrategy);
+            spotStreamProcessor.processBinanceFrameBatch(batch);
         }
     }
 
     /**
      * Processes a raw JSON text frame from the Kraken Spot v2 {@code trade} WebSocket stream
-     * ({@code USDTUSD} or {@code <SYMBOL>}), updating {@code CalculatedSpotTwapEngine} and forwarding
-     * the calculated USD spot and 60s TWAP to the active strategy.
+     * ({@code USDTUSD} or {@code <SYMBOL>}), updating {@code SpotTwapIndicator} and forwarding
+     * the calculated USD spot and 60s TWAP to registered {@link SpotTwapListener} strategies.
      *
      * @param streamSymbol    normalized Kraken stream symbol (e.g. {@code "USDTUSD"}, {@code "BTCUSD"})
      * @param rawJson         raw Kraken JSON frame
@@ -2185,7 +2189,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processKrakenFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
+            spotStreamProcessor.processKrakenFrame(streamSymbol, rawJson, recvTimestampMs);
         }
     }
 
@@ -2202,14 +2206,14 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processKrakenFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+            spotStreamProcessor.processKrakenFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs);
         }
     }
 
     /**
      * Processes a raw JSON text frame from the Coinbase Spot {@code matches} WebSocket stream,
-     * updating {@code CalculatedSpotTwapEngine} and forwarding the calculated USD spot and 60s TWAP
-     * to the active strategy.
+     * updating {@code SpotTwapIndicator} and forwarding the calculated USD spot and 60s TWAP
+     * to registered {@link SpotTwapListener} strategies.
      *
      * @param streamSymbol    normalized Coinbase stream symbol (e.g. {@code "BTCUSD"})
      * @param rawJson         raw Coinbase JSON frame
@@ -2220,7 +2224,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processCoinbaseFrame(streamSymbol, rawJson, recvTimestampMs, activeStrategy);
+            spotStreamProcessor.processCoinbaseFrame(streamSymbol, rawJson, recvTimestampMs);
         }
     }
 
@@ -2237,7 +2241,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             latestOracleRecvTimestampMs = recvTimestampMs;
         }
         synchronized (strategyLock) {
-            spotStreamProcessor.processCoinbaseFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs, activeStrategy);
+            spotStreamProcessor.processCoinbaseFrameBytes(streamSymbol, rawUtf8Bytes, recvTimestampMs);
         }
     }
 

@@ -2,6 +2,7 @@ package cz.polymarket.bot.strategy;
 
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
+import cz.polymarket.bot.indicators.SpotTwapListener;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -217,7 +218,9 @@ class UtterParameciumStrategyVersionsTest {
         for (int sec = -5; sec <= 15; sec++) {
             long ts = windowStartMs + sec * 1_000L;
             double calcPrice = (sec == 15) ? (chainlinkSpot + calcSpotDeltaUsd) : chainlinkSpot;
-            strategy.onCalculatedSpotTwap(ts, "BTCUSDT", calcPrice, calcPrice);
+            if (strategy instanceof SpotTwapListener listener) {
+                listener.onSpotTwap(ts, "BTCUSDT", calcPrice, calcPrice);
+            }
             if (sec < 15) {
                 strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", chainlinkSpot, ts);
             }

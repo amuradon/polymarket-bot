@@ -1,9 +1,12 @@
-package cz.polymarket.bot.calculator;
+package cz.polymarket.bot.indicators;
 
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Zero-allocation multi-exchange spot & 60-second Time-Weighted Average Price (TWAP) calculator
+ * Zero-allocation multi-exchange spot & 60-second Time-Weighted Average Price (TWAP) indicator
  * emulating Chainlink Data Streams ({@code price.crypto} and {@code price.crypto.twap}).
  * <p>
  * Aggregates real-time and historical spot trades across three constituent venues:
@@ -14,10 +17,11 @@ import jakarta.enterprise.context.ApplicationScoped;
  *   <li><b>Kraken Spot ({@code <ASSET>USD})</b> direct USD trades (baseline liquidity weight {@code 0.20}).</li>
  * </ol>
  * <p>
- * Maintainable per worker/stream instance without heap allocations on the hot path.
+ * Dispatches calculated spot & TWAP updates to all registered {@link SpotTwapListener} instances
+ * without heap allocations on the hot path.
  */
 @ApplicationScoped
-public class CalculatedSpotTwapEngine {
+public class SpotTwapIndicator {
 
     /**
      * Constituent spot exchanges contributing to the Chainlink-emulated USD spot price.
@@ -118,6 +122,60 @@ public class CalculatedSpotTwapEngine {
     private double lastSpotPriceUsd = Double.NaN;
     private double lastTwap60sPriceUsd = Double.NaN;
     private long lastAssetTimestampMs = -1L;
+
+    private final List<SpotTwapListener> listeners = new ArrayList<>();
+
+    /**
+     * Registers a {@link SpotTwapListener} to receive spot & 60s TWAP updates.
+     * Duplicate registrations are ignored.
+     *
+     * @param listener listener to register
+     */
+    public void addListener(SpotTwapListener listener) {
+        if (listener == null) {
+            throw new IllegalArgumentException("listener cannot be null");
+        }
+        if (!listeners.contains(listener)) {
+            listeners.add(listener);
+        }
+    }
+
+    /**
+     * Unregisters a previously registered {@link SpotTwapListener}.
+     *
+     * @param listener listener to remove
+     */
+    public void removeListener(SpotTwapListener listener) {
+        if (listener != null) {
+            listeners.remove(listener);
+        }
+    }
+
+    /**
+     * Removes all registered {@link SpotTwapListener} instances.
+     */
+    public void clearListeners() {
+        listeners.clear();
+    }
+
+    /**
+     * Dispatches the latest calculated spot & 60s TWAP values to all registered {@link SpotTwapListener}
+     * instances without heap allocation when a valid spot and TWAP price are available.
+     *
+     * @param timestampMs effective timestamp in milliseconds UTC
+     * @param symbol lowercase USD asset symbol (e.g. {@code "btcusd"})
+     */
+    public void notifyListeners(long timestampMs, String symbol) {
+        if (listeners.isEmpty()
+                || lastSpotPriceUsd <= 0.0
+                || Double.isNaN(lastSpotPriceUsd)
+                || Double.isNaN(lastTwap60sPriceUsd)) {
+            return;
+        }
+        for (int i = 0, n = listeners.size(); i < n; i++) {
+            listeners.get(i).onSpotTwap(timestampMs, symbol, lastSpotPriceUsd, lastTwap60sPriceUsd);
+        }
+    }
 
     /**
      * Resets all internal venue, EMA, and 60s TWAP state.
