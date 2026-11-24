@@ -57,7 +57,7 @@ class DashboardResourceTest {
                 .statusCode(200)
                 .contentType(containsString("text/html"))
                 .body(containsString("Polymarket Bot"))
-                .body(containsString("UtterParameciumStrategy"))
+                .body(containsString("OraclePulseLockStrategy"))
                 .body(containsString("INACTIVE (PRESERVED)"));
 
         // 2. Invalid mode returns 400 Bad Request

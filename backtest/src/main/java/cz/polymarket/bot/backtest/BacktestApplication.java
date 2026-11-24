@@ -45,7 +45,7 @@ public class BacktestApplication implements QuarkusApplication {
      *
      * @param backtestEngine simulation engine executing the backtest
      * @param batchMode {@code true} to execute backtest on startup and exit; {@code false} for REST server mode
-     * @param strategyName trading strategy name (default {@code UtterParameciumStrategy})
+     * @param strategyName trading strategy name (default {@code OraclePulseLockStrategy})
      * @param symbol trading symbol (default {@code BTCUSDT})
      * @param startDate inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
      * @param endDate optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
@@ -58,7 +58,7 @@ public class BacktestApplication implements QuarkusApplication {
             BacktestEngine backtestEngine,
             @ConfigProperty(name = "polymarket.backtest.batchMode", defaultValue = "false")
             boolean batchMode,
-            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "UtterParameciumStrategy")
+            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "OraclePulseLockStrategy")
             String strategyName,
             @ConfigProperty(name = "polymarket.backtest.symbol", defaultValue = "BTCUSDT")
             String symbol,

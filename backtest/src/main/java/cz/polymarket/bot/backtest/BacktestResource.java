@@ -55,7 +55,7 @@ public class BacktestResource {
     public BacktestResource(
             BacktestJobManager jobManager,
             StrategyRegistry strategyRegistry,
-            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "UtterParameciumStrategy")
+            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "OraclePulseLockStrategy")
             String defaultStrategy,
             @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
             String defaultStartDate) {
@@ -71,7 +71,7 @@ public class BacktestResource {
         this.strategyRegistry = strategyRegistry;
         this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
                 ? defaultStrategy.trim()
-                : "UtterParameciumStrategy";
+                : "OraclePulseLockStrategy";
         this.defaultStartDate = (defaultStartDate != null && !defaultStartDate.isBlank())
                 ? defaultStartDate.trim()
                 : "2026-10-12";
@@ -330,7 +330,7 @@ public class BacktestResource {
             @Schema(description = "Initial lifecycle status of the job", examples = "QUEUED")
             String status,
 
-            @Schema(description = "Trading strategy to evaluate", examples = "UtterParameciumStrategy")
+            @Schema(description = "Trading strategy to evaluate", examples = "OraclePulseLockStrategy")
             String strategyName,
 
             @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
@@ -365,18 +365,18 @@ public class BacktestResource {
             @Schema(description = "Lifecycle status: QUEUED, IN_PROGRESS, COMPLETED, or FAILED", examples = "COMPLETED")
             String status,
 
-            @Schema(description = "Strategy evaluated", examples = "UtterParameciumStrategy")
+            @Schema(description = "Strategy evaluated", examples = "OraclePulseLockStrategy")
             String strategyName,
 
             @Schema(description = "Cryptocurrency symbol evaluated", examples = "BTCUSDT")
             String symbol,
 
             @Schema(description = "File system path to the exported JSON results file when completed",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_UtterParameciumStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
             String resultFilePath,
 
             @Schema(description = "File system path to the exported JSON results file (alias)",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_UtterParameciumStrategy_20261003_114500.json")
+                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
             String jsonFilePath,
 
             @Schema(description = "Error description if execution failed", examples = "No market rows available")

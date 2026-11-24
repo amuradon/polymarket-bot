@@ -12,7 +12,7 @@ import java.util.List;
  *
  * @param healthy          overall application health flag
  * @param strategyMode     active {@link StrategyMode} ({@code LIVE}, {@code PAPER}, or {@code OFF})
- * @param strategyName     configured strategy name (e.g. {@code UtterParameciumStrategy})
+ * @param strategyName     configured strategy name (e.g. {@code OraclePulseLockStrategy})
  * @param orderType        configured CLOB order time-in-force (e.g. {@code "FAK"})
  * @param orderLatencyMs   configured virtual order latency in milliseconds (used in {@code PAPER} mode)
  * @param activeMarketSlug currently tracked Polymarket market slug

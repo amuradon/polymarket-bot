@@ -312,7 +312,7 @@ Resources:
               Environment="QUARKUS_PROFILE=prod"
               Environment="AWS_REGION=${AWS::Region}"
               Environment="POLYMARKET_CREDENTIALS_SECRET_ID=${PolymarketSecretId}"
-              Environment="POLYMARKET_STRATEGY_NAME=UtterParameciumStrategy"
+              Environment="POLYMARKET_STRATEGY_NAME=OraclePulseLockStrategy"
               Environment="POLYMARKET_COLLECTOR_DATA_DIR=/mnt/ebs/polymarket-bot/collector"
               Environment="POLYMARKET_PAPER_DATA_DIR=/mnt/ebs/polymarket-bot/paper"
               Environment="POLYMARKET_STATE_FILE=/mnt/ebs/polymarket-bot/state/runtime-state.json"

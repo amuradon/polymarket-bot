@@ -17,6 +17,8 @@ import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategy;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategyConfig;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
 import org.junit.jupiter.api.AfterEach;
@@ -185,10 +187,12 @@ class BacktestEngineTest {
         }
         TradingStrategy polymarketOnlyStrategy = new PolymarketOnlyBatchStrategy();
         UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+        OraclePulseLockStrategy oraclePulseLockStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
 
         StrategyRegistry strategyRegistry = new StrategyRegistry(Map.of(
                 polymarketOnlyStrategy.getName(), polymarketOnlyStrategy,
-                utterStrategy.getName(), utterStrategy
+                utterStrategy.getName(), utterStrategy,
+                oraclePulseLockStrategy.getName(), oraclePulseLockStrategy
         ));
         IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
                 tempDir.resolve("cache"),
@@ -203,7 +207,7 @@ class BacktestEngineTest {
                 strategyRegistry,
                 metricsCalculator,
                 jsonExporter,
-                "UtterParameciumStrategy",
+                "OraclePulseLockStrategy",
                 "2026-08-01",
                 tempDir.resolve("export").toString(),
                 10000.0,
@@ -570,7 +574,7 @@ class BacktestEngineTest {
         );
 
         assertThat(result).isNotNull();
-        assertThat(result.strategyName()).isEqualTo("UtterParameciumStrategy");
+        assertThat(result.strategyName()).isEqualTo("OraclePulseLockStrategy");
         assertThat(result.totalMarkets()).isEqualTo(3);
         assertThat(result.metrics().initialCapital()).isEqualTo(10000.0);
         assertThat(result.jsonFilePath()).isNotBlank();

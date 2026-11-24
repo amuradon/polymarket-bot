@@ -44,7 +44,7 @@ class BacktestResourceTest {
     }
 
     @Test
-    @DisplayName("POST /api/backtest/run should use default strategy UtterParameciumStrategy when strategyName is omitted")
+    @DisplayName("POST /api/backtest/run should use default strategy OraclePulseLockStrategy when strategyName is omitted")
     void shouldUseDefaultStrategyWhenStrategyNameIsOmitted() {
         given()
                 .contentType(ContentType.JSON)

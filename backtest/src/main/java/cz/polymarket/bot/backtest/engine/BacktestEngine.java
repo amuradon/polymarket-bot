@@ -96,7 +96,7 @@ public class BacktestEngine {
             StrategyRegistry strategyRegistry,
             PerformanceMetricsCalculator metricsCalculator,
             BacktestJsonExporter jsonExporter,
-            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "UtterParameciumStrategy")
+            @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "OraclePulseLockStrategy")
             String defaultStrategy,
             @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
             String defaultStartDate,
@@ -153,7 +153,7 @@ public class BacktestEngine {
         this.jsonExporter = jsonExporter;
         this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
                 ? defaultStrategy.trim()
-                : "UtterParameciumStrategy";
+                : "OraclePulseLockStrategy";
         this.defaultStartDate = (defaultStartDate != null && !defaultStartDate.isBlank())
                 ? defaultStartDate.trim()
                 : "2026-10-12";

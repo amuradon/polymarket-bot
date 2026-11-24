@@ -214,7 +214,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
      * @param telemetryMonitor       OS kernel TCP buffer, JVM ZGC, and per-thread CPU utilization monitor
      * @param vertx                  Vert.x instance used for simulated paper execution latency timers
      * @param configuredStrategyMode initial configured {@link StrategyMode} ({@code LIVE}, {@code PAPER}, or {@code OFF})
-     * @param strategyName           configured strategy name (defaults to {@code UtterParameciumStrategy})
+     * @param strategyName           configured strategy name (defaults to {@code OraclePulseLockStrategy})
      * @param symbol                 trading asset symbol (defaults to {@code BTCUSDT})
      * @param timeframe              market timeframe (defaults to {@code 15m})
      * @param streamsEnabled         whether to connect strategy WebSocket streams when in {@code LIVE} or {@code PAPER} mode
@@ -241,7 +241,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
             Vertx vertx,
             @ConfigProperty(name = "polymarket.strategy.mode", defaultValue = "LIVE")
             String configuredStrategyMode,
-            @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "UtterParameciumStrategy")
+            @ConfigProperty(name = "polymarket.strategy.name", defaultValue = "OraclePulseLockStrategy")
             String strategyName,
             @ConfigProperty(name = "polymarket.trading.symbol", defaultValue = "BTCUSDT")
             String symbol,
@@ -322,7 +322,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
         this.orderLatencyMs = Math.max(0L, orderLatencyMs);
 
         String resolvedName = (strategyName == null || strategyName.isBlank())
-                ? "UtterParameciumStrategy"
+                ? "OraclePulseLockStrategy"
                 : strategyName.trim();
         this.activeStrategy = strategyRegistry.getStrategy(resolvedName);
         this.activeStrategy.init(this);
