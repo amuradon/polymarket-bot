@@ -97,7 +97,8 @@ class PolymarketPolyBoltClientTest {
                 Optional.of("test-secret"),
                 Optional.of("test-passphrase"),
                 200L,
-                5000L
+                5000L,
+                30_000L
         );
 
         List<String> collectorTwap = new CopyOnWriteArrayList<>();
@@ -162,12 +163,75 @@ class PolymarketPolyBoltClientTest {
                 Optional.empty(),
                 Optional.empty(),
                 200L,
-                5000L
+                5000L,
+                30_000L
         );
 
         assertThat(clientWithoutCreds.hasCredentials()).isFalse();
         assertThatThrownBy(() -> clientWithoutCreds.startCollectorStreams("BTCUSDT", (r, t) -> {}, (r, t) -> {}))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Missing required Polymarket CLOB API credentials");
+    }
+
+    @Test
+    void shouldReconnectAndResubscribeOnSilentPolyBoltSubscriptionWhenPongsContinue() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger twapSubCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger cryptoSubCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        List<String> collectorTwap = new CopyOnWriteArrayList<>();
+        List<String> collectorCrypto = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> ws.textMessageHandler(msg -> {
+                    if (msg.contains("\"op\":\"ping\"")) {
+                        ws.writeTextMessage("{\"op\":\"pong\"}");
+                    } else if (msg.contains("\"op\":\"auth\"")) {
+                        ws.writeTextMessage("{\"op\":\"authed\",\"rid\":\"a1\"}");
+                    } else if (msg.contains("\"op\":\"subscribe\"")) {
+                        if (msg.contains("price.crypto.twap")) {
+                            int attempt = twapSubCount.incrementAndGet();
+                            ws.writeTextMessage("{\"op\":\"subscribed\",\"rid\":\"s1\",\"channel\":\"price.crypto.twap\"}");
+                            if (attempt >= 2) {
+                                ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto.twap\",\"seq\":1,\"ts\":1789041601000,\"payload\":{\"symbol\":\"btcusd\",\"value\":78500.00,\"window_seconds\":60,\"timestamp\":1789041601000,\"source\":\"chainlink\"}}");
+                            }
+                        } else if (msg.contains("price.crypto")) {
+                            int attempt = cryptoSubCount.incrementAndGet();
+                            ws.writeTextMessage("{\"op\":\"subscribed\",\"rid\":\"s1\",\"channel\":\"price.crypto\"}");
+                            if (attempt >= 2) {
+                                ws.writeTextMessage("{\"v\":1,\"channel\":\"price.crypto\",\"seq\":1,\"ts\":1789041601000,\"payload\":{\"symbol\":\"btcusd\",\"value\":78510.00,\"timestamp\":1789041601000,\"source\":\"chainlink\"}}");
+                            }
+                        }
+                    }
+                }));
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        PolymarketPolyBoltClient client = new PolymarketPolyBoltClient(
+                marketWsRuntime,
+                "ws://localhost:" + port + "/ws",
+                Optional.of("test-api-key"),
+                Optional.of("test-secret"),
+                Optional.of("test-passphrase"),
+                50L,
+                60L,
+                160L
+        );
+
+        client.startCollectorStreams(
+                "BTCUSDT",
+                (rawJson, recvTs) -> collectorCrypto.add(rawJson),
+                (rawJson, recvTs) -> collectorTwap.add(rawJson)
+        );
+
+        try {
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(twapSubCount.get()).isGreaterThanOrEqualTo(2);
+                        assertThat(cryptoSubCount.get()).isGreaterThanOrEqualTo(2);
+                        assertThat(collectorTwap).isNotEmpty();
+                        assertThat(collectorCrypto).isNotEmpty();
+                    });
+        } finally {
+            client.stop();
+        }
     }
 }

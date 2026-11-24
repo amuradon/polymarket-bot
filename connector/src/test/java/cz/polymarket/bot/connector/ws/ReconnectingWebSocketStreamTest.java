@@ -1001,4 +1001,60 @@ class ReconnectingWebSocketStreamTest {
             slotRuntime.destroy();
         }
     }
+
+    @Test
+    void shouldReconnectOnDataIdleWatchdogEvenWhenPongsArriveAndNotAdvanceLastMessageTsOnHeartbeats() throws Exception {
+        AtomicInteger connectionCount = new AtomicInteger(0);
+        AtomicInteger pongsSentAttempt1 = new AtomicInteger(0);
+        List<WebSocketStreamTelemetry> disconnects = new CopyOnWriteArrayList<>();
+        List<String> receivedData = new CopyOnWriteArrayList<>();
+
+        server = vertx.createHttpServer()
+                .webSocketHandler(ws -> {
+                    int attempt = connectionCount.incrementAndGet();
+                    ws.textMessageHandler(msg -> {
+                        if ("{\"op\":\"ping\"}".equals(msg)) {
+                            if (attempt == 1) {
+                                pongsSentAttempt1.incrementAndGet();
+                            }
+                            ws.writeTextMessage("{\"op\":\"pong\"}");
+                        } else if (attempt >= 2 && "{\"action\":\"subscribe\"}".equals(msg)) {
+                            ws.writeTextMessage("{\"channel\":\"price.crypto\",\"value\":70000.0}");
+                        }
+                    });
+                });
+
+        int port = server.listen(0).toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS).actualPort();
+        String wsUrl = "ws://127.0.0.1:" + port + "/ws/data-idle-test";
+
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
+                vertx,
+                "DATA-IDLE-TEST-WS",
+                wsUrl,
+                () -> List.of("{\"action\":\"subscribe\"}"),
+                (rawJson, recvTs) -> receivedData.add(rawJson),
+                60L,
+                50L,
+                "{\"op\":\"ping\"}"
+        );
+        stream.setDataIdleTimeoutMs(140L);
+        stream.setDisconnectListener(disconnects::add);
+        stream.start();
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(pongsSentAttempt1.get()).isGreaterThanOrEqualTo(1);
+                    assertThat(disconnects).isNotEmpty();
+                    assertThat(disconnects.getFirst().lastCloseCode()).isEqualTo(-1);
+                    assertThat(disconnects.getFirst().lastCloseReason()).contains("Data-idle watchdog timeout");
+                    // Heartbeat PONGs on attempt 1 must NOT have advanced lastMessageTimestampMs
+                    assertThat(disconnects.getFirst().lastMessageTimestampMs()).isZero();
+                    assertThat(connectionCount.get()).isGreaterThanOrEqualTo(2);
+                    assertThat(receivedData).isNotEmpty();
+                    assertThat(stream.getTelemetrySnapshot().lastMessageTimestampMs()).isPositive();
+                });
+
+        stream.stop();
+    }
 }

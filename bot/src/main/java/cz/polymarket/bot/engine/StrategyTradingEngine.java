@@ -103,6 +103,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
     private static final int MAX_TRACKED_USER_TRADES = 1024;
     private static final long REALTIME_CLOCK_WINDOW_MS = 3_600_000L;
     private static final long STALE_QUOTE_WARN_INTERVAL_MS = 1_000L;
+    private static final long MAX_BOUNDARY_TWAP_OFFSET_MS = 10_000L;
     private static final long MARKET_PREFETCH_LOOKAHEAD_SEC = 60L;
 
     private final PolymarketSecretsResolver secretsResolver;
@@ -1270,7 +1271,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private void evaluateCompletedMarketStreamActivity(String marketLabel, long marketStartSec) {
-        if (marketStartSec > 0L && lastEvaluatedMarketCycleStart.getAndSet(marketStartSec) == marketStartSec) {
+        if (marketStartSec > 0L && !tryAdvanceMonotonic(lastEvaluatedMarketCycleStart, marketStartSec)) {
             return;
         }
         long polyBoltCount = polyBoltMarketMsgCount.getAndSet(0L);
@@ -1311,7 +1312,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
         }
         for (PolyBoltTick tick : ticks) {
             if (tick.isTwap()) {
-                if (!tryAdvanceOracleTimestamp(lastTwapOracleTimestampMs, tick.oracleTimestampMs())) {
+                if (!tryAdvanceMonotonic(lastTwapOracleTimestampMs, tick.oracleTimestampMs())) {
                     continue;
                 }
                 onPolymarketCryptoTwap60s(
@@ -1323,7 +1324,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
                         tick.oracleTimestampMs()
                 );
             } else {
-                if (!tryAdvanceOracleTimestamp(lastCryptoPriceOracleTimestampMs, tick.oracleTimestampMs())) {
+                if (!tryAdvanceMonotonic(lastCryptoPriceOracleTimestampMs, tick.oracleTimestampMs())) {
                     continue;
                 }
                 onPolymarketCryptoPrice(
@@ -1337,16 +1338,16 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
         }
     }
 
-    private static boolean tryAdvanceOracleTimestamp(AtomicLong tracker, long oracleTimestampMs) {
-        if (oracleTimestampMs <= 0L) {
+    private static boolean tryAdvanceMonotonic(AtomicLong tracker, long candidate) {
+        if (candidate <= 0L) {
             return true;
         }
         while (true) {
             long prev = tracker.get();
-            if (oracleTimestampMs <= prev) {
+            if (candidate <= prev) {
                 return false;
             }
-            if (tracker.compareAndSet(prev, oracleTimestampMs)) {
+            if (tracker.compareAndSet(prev, candidate)) {
                 return true;
             }
         }
@@ -2088,31 +2089,48 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
                 activeStrategy.onPolymarketCryptoTwap60s(timestampMs, symbol, source, twapPrice, windowSeconds, twapTimestampMs);
                 return;
             }
+            long offsetFromBoundaryMs = Math.abs(effectiveTsMs - candleStartSec * 1000L);
             if (currentCandleStart > 0L && candleStartSec > currentCandleStart) {
                 long prevCandleStart = currentCandleStart;
+                long expectedPrevCandleStart = candleStartSec - durationSeconds;
                 PolymarketMarketInfo currentMarket = activeMarketInfo.get();
                 String marketLabel = (currentMarket != null && currentMarket.startSec() == prevCandleStart)
                         ? currentMarket.slug()
                         : PolymarketMarketInfo.buildMarketSlug(this.symbol, this.timeframe, prevCandleStart);
-                evaluateCompletedMarketStreamActivity(marketLabel, prevCandleStart);
 
-                if (twapOpenPrice > 0.0) {
-                    TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
-                    resolveCandle(outcome, twapPrice);
+                if (prevCandleStart == expectedPrevCandleStart && offsetFromBoundaryMs <= MAX_BOUNDARY_TWAP_OFFSET_MS) {
+                    evaluateCompletedMarketStreamActivity(marketLabel, prevCandleStart);
+                    if (twapOpenPrice > 0.0) {
+                        TradeDirection outcome = (twapPrice >= twapOpenPrice) ? TradeDirection.UP : TradeDirection.DOWN;
+                        resolveCandle(outcome, twapPrice);
+                    } else {
+                        Log.warnf("Skipping candle resolution for market %s (intervalStart=%d): target price was missing from PolyBolt 60s TWAP stream",
+                                marketLabel, prevCandleStart);
+                        openPositions.clear();
+                        activePosition.set(null);
+                        candleHigh = 0.0;
+                        candleLow = 0.0;
+                    }
                 } else {
-                    Log.warnf("Skipping candle resolution for market %s (intervalStart=%d): target price was missing from PolyBolt 60s TWAP stream",
-                            marketLabel, prevCandleStart);
+                    Log.warnf("Skipping candle resolution for market %s (intervalStart=%d, newCandleStart=%d, offsetFromBoundaryMs=%d): stale or skipped PolyBolt 60s TWAP rollover",
+                            marketLabel, prevCandleStart, candleStartSec, offsetFromBoundaryMs);
+                    boolean hadOpenPositions = !openPositions.isEmpty() || activePosition.get() != null;
                     openPositions.clear();
                     activePosition.set(null);
+                    candleHigh = 0.0;
+                    candleLow = 0.0;
+                    if (hadOpenPositions && this.strategyMode == StrategyMode.LIVE) {
+                        refreshAccountBalance();
+                    }
                 }
                 activeCandleStart.set(candleStartSec);
                 activeCandleEnd.set(candleStartSec + durationSeconds);
-                twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
+                twapOpenPrice = (offsetFromBoundaryMs <= MAX_BOUNDARY_TWAP_OFFSET_MS) ? twapPrice : 0.0;
             } else if (currentCandleStart == 0L) {
                 activeCandleStart.set(candleStartSec);
                 activeCandleEnd.set(candleStartSec + durationSeconds);
-                twapOpenPrice = (Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) ? twapPrice : 0.0;
-            } else if (twapOpenPrice <= 0.0 && Math.abs(effectiveTsMs - candleStartSec * 1000L) <= 10_000L) {
+                twapOpenPrice = (offsetFromBoundaryMs <= MAX_BOUNDARY_TWAP_OFFSET_MS) ? twapPrice : 0.0;
+            } else if (twapOpenPrice <= 0.0 && offsetFromBoundaryMs <= MAX_BOUNDARY_TWAP_OFFSET_MS) {
                 twapOpenPrice = twapPrice;
             }
 

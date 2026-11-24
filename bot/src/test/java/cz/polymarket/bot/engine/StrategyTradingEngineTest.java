@@ -519,7 +519,8 @@ class StrategyTradingEngineTest {
                 Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                 Optional.of("passphrase-live"),
                 1000L,
-                10000L
+                10000L,
+                30_000L
         );
 
         Path collectorDir = tempDir.resolve("collector");
@@ -741,7 +742,7 @@ class StrategyTradingEngineTest {
                 new PolymarketGammaClient(baseHttpUrl, httpClient, objectMapper),
                 new PolymarketClobClient(vertx, marketWsRuntime, "ws://localhost:" + port + "/ws/clob", 1000L, 10000L),
                 new PolymarketPolyBoltClient(marketWsRuntime, "ws://localhost:" + port + "/ws/polybolt",
-                        Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L),
+                        Optional.empty(), Optional.empty(), Optional.empty(), 1000L, 10000L, 30_000L),
                 binanceConnector,
                 krakenConnector,
                 coinbaseConnector,
@@ -763,6 +764,71 @@ class StrategyTradingEngineTest {
         assertThatThrownBy(() -> unconfiguredEngine.startConfiguredMode(1792741500L))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Failed to resolve Polymarket credentials");
+    }
+
+    @Test
+    void shouldSkipStaleOrSkippedCandleResolutionAndKeepMonotonicMarketCounters() {
+        StrategyTradingEngine engine = createEngine("PAPER", false, 5_000L, 0L);
+
+        long c0 = 1_795_536_000L; // 16:00:00Z
+        long c1 = c0 + 900L;      // 16:15:00Z
+        long c2 = c0 + 1_800L;    // 16:30:00Z
+        long c3 = c0 + 2_700L;    // 16:45:00Z
+        long c4 = c0 + 3_600L;    // 17:00:00Z
+
+        // Start on c0 with valid opening TWAP and an open paper position
+        engine.discoverAndRotateMarket(c0 + 1L);
+        engine.onPolymarketCryptoTwap60s(c0 * 1000L, "btcusd", "chainlink", 60_000.0, 60, c0 * 1000L);
+        engine.onOrderBookQuote(new OrderBookQuote(
+                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, 0.545, 0.445, c0 * 1000L + 500L
+        ));
+        engine.submitOrder(new OrderCommand(
+                "client-c0-1", "mkt-c0", "BTC-UP", Timeframe.FIFTEEN_MINUTES, "BUY",
+                BigDecimal.valueOf(0.55), BigDecimal.valueOf(100.0)
+        ));
+        assertThat(engine.getOpenPositions()).hasSize(1);
+
+        // Simulate 1-hour PolyBolt outage while scheduler rotates markets c0 -> c1 -> c2 -> c3 -> c4
+        engine.discoverAndRotateMarket(c1 + 1L);
+        engine.discoverAndRotateMarket(c2 + 1L);
+        engine.discoverAndRotateMarket(c3 + 1L);
+        engine.discoverAndRotateMarket(c4 + 1L);
+
+        // Record CLOB frames belonging to live market c4
+        engine.onRawClobFrame("""
+                {"event_type":"book","asset_id":"%s","bids":[{"price":"0.50","size":"500"}],"asks":[{"price":"0.51","size":"500"}]}
+                """.formatted(TEST_TOKEN_UP), c4 * 1000L + 10_000L);
+        assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+
+        // PolyBolt resumes 6m51s into c4: must NOT settle c0 at stale price and must NOT reset c4's CLOB counter!
+        long resumeTsMs = c4 * 1000L + 411_000L;
+        engine.onPolymarketCryptoTwap60s(resumeTsMs, "btcusd", "chainlink", 59_341.62, 60, resumeTsMs);
+
+        assertThat(paperRepository.getTrades()).isEmpty();
+        assertThat(engine.getOpenPositions()).isEmpty();
+        assertThat(engine.getClobMarketMessageCount()).isEqualTo(1L);
+        assertThat(engine.getTwapOpenPrice()).isZero();
+
+        // Next adjacent cycle c5: open cleanly at c5 boundary, open position, then test late TWAP (>10s past c6)
+        long c5 = c4 + 900L;
+        long c6 = c5 + 900L;
+        engine.discoverAndRotateMarket(c5 + 1L);
+        engine.onPolymarketCryptoTwap60s(c5 * 1000L, "btcusd", "chainlink", 59_800.0, 60, c5 * 1000L);
+        assertThat(engine.getTwapOpenPrice()).isEqualTo(59_800.0);
+        engine.onOrderBookQuote(new OrderBookQuote(
+                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, 0.545, 0.445, c5 * 1000L + 1000L
+        ));
+        engine.submitOrder(new OrderCommand(
+                "client-c5-1", "mkt-c5", "BTC-UP", Timeframe.FIFTEEN_MINUTES, "BUY",
+                BigDecimal.valueOf(0.55), BigDecimal.valueOf(100.0)
+        ));
+        assertThat(engine.getOpenPositions()).hasSize(1);
+
+        // TWAP arrives 60s late into c6 -> must skip candle resolution rather than settling with stale price
+        long lateC6TsMs = c6 * 1000L + 60_000L;
+        engine.onPolymarketCryptoTwap60s(lateC6TsMs, "btcusd", "chainlink", 59_900.0, 60, lateC6TsMs);
+        assertThat(paperRepository.getTrades()).isEmpty();
+        assertThat(engine.getOpenPositions()).isEmpty();
     }
 
     private PolymarketSecretsResolver defaultSecretsResolver() {
@@ -798,7 +864,8 @@ class StrategyTradingEngineTest {
                         Optional.of("MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="),
                         Optional.of("passphrase-live"),
                         1000L,
-                        10000L
+                        10000L,
+                        30_000L
                 ),
                 binanceConnector,
                 krakenConnector,

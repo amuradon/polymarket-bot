@@ -90,6 +90,7 @@ public class ReconnectingWebSocketStream {
     private final AtomicReference<ConnectionState> state = new AtomicReference<>(ConnectionState.DISCONNECTED);
     private final AtomicLong lastMessageTimestampMs = new AtomicLong(0L);
     private final AtomicLong lastInboundActivityMs = new AtomicLong(0L);
+    private final AtomicLong lastDataFrameTimestampMs = new AtomicLong(0L);
     private final AtomicLong reconnectCount = new AtomicLong(0L);
     private final AtomicInteger consecutiveReconnectAttempts = new AtomicInteger(0);
     private final AtomicLong debugReceivedFrameCounter = new AtomicLong(0L);
@@ -122,6 +123,7 @@ public class ReconnectingWebSocketStream {
     private volatile Thread externalWorkerThread;
     private volatile WebSocket currentWebSocket;
     private volatile long pingTimerId = -1L;
+    private volatile long dataIdleTimeoutMs = 0L;
     private volatile WebSocketDisconnectListener disconnectListener;
     private volatile Consumer<WebSocketStreamTelemetry> normalCloseListener;
     private volatile BooleanSupplier shouldReconnectSupplier = () -> true;
@@ -524,6 +526,23 @@ public class ReconnectingWebSocketStream {
      */
     public void setDedicatedIoThreadName(String dedicatedIoThreadName) {
         this.dedicatedIoThreadName = dedicatedIoThreadName;
+    }
+
+    /**
+     * Configures an optional data-idle watchdog threshold in milliseconds for streams expected to deliver
+     * continuous non-heartbeat data frames (such as PolyBolt oracle price/TWAP streams).
+     * <p>
+     * Unlike the transport read-idle watchdog, inbound {@code PING}/{@code PONG} heartbeats do not reset
+     * the data-idle timer, allowing automatic recovery from silent/zombie server subscriptions.
+     * Set to {@code 0} (default) to disable data-idle detection.
+     *
+     * @param dataIdleTimeoutMs maximum allowed silence without non-heartbeat data frames in milliseconds ({@code >= 0})
+     */
+    public void setDataIdleTimeoutMs(long dataIdleTimeoutMs) {
+        if (dataIdleTimeoutMs < 0L) {
+            throw new IllegalArgumentException("dataIdleTimeoutMs must be non-negative");
+        }
+        this.dataIdleTimeoutMs = dataIdleTimeoutMs;
     }
 
     /**
@@ -943,6 +962,7 @@ public class ReconnectingWebSocketStream {
 
         long connectedNowMs = System.currentTimeMillis();
         this.lastInboundActivityMs.set(connectedNowMs);
+        this.lastDataFrameTimestampMs.set(connectedNowMs);
         this.lastCloseCode.set(0);
         this.lastCloseReason.set("");
 
@@ -959,7 +979,6 @@ public class ReconnectingWebSocketStream {
         ws.frameHandler(frame -> {
             this.ioReaderThread = Thread.currentThread();
             long recvTs = System.currentTimeMillis();
-            lastMessageTimestampMs.set(recvTs);
             lastInboundActivityMs.set(recvTs);
 
             if (frame.isText() || frame.isBinary()) {
@@ -992,7 +1011,6 @@ public class ReconnectingWebSocketStream {
         ws.pongHandler(buf -> {
             this.ioReaderThread = Thread.currentThread();
             long nowMs = System.currentTimeMillis();
-            lastMessageTimestampMs.set(nowMs);
             lastInboundActivityMs.set(nowMs);
             if (Log.isTraceEnabled()) {
                 Log.tracef("[%s] Received WebSocket PONG at %d ms", streamName, nowMs);
@@ -1159,6 +1177,8 @@ public class ReconnectingWebSocketStream {
             }
             return;
         }
+        lastMessageTimestampMs.set(recvTs);
+        lastDataFrameTimestampMs.set(recvTs);
         if (Log.isDebugEnabled()) {
             long count = debugReceivedFrameCounter.incrementAndGet();
             if (count % DEBUG_MESSAGE_LOG_INTERVAL == 0L) {
@@ -1212,34 +1232,31 @@ public class ReconnectingWebSocketStream {
                 long lastActivity = lastInboundActivityMs.get();
                 long silenceMs = lastActivity > 0L ? Math.max(0L, nowMs - lastActivity) : 0L;
                 if (silenceMs > idleTimeoutMs) {
-                    if (disconnectHandled.compareAndSet(false, true)) {
-                        String reason = "Read-idle watchdog timeout (" + silenceMs + " ms without inbound frame or PONG)";
-                        lastCloseCode.set(-1);
-                        lastCloseReason.set(reason);
-                        String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
-                        if (this.normalCloseListener != null && !shouldReconnect()) {
-                            Log.infof("[%s] WebSocket read-idle watchdog expired after market end (remote=%s, silenceMs=%d); finalizing stream",
-                                    streamName, remoteLabel, silenceMs);
-                            triggerTerminalClose(-1, reason);
-                            try {
-                                ws.close();
-                            } catch (Exception ignored) {
-                            }
-                            return;
-                        }
-                        long nextDelayMs = computeNextReconnectDelayMs(
-                                consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
-                        WebSocketStreamTelemetry snapshot = buildTelemetrySnapshot(-1, reason);
-                        Log.warnf("[%s] WebSocket read-idle watchdog triggered (remote=%s, silenceMs=%d, timeoutMs=%d, reconnectCount=%d); forcing reconnect in %d ms",
-                                streamName, remoteLabel, silenceMs, idleTimeoutMs, snapshot.reconnectCount(), nextDelayMs);
-                        notifyDisconnectListener(snapshot);
-                        onConnectionClosed(ws);
-                        try {
-                            ws.close();
-                        } catch (Exception ignored) {
-                        }
-                    }
+                    handleWatchdogTimeout(
+                            ws,
+                            disconnectHandled,
+                            "Read-idle watchdog timeout (" + silenceMs + " ms without inbound frame or PONG)",
+                            "read-idle",
+                            silenceMs,
+                            idleTimeoutMs
+                    );
                     return;
+                }
+                long configuredDataIdleTimeoutMs = this.dataIdleTimeoutMs;
+                if (configuredDataIdleTimeoutMs > 0L) {
+                    long lastData = lastDataFrameTimestampMs.get();
+                    long dataSilenceMs = lastData > 0L ? Math.max(0L, nowMs - lastData) : 0L;
+                    if (dataSilenceMs > configuredDataIdleTimeoutMs) {
+                        handleWatchdogTimeout(
+                                ws,
+                                disconnectHandled,
+                                "Data-idle watchdog timeout (" + dataSilenceMs + " ms without inbound data frame)",
+                                "data-idle",
+                                dataSilenceMs,
+                                configuredDataIdleTimeoutMs
+                        );
+                        return;
+                    }
                 }
 
                 if (textPingPayload != null && !textPingPayload.isBlank()) {
@@ -1254,6 +1271,42 @@ public class ReconnectingWebSocketStream {
                     ws.writePing(PROTOCOL_PING_BUFFER);
                 }
             });
+        }
+    }
+
+    private void handleWatchdogTimeout(
+            WebSocket ws,
+            AtomicBoolean disconnectHandled,
+            String reason,
+            String watchdogKind,
+            long silenceMs,
+            long timeoutMs) {
+        if (!disconnectHandled.compareAndSet(false, true)) {
+            return;
+        }
+        lastCloseCode.set(-1);
+        lastCloseReason.set(reason);
+        String remoteLabel = lastRemoteAddress.get().isEmpty() ? "unknown" : lastRemoteAddress.get();
+        if (this.normalCloseListener != null && !shouldReconnect()) {
+            Log.infof("[%s] WebSocket %s watchdog expired after market end (remote=%s, silenceMs=%d); finalizing stream",
+                    streamName, watchdogKind, remoteLabel, silenceMs);
+            triggerTerminalClose(-1, reason);
+            try {
+                ws.close();
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+        long nextDelayMs = computeNextReconnectDelayMs(
+                consecutiveReconnectAttempts.get() + 1, reconnectDelayMs);
+        WebSocketStreamTelemetry snapshot = buildTelemetrySnapshot(-1, reason);
+        Log.warnf("[%s] WebSocket %s watchdog triggered (remote=%s, silenceMs=%d, timeoutMs=%d, reconnectCount=%d); forcing reconnect in %d ms",
+                streamName, watchdogKind, remoteLabel, silenceMs, timeoutMs, snapshot.reconnectCount(), nextDelayMs);
+        notifyDisconnectListener(snapshot);
+        onConnectionClosed(ws);
+        try {
+            ws.close();
+        } catch (Exception ignored) {
         }
     }
 

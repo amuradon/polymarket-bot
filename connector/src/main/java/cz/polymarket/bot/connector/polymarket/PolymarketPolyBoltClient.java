@@ -48,6 +48,7 @@ public class PolymarketPolyBoltClient {
     private volatile String passphrase;
     private final long reconnectDelayMs;
     private final long pingIntervalMs;
+    private final long dataIdleTimeoutMs;
 
     private final MpscUnboundedArrayQueue<TimestampedFrame> strategyQueue =
             new MpscUnboundedArrayQueue<>(STRATEGY_QUEUE_CHUNK_SIZE);
@@ -66,8 +67,9 @@ public class PolymarketPolyBoltClient {
      * @param apiKey           Polymarket CLOB API key required for gated PolyBolt channels
      * @param secret           Polymarket CLOB API secret required for gated PolyBolt channels
      * @param passphrase       Polymarket CLOB API passphrase required for gated PolyBolt channels
-     * @param reconnectDelayMs delay in milliseconds before attempting reconnection
-     * @param pingIntervalMs   interval in milliseconds for sending WebSocket ping frames
+     * @param reconnectDelayMs  delay in milliseconds before attempting reconnection
+     * @param pingIntervalMs    interval in milliseconds for sending WebSocket ping frames
+     * @param dataIdleTimeoutMs maximum allowed silence without non-heartbeat data frames in milliseconds ({@code 0} disables)
      */
     @Inject
     public PolymarketPolyBoltClient(
@@ -83,9 +85,14 @@ public class PolymarketPolyBoltClient {
             @ConfigProperty(name = "polymarket.connector.ws.reconnect-delay-ms", defaultValue = "3000")
             long reconnectDelayMs,
             @ConfigProperty(name = "polymarket.connector.ws.ping-interval-ms", defaultValue = "10000")
-            long pingIntervalMs) {
+            long pingIntervalMs,
+            @ConfigProperty(name = "polymarket.connector.polybolt.data-idle-timeout-ms", defaultValue = "30000")
+            long dataIdleTimeoutMs) {
         if (marketWsRuntime == null) {
             throw new IllegalArgumentException("marketWsRuntime cannot be null");
+        }
+        if (dataIdleTimeoutMs < 0L) {
+            throw new IllegalArgumentException("dataIdleTimeoutMs must be non-negative");
         }
         this.marketWsRuntime = marketWsRuntime;
         this.wsUrl = wsUrl;
@@ -94,6 +101,7 @@ public class PolymarketPolyBoltClient {
         this.passphrase = passphrase.map(String::trim).orElse("");
         this.reconnectDelayMs = reconnectDelayMs;
         this.pingIntervalMs = pingIntervalMs;
+        this.dataIdleTimeoutMs = dataIdleTimeoutMs;
     }
 
     @PreDestroy
@@ -434,7 +442,7 @@ public class PolymarketPolyBoltClient {
             }
         };
 
-        return new ReconnectingWebSocketStream(
+        ReconnectingWebSocketStream stream = new ReconnectingWebSocketStream(
                 marketWsRuntime.vertx(),
                 streamName,
                 wsUrl,
@@ -444,6 +452,8 @@ public class PolymarketPolyBoltClient {
                 pingIntervalMs,
                 "{\"op\":\"ping\"}"
         );
+        stream.setDataIdleTimeoutMs(dataIdleTimeoutMs);
+        return stream;
     }
 
     private void handleControlFrame(
