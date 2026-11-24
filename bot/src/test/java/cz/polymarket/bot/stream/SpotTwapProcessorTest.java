@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.connector.binance.BinanceStreamType;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicator;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.strategy.ExecutionRouter;
@@ -30,20 +32,24 @@ class SpotTwapProcessorTest {
 
     private ObjectMapper objectMapper;
     private SpotTwapIndicator indicator;
+    private FastSpotMicroIndicator fastIndicator;
     private SpotTwapProcessor processor;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
         indicator = new SpotTwapIndicator();
-        processor = new SpotTwapProcessor(objectMapper, indicator, "BTCUSDT");
+        fastIndicator = new FastSpotMicroIndicator(FastSpotMicroIndicatorConfig.defaults());
+        processor = new SpotTwapProcessor(objectMapper, indicator, fastIndicator, "BTCUSDT");
     }
 
     @Test
     void shouldValidateConstructorArguments() {
-        assertThatThrownBy(() -> new SpotTwapProcessor(null, indicator, "BTCUSDT"))
+        assertThatThrownBy(() -> new SpotTwapProcessor(null, indicator, fastIndicator, "BTCUSDT"))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new SpotTwapProcessor(objectMapper, null, "BTCUSDT"))
+        assertThatThrownBy(() -> new SpotTwapProcessor(objectMapper, null, fastIndicator, "BTCUSDT"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new SpotTwapProcessor(objectMapper, indicator, null, "BTCUSDT"))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -198,5 +204,80 @@ class SpotTwapProcessorTest {
         processor.processBinanceFrameBatch(batch);
         assertThat(callbacks).hasSize(1);
         assertThat((long) callbacks.getFirst()[0]).isEqualTo(10_010L);
+    }
+
+    @Test
+    void shouldExtractExactVenueAggressorPolarityAndDirectUsdMicroVwapInSinglePass() {
+        List<double[]> fastCallbacks = new ArrayList<>();
+        fastIndicator.addListener((timestampMs, symbol, fastDirectUsd, signedOfi1s, syncMove500Usd) ->
+                fastCallbacks.add(new double[]{timestampMs, fastDirectUsd, signedOfi1s, syncMove500Usd}));
+
+        // 1. Coinbase "side":"sell" = resting maker sell = Taker BUY (positive regularized OFI)
+        double cbNotional = 2.0 * 70_010.0;
+        double expectedCbMag = cbNotional / (cbNotional + 6_400.0);
+        processor.processCoinbaseFrame(
+                "BTCUSD",
+                "{\"type\":\"match\",\"side\":\"sell\",\"size\":\"2.0\",\"price\":\"70010.00\",\"product_id\":\"BTC-USD\"}",
+                1_000L
+        );
+        assertThat(fastCallbacks).hasSize(1);
+        assertThat(fastCallbacks.getLast()[2]).isCloseTo(expectedCbMag, within(1e-9));
+
+        // 2. Reset and verify Coinbase "side":"buy" = resting maker buy = Taker SELL (negative regularized OFI)
+        processor.reset();
+        fastCallbacks.clear();
+        processor.processCoinbaseFrame(
+                "BTCUSD",
+                "{\"type\":\"match\",\"side\":\"buy\",\"size\":\"2.0\",\"price\":\"70010.00\",\"product_id\":\"BTC-USD\"}",
+                2_000L
+        );
+        assertThat(fastCallbacks).hasSize(1);
+        assertThat(fastCallbacks.getLast()[2]).isCloseTo(-expectedCbMag, within(1e-9));
+
+        // 3. Reset and verify Kraken "side":"buy" (+OFI) vs "side":"sell" (-OFI)
+        double krNotional = 1.5 * 70_030.0;
+        double expectedKrMag = krNotional / (krNotional + 6_400.0);
+        processor.reset();
+        fastCallbacks.clear();
+        processor.processKrakenFrame(
+                "BTCUSD",
+                "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"price\":70030.0,\"qty\":1.5}]}",
+                3_000L
+        );
+        assertThat(fastCallbacks.getLast()[2]).isCloseTo(expectedKrMag, within(1e-9));
+
+        processor.reset();
+        fastCallbacks.clear();
+        processor.processKrakenFrame(
+                "BTCUSD",
+                "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"sell\",\"price\":70030.0,\"qty\":1.5}]}",
+                4_000L
+        );
+        assertThat(fastCallbacks.getLast()[2]).isCloseTo(-expectedKrMag, within(1e-9));
+
+        // 4. Reset and verify Binance "m":false (+OFI) vs "m":true (-OFI) + Direct-USD purity
+        double bnNotional = 3.0 * 69_950.0;
+        double expectedBnMag = bnNotional / (bnNotional + 6_400.0);
+        processor.reset();
+        fastCallbacks.clear();
+        processor.processBinanceFrame(
+                BinanceStreamType.SPOT_AGG_TRADES,
+                "{\"e\":\"aggTrade\",\"p\":\"69950.00\",\"q\":\"3.0\",\"m\":false}",
+                5_000L
+        );
+        assertThat(fastCallbacks.getLast()[2]).isCloseTo(expectedBnMag, within(1e-9));
+
+        // Once Coinbase and Kraken arrive at 5_010 ms, fastDirectUsd blends strictly 0.70 * CB + 0.30 * KR
+        processor.processCoinbaseFrame(
+                "BTCUSD",
+                "{\"type\":\"match\",\"side\":\"sell\",\"size\":\"1.0\",\"price\":\"70100.00\",\"product_id\":\"BTC-USD\"}",
+                5_010L
+        );
+        processor.processKrakenFrame(
+                "BTCUSD",
+                "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"price\":70200.0,\"qty\":1.0}]}",
+                5_010L
+        );
+        assertThat(fastCallbacks.getLast()[1]).isCloseTo(0.70 * 70_100.0 + 0.30 * 70_200.0, within(1e-6));
     }
 }

@@ -726,4 +726,116 @@ class BacktestEngineTest {
             }
         }
     }
+
+    @Test
+    @DisplayName("BacktestEngine caches FastSpotMicroBacktestIndicator and dispatches FastSpotMicroListener events")
+    void testFastSpotMicroCacheAndDispatch(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector_fast_micro");
+            Path cacheDir = tempDir.resolve("cache_fast_micro");
+            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+
+            long c1Start = BASE_START;
+            String dateStr = "2026-08-01";
+            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
+            Path cbFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", dateStr);
+            Path krFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", dateStr);
+            Path bnFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
+
+            Files.createDirectories(pmDir);
+            Files.createDirectories(twap60sFile.getParent());
+            Files.createDirectories(cbFile.getParent());
+            Files.createDirectories(krFile.getParent());
+            Files.createDirectories(bnFile.getParent());
+
+            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
+
+            try (Connection conn = localDuckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
+                        "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60120.0::DOUBLE, '60120.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
+                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+                String normCb = cbFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'sell'::VARCHAR, 60050.0::DOUBLE, 2.0::DOUBLE, '2026-08-01T00:00:00.500000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCb + "' (FORMAT PARQUET)");
+
+                String normKr = krFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'market'::VARCHAR, 60060.0::DOUBLE, 1.5::DOUBLE, '2026-08-01T00:00:00.500000Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKr + "' (FORMAT PARQUET)");
+
+                String normBn = bnFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60040.0::DOUBLE, 2.5::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 450L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normBn + "' (FORMAT PARQUET)");
+
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
+                        ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
+                ));
+            }
+
+            List<double[]> observedFastTicks = new ArrayList<>();
+            class FastMicroRecordingStrategy implements TradingStrategy, cz.polymarket.bot.indicators.FastSpotMicroListener {
+                @Override
+                public String getName() {
+                    return "FastMicroRecordingStrategy";
+                }
+
+                @Override
+                public void init(StrategyContext context) {}
+
+                @Override
+                public void onFastSpotMicro(long timestampMs, String symbol, double fastDirectUsd, double signedOfi1s, double syncMove500Usd) {
+                    observedFastTicks.add(new double[]{timestampMs, fastDirectUsd, signedOfi1s, syncMove500Usd});
+                }
+
+                @Override
+                public void onExecutionReport(ExecutionReport report) {}
+            }
+
+            FastMicroRecordingStrategy recordingStrategy = new FastMicroRecordingStrategy();
+            SpotTwapBacktestIndicator spotTwapIndicator = new SpotTwapBacktestIndicator();
+            cz.polymarket.bot.backtest.indicator.FastSpotMicroBacktestIndicator fastIndicator =
+                    new cz.polymarket.bot.backtest.indicator.FastSpotMicroBacktestIndicator(
+                            cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig.defaults());
+            IndicatorCacheService cacheService = new IndicatorCacheService(
+                    cacheDir, new ObjectMapper(), List.of(spotTwapIndicator, fastIndicator), 100L, 50L, 50L);
+            StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
+
+            BacktestEngine localEngine = new BacktestEngine(
+                    datasetService,
+                    cacheService,
+                    localRegistry,
+                    new PerformanceMetricsCalculator(),
+                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_fast_e2e").toString()),
+                    recordingStrategy.getName(),
+                    dateStr,
+                    tempDir.resolve("export_fast_e2e").toString(),
+                    10000.0,
+                    1.0,
+                    1,
+                    100L,
+                    50L,
+                    50L
+            );
+
+            try {
+                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
+                        tempDir.resolve("export_fast_e2e_1").toString(), 1.0);
+                assertThat(observedFastTicks).isNotEmpty();
+                double[] tick = observedFastTicks.getLast();
+                assertThat(tick[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, org.assertj.core.api.Assertions.within(1e-4));
+                assertThat(tick[2]).isBetween(0.95, 1.0);
+            } finally {
+                localEngine.shutdown();
+            }
+        }
+    }
 }

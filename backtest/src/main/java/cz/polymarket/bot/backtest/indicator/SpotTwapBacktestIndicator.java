@@ -207,6 +207,7 @@ public class SpotTwapBacktestIndicator implements BacktestIndicator {
                 long timestampMs,
                 double rawPrice,
                 double quantity,
+                boolean isTakerBuy,
                 boolean recordOutput) {
             double twap60s = indicator.onVenueTrade(venue, timestampMs, rawPrice, quantity);
             if (!recordOutput) {

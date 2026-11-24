@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapIndicatorConfig;
 import org.junit.jupiter.api.DisplayName;
@@ -223,6 +224,78 @@ class IndicatorCacheServiceTest {
             assertThat(fullHitTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1);
             assertThat(ind2ComputeSessions.get()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    @DisplayName("Should cache FastSpotMicroBacktestIndicator with verified Coinbase maker-side polarity and round-trip from Parquet")
+    void shouldCacheAndRoundTripFastSpotMicroWithExactVenuePolarity(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector");
+            Path cacheDir = tempDir.resolve("cache");
+            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), duckDb);
+
+            Path binanceSpotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", DATE_STR);
+            Path coinbaseSpotFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", DATE_STR);
+            Path krakenSpotFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", DATE_STR);
+            Path krakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(DATE_STR);
+            Files.createDirectories(binanceSpotFile.getParent());
+            Files.createDirectories(coinbaseSpotFile.getParent());
+            Files.createDirectories(krakenSpotFile.getParent());
+            Files.createDirectories(krakenUsdtFile.getParent());
+
+            // All 3 trades are Taker BUY: Binance is_buyer_maker=false, Coinbase maker side='sell', Kraken side='buy'
+            try (Connection conn = duckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                String normUsdt = krakenUsdtFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (BASE_START_MS + 50L) + "::UBIGINT, 'USDT/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'limit'::VARCHAR, 1.0::DOUBLE, 500.0::DOUBLE, '2026-08-01T00:00:00.050Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normUsdt + "' (FORMAT PARQUET)");
+
+                String normBinance = binanceSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (BASE_START_MS + 1000L) + "::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 70010.0::DOUBLE, 2.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (BASE_START_MS + 1000L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normBinance + "' (FORMAT PARQUET)");
+
+                String normCoinbase = coinbaseSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (BASE_START_MS + 1200L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'sell'::VARCHAR, 70020.0::DOUBLE, 3.0::DOUBLE, '2026-08-01T00:00:01.200Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCoinbase + "' (FORMAT PARQUET)");
+
+                String normKraken = krakenSpotFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (BASE_START_MS + 1300L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'market'::VARCHAR, 70030.0::DOUBLE, 1.0::DOUBLE, '2026-08-01T00:00:01.300Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKraken + "' (FORMAT PARQUET)");
+            }
+
+            FastSpotMicroBacktestIndicator fastInd = new FastSpotMicroBacktestIndicator(FastSpotMicroIndicatorConfig.defaults());
+            IndicatorCacheService cacheService = new IndicatorCacheService(
+                    cacheDir, new ObjectMapper(), List.of(fastInd), 100L, 50L, 50L);
+
+            List<DailyIndicatorTrack> missTracks = cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR);
+            assertThat(missTracks).hasSize(1);
+            DailyIndicatorTrack t1 = missTracks.getFirst();
+            assertThat(t1.size()).isEqualTo(3);
+
+            BacktestEvent.CalculatedFastSpotMicroEvent lastEv =
+                    (BacktestEvent.CalculatedFastSpotMicroEvent) t1.eventAt(t1.size() - 1);
+            // Since all 3 venues had large Taker BUY polarity (>350k USD notional), signedOfi1s must exceed +0.97!
+            assertThat(lastEv.signedOfi1s()).isBetween(0.97, 1.0);
+            assertThat(lastEv.fastDirectUsd()).isBetween(70_020.0, 70_030.0);
+
+            // Delete raw files and verify exact Parquet cache round-trip
+            Files.deleteIfExists(binanceSpotFile);
+            Files.deleteIfExists(coinbaseSpotFile);
+            Files.deleteIfExists(krakenSpotFile);
+            Files.deleteIfExists(krakenUsdtFile);
+
+            List<DailyIndicatorTrack> hitTracks = cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR);
+            DailyIndicatorTrack t2 = hitTracks.getFirst();
+            assertThat(t2.size()).isEqualTo(3);
+            BacktestEvent.CalculatedFastSpotMicroEvent cachedLast =
+                    (BacktestEvent.CalculatedFastSpotMicroEvent) t2.eventAt(2);
+            assertThat(cachedLast.fastDirectUsd()).isCloseTo(lastEv.fastDirectUsd(), within(1e-9));
+            assertThat(cachedLast.signedOfi1s()).isCloseTo(lastEv.signedOfi1s(), within(1e-9));
         }
     }
 

@@ -110,6 +110,31 @@ public sealed interface BacktestEvent extends Comparable<BacktestEvent> {
     }
 
     /**
+     * Real-time direct-USD fast micro-VWAP spot price, 1-second 3-venue signed OFI, and 500ms
+     * 3-venue synchronized directional impulse computed by {@code FastSpotMicroIndicator}.
+     *
+     * @param timestampMs     simulated arrival timestamp in milliseconds UTC
+     * @param sequenceNumber  capture sequence number
+     * @param symbol          lowercase USD crypto symbol (e.g. {@code "btcusd"})
+     * @param fastDirectUsd   40ms micro-VWAP direct-USD spot price
+     * @param signedOfi1s     1000ms continuous-time 3-venue signed OFI in {@code [-1.0, +1.0]}
+     * @param syncMove500Usd  500ms 3-venue synchronized directional impulse in USD
+     */
+    record CalculatedFastSpotMicroEvent(
+            long timestampMs,
+            long sequenceNumber,
+            String symbol,
+            double fastDirectUsd,
+            double signedOfi1s,
+            double syncMove500Usd
+    ) implements BacktestEvent {
+        @Override
+        public int priority() {
+            return 6;
+        }
+    }
+
+    /**
      * Real-time Chainlink-emulated USD spot price and 60-second rolling TWAP derived by aggregating
      * Binance Spot ({@code <ASSET>USDT} via Kraken {@code USDT/USD} 5s EMA), Coinbase Spot
      * ({@code <ASSET>USD}), and Kraken Spot ({@code <ASSET>USD}) trades.

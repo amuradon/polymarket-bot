@@ -31,6 +31,7 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.connector.ws.WebSocketStreamTelemetry;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.FastSpotMicroListener;
 import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor.MonitoredThreadSpec;
@@ -327,6 +328,9 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
         this.activeStrategy.init(this);
         if (this.activeStrategy instanceof SpotTwapListener listener) {
             this.spotStreamProcessor.getIndicator().addListener(listener);
+        }
+        if (this.activeStrategy instanceof FastSpotMicroListener fastListener) {
+            this.spotStreamProcessor.getFastSpotMicroIndicator().addListener(fastListener);
         }
         this.clobWsClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);
         this.polyBoltClient.setDisconnectListener(this::onStreamUnexpectedDisconnect);

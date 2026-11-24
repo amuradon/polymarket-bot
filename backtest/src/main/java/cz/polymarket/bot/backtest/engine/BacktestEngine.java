@@ -13,6 +13,7 @@ import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.FastSpotMicroListener;
 import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.StrategyRegistry;
@@ -508,6 +509,13 @@ public class BacktestEngine {
                                 activeStrategy.onOrderBookQuote(quote);
                             } else {
                                 lastSeededClobTs = evTs;
+                            }
+                        }
+                        case BacktestEvent.CalculatedFastSpotMicroEvent e -> {
+                            context.setLastReferencePrice(e.fastDirectUsd());
+                            if (activeStrategy instanceof FastSpotMicroListener listener) {
+                                listener.onFastSpotMicro(
+                                        evTs, e.symbol(), e.fastDirectUsd(), e.signedOfi1s(), e.syncMove500Usd());
                             }
                         }
                         case BacktestEvent.CalculatedSpotTwapEvent e -> {

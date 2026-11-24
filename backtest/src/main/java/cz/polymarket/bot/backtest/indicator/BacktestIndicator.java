@@ -91,6 +91,7 @@ public interface BacktestIndicator {
          * @param timestampMs simulated arrival timestamp ({@code server_ts + venue_delay_ms}) in milliseconds UTC
          * @param rawPrice raw trade price (in USDT for Binance, in USD for Coinbase and Kraken)
          * @param quantity executed trade quantity in base asset units
+         * @param isTakerBuy {@code true} when the buyer was the trade aggressor
          * @param recordOutput {@code true} if {@code timestampMs >= dayStartMs} and the output should be cached for the day
          */
         void onSpotVenueTrade(
@@ -98,6 +99,7 @@ public interface BacktestIndicator {
                 long timestampMs,
                 double rawPrice,
                 double quantity,
+                boolean isTakerBuy,
                 boolean recordOutput);
 
         /**

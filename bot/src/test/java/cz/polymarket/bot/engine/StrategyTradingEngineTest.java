@@ -24,6 +24,8 @@ import cz.polymarket.bot.connector.ws.TimestampedFrame;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicator;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.monitoring.SystemNetworkTelemetryMonitor;
 import cz.polymarket.bot.service.RuntimeCoordinator;
@@ -251,7 +253,9 @@ class StrategyTradingEngineTest {
                 10000L
         );
         spotTwapIndicator = new SpotTwapIndicator();
-        spotStreamProcessor = new SpotTwapProcessor(objectMapper, spotTwapIndicator, "BTCUSDT");
+        FastSpotMicroIndicator fastSpotMicroIndicator =
+                new FastSpotMicroIndicator(FastSpotMicroIndicatorConfig.defaults());
+        spotStreamProcessor = new SpotTwapProcessor(objectMapper, spotTwapIndicator, fastSpotMicroIndicator, "BTCUSDT");
     }
 
     private void handleMockWebSocket(ServerWebSocket ws) {

@@ -8,6 +8,8 @@ import cz.polymarket.bot.connector.kraken.KrakenStreamConnector;
 import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
 import cz.polymarket.bot.connector.polymarket.stream.PolymarketStreamParser;
 import cz.polymarket.bot.connector.ws.TimestampedFrame;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicator;
+import cz.polymarket.bot.indicators.FastSpotMicroListener;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapListener;
 import io.quarkus.logging.Log;
@@ -23,32 +25,36 @@ import java.util.List;
 /**
  * Shared zero-allocation CDI bean that streams live Binance Spot ({@code aggTrades}),
  * Kraken Spot ({@code trade} updates for {@code USDT/USD} and {@code <ASSET>/USD}), and
- * Coinbase Spot ({@code matches} for {@code <ASSET>-USD}) WebSocket frames into
- * {@link SpotTwapIndicator} and dispatches calculated USD spot and 60-second TWAP updates
- * to all registered {@link SpotTwapListener} instances.
+ * Coinbase Spot ({@code matches} for {@code <ASSET>-USD}) WebSocket frames in a single JSON pass
+ * into {@link SpotTwapIndicator} and {@link FastSpotMicroIndicator}, dispatching updates to
+ * registered {@link SpotTwapListener} and {@link FastSpotMicroListener} instances.
  */
 @ApplicationScoped
 public class SpotTwapProcessor {
 
     private final ObjectMapper objectMapper;
     private final SpotTwapIndicator spotTwapIndicator;
+    private final FastSpotMicroIndicator fastSpotMicroIndicator;
     private final String cryptoSymbol;
 
     private double[] scratchKrakenPrices = new double[32];
     private double[] scratchKrakenQtys = new double[32];
     private boolean[] scratchKrakenIsUsdt = new boolean[32];
+    private boolean[] scratchKrakenIsBuy = new boolean[32];
 
     /**
      * Constructs the multi-exchange spot stream processor CDI bean.
      *
-     * @param objectMapper      shared Jackson {@link ObjectMapper} used to create streaming {@link JsonParser} instances
-     * @param spotTwapIndicator indicator aggregating Binance, Coinbase, and Kraken spot trades
-     * @param symbol            configured trading asset symbol (e.g. {@code "BTCUSDT"}, {@code "ETHUSDT"})
+     * @param objectMapper           shared Jackson {@link ObjectMapper} used to create streaming {@link JsonParser} instances
+     * @param spotTwapIndicator      indicator aggregating Binance, Coinbase, and Kraken spot trades for 60s TWAP
+     * @param fastSpotMicroIndicator indicator computing low-latency direct-USD micro-VWAP, signed OFI, and 3-venue sync
+     * @param symbol                 configured trading asset symbol (e.g. {@code "BTCUSDT"}, {@code "ETHUSDT"})
      */
     @Inject
     public SpotTwapProcessor(
             ObjectMapper objectMapper,
             SpotTwapIndicator spotTwapIndicator,
+            FastSpotMicroIndicator fastSpotMicroIndicator,
             @ConfigProperty(name = "polymarket.trading.symbol", defaultValue = "BTCUSDT")
             String symbol) {
         if (objectMapper == null) {
@@ -57,8 +63,12 @@ public class SpotTwapProcessor {
         if (spotTwapIndicator == null) {
             throw new IllegalArgumentException("spotTwapIndicator cannot be null");
         }
+        if (fastSpotMicroIndicator == null) {
+            throw new IllegalArgumentException("fastSpotMicroIndicator cannot be null");
+        }
         this.objectMapper = objectMapper;
         this.spotTwapIndicator = spotTwapIndicator;
+        this.fastSpotMicroIndicator = fastSpotMicroIndicator;
         this.cryptoSymbol = PolymarketMarketInfo.normalizePolyBoltSymbol(symbol);
     }
 
@@ -70,10 +80,18 @@ public class SpotTwapProcessor {
     }
 
     /**
-     * Resets the underlying {@link SpotTwapIndicator}.
+     * Returns the underlying {@link FastSpotMicroIndicator}.
+     */
+    public FastSpotMicroIndicator getFastSpotMicroIndicator() {
+        return fastSpotMicroIndicator;
+    }
+
+    /**
+     * Resets both underlying spot indicators.
      */
     public void reset() {
         spotTwapIndicator.reset();
+        fastSpotMicroIndicator.reset();
     }
 
     /**
@@ -121,12 +139,13 @@ public class SpotTwapProcessor {
         }
         long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
         spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+        fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
     }
 
     /**
      * Processes a batch of forward-progressing Binance {@code SPOT_AGG_TRADES} frames into
-     * {@link SpotTwapIndicator} without allocation and notifies registered {@link SpotTwapListener}
-     * instances at most once for the final aggregated state of the batch.
+     * {@link SpotTwapIndicator} and {@link FastSpotMicroIndicator} without allocation and notifies
+     * registered listeners at most once for the final aggregated state of the batch.
      *
      * @param batch chronological batch of deduplicated/fast-forwarded Binance {@code aggTrade} frames
      */
@@ -159,6 +178,7 @@ public class SpotTwapProcessor {
         if (anyApplied) {
             long effectiveTsMs = resolveEffectiveTimestampMs(latestRecvTs);
             spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+            fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
         }
     }
 
@@ -169,6 +189,7 @@ public class SpotTwapProcessor {
             }
             double price = 0.0;
             double quantity = 1.0;
+            boolean isTakerBuy = true;
 
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 String field = parser.currentName();
@@ -184,6 +205,7 @@ public class SpotTwapProcessor {
                             quantity = q;
                         }
                     }
+                    case "m", "isBuyerMaker" -> isTakerBuy = !parser.getValueAsBoolean(false);
                     default -> parser.skipChildren();
                 }
             }
@@ -191,6 +213,7 @@ public class SpotTwapProcessor {
             if (price <= 0.0 || Double.isNaN(price)) {
                 return Double.NaN;
             }
+            fastSpotMicroIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity, isTakerBuy);
             return spotTwapIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
         } catch (Exception e) {
             Log.warnf("Failed to parse Binance SPOT_AGG_TRADES frame: %s", e.getMessage());
@@ -285,8 +308,10 @@ public class SpotTwapProcessor {
                 double qty = scratchKrakenQtys[i];
                 if (scratchKrakenIsUsdt[i]) {
                     spotTwapIndicator.onUsdtUsdTrade(recvTimestampMs, price);
+                    fastSpotMicroIndicator.onUsdtUsdTrade(recvTimestampMs, price);
                 } else {
                     spotTwapIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty);
+                    fastSpotMicroIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty, scratchKrakenIsBuy[i]);
                     updatedAssetSpot = true;
                 }
             }
@@ -294,6 +319,7 @@ public class SpotTwapProcessor {
             if (updatedAssetSpot) {
                 long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
                 spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+                fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
             }
         } catch (Exception e) {
             Log.warnf("Failed to parse Kraken Spot trade frame: %s", e.getMessage());
@@ -307,6 +333,7 @@ public class SpotTwapProcessor {
                 double price = 0.0;
                 double qty = 1.0;
                 boolean isUsdt = defaultUsdtUsd;
+                boolean isTakerBuy = true;
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     String field = parser.currentName();
                     parser.nextToken();
@@ -327,6 +354,10 @@ public class SpotTwapProcessor {
                                 isUsdt = isUsdtUsdSymbol(sym);
                             }
                         }
+                        case "side" -> {
+                            String side = parser.getValueAsString("");
+                            isTakerBuy = !"sell".equalsIgnoreCase(side);
+                        }
                         default -> parser.skipChildren();
                     }
                 }
@@ -335,6 +366,7 @@ public class SpotTwapProcessor {
                     scratchKrakenPrices[count] = price;
                     scratchKrakenQtys[count] = qty;
                     scratchKrakenIsUsdt[count] = isUsdt;
+                    scratchKrakenIsBuy[count] = isTakerBuy;
                     count++;
                 }
             } else {
@@ -352,6 +384,7 @@ public class SpotTwapProcessor {
         scratchKrakenPrices = Arrays.copyOf(scratchKrakenPrices, newCap);
         scratchKrakenQtys = Arrays.copyOf(scratchKrakenQtys, newCap);
         scratchKrakenIsUsdt = Arrays.copyOf(scratchKrakenIsUsdt, newCap);
+        scratchKrakenIsBuy = Arrays.copyOf(scratchKrakenIsBuy, newCap);
     }
 
     private static boolean isUsdtUsdSymbol(String symbol) {
@@ -405,6 +438,7 @@ public class SpotTwapProcessor {
             boolean isMatchType = false;
             double price = 0.0;
             double size = 1.0;
+            boolean isTakerBuy = true;
 
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 String field = parser.currentName();
@@ -427,6 +461,12 @@ public class SpotTwapProcessor {
                             size = s;
                         }
                     }
+                    case "side" -> {
+                        String side = parser.getValueAsString("");
+                        if (!side.isEmpty()) {
+                            isTakerBuy = "sell".equalsIgnoreCase(side);
+                        }
+                    }
                     default -> parser.skipChildren();
                 }
             }
@@ -435,8 +475,10 @@ public class SpotTwapProcessor {
                 return;
             }
             spotTwapIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size);
+            fastSpotMicroIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size, isTakerBuy);
             long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
             spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+            fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
         } catch (Exception e) {
             Log.warnf("Failed to parse Coinbase Spot match frame: %s", e.getMessage());
         }

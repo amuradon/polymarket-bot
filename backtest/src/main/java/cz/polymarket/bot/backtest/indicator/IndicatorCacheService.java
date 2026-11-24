@@ -487,6 +487,7 @@ public class IndicatorCacheService {
 
             String binanceSql = buildSpotTradesSql(
                     binanceReadExpr, "COALESCE(event_time, trade_time)", "COALESCE(quantity, 1.0)",
+                    "NOT COALESCE(is_buyer_maker, false)",
                     "aggregate_trade_id", minSpotWarmupStartMs, dayEndMs, binanceDelayMs);
             if (binanceSql != null) {
                 venueCursors[0].open(binanceSql);
@@ -494,6 +495,7 @@ public class IndicatorCacheService {
 
             String coinbaseSql = buildSpotTradesSql(
                     coinbaseReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
+                    "COALESCE(side = 'sell', true)",
                     "trade_id", minSpotWarmupStartMs, dayEndMs, coinbaseDelayMs);
             if (coinbaseSql != null) {
                 venueCursors[1].open(coinbaseSql);
@@ -501,6 +503,7 @@ public class IndicatorCacheService {
 
             String krakenSpotSql = buildSpotTradesSql(
                     krakenSpotReadExpr, "trade_timestamp", "COALESCE(qty, 1.0)",
+                    "COALESCE(side = 'buy', true)",
                     "trade_id", minSpotWarmupStartMs, dayEndMs, krakenDelayMs);
             if (krakenSpotSql != null) {
                 venueCursors[2].open(krakenSpotSql);
@@ -515,6 +518,7 @@ public class IndicatorCacheService {
                 long ts = bestCursor.nextTsMs;
                 double price = bestCursor.nextPrice;
                 double qty = bestCursor.nextQty;
+                boolean isTakerBuy = bestCursor.nextIsTakerBuy;
                 SpotTwapIndicator.SpotVenue venue = bestCursor.venue;
                 bestCursor.advance();
 
@@ -535,7 +539,7 @@ public class IndicatorCacheService {
                 boolean inTargetDay = ts >= dayStartMs && ts <= dayEndMs;
                 for (int i = 0; i < missingCount; i++) {
                     if (ts >= spotWarmupStartsMs[i]) {
-                        sessions[i].onSpotVenueTrade(venue, ts, price, qty, inTargetDay);
+                        sessions[i].onSpotVenueTrade(venue, ts, price, qty, isTakerBuy, inTargetDay);
                     }
                 }
             }
@@ -628,6 +632,7 @@ public class IndicatorCacheService {
             String readExpr,
             String serverTsExpr,
             String qtyExpr,
+            String isTakerBuyExpr,
             String tieBreakerCol,
             long warmupStartMs,
             long dayEndMs,
@@ -638,7 +643,7 @@ public class IndicatorCacheService {
         long minServerMs = Math.max(0L, warmupStartMs - delayMs);
         long maxServerMs = dayEndMs - delayMs;
         return "SELECT (CAST(" + serverTsExpr + " AS BIGINT) + " + delayMs + ") AS eff_ts, " +
-                "price, " + qtyExpr + " FROM " + readExpr +
+                "price, " + qtyExpr + ", " + isTakerBuyExpr + " FROM " + readExpr +
                 " WHERE " + serverTsExpr + " >= " + minServerMs +
                 " AND " + serverTsExpr + " <= " + maxServerMs +
                 " AND price IS NOT NULL" +
@@ -671,6 +676,7 @@ public class IndicatorCacheService {
         long nextTsMs;
         double nextPrice;
         double nextQty;
+        boolean nextIsTakerBuy;
 
         SpotVenueCursor(SpotTwapIndicator.SpotVenue venue, DuckDbSessionManager sessionManager) {
             this.venue = venue;
@@ -689,6 +695,7 @@ public class IndicatorCacheService {
                 nextTsMs = resultSet.getLong(1);
                 nextPrice = resultSet.getDouble(2);
                 nextQty = resultSet.getDouble(3);
+                nextIsTakerBuy = resultSet.getBoolean(4);
                 hasNextRow = true;
             } else {
                 hasNextRow = false;
