@@ -3,6 +3,8 @@ package cz.polymarket.bot.backtest.indicator;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapIndicatorConfig;
+import cz.polymarket.bot.indicators.SpotTwapListener;
+import cz.polymarket.bot.strategy.TradingStrategy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.duckdb.DuckDBAppender;
@@ -59,6 +61,11 @@ public class SpotTwapBacktestIndicator implements BacktestIndicator {
     @Override
     public Map<String, Object> getConfigurationParameters() {
         return config.toParameterMap();
+    }
+
+    @Override
+    public boolean isConsumedBy(TradingStrategy strategy) {
+        return strategy instanceof SpotTwapListener;
     }
 
     @Override

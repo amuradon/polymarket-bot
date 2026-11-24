@@ -23,7 +23,7 @@ import java.util.Map;
  * without heap allocations on the hot path.
  */
 @ApplicationScoped
-public class SpotTwapIndicator implements Indicator {
+public class SpotTwapIndicator implements Indicator<SpotTwapListener> {
 
     /** Canonical indicator name used for cache paths and metadata descriptors. */
     public static final String INDICATOR_NAME = "SpotTwapIndicator";
@@ -203,6 +203,7 @@ public class SpotTwapIndicator implements Indicator {
      *
      * @param listener listener to register
      */
+    @Override
     public void addListener(SpotTwapListener listener) {
         if (listener == null) {
             throw new IllegalArgumentException("listener cannot be null");
@@ -212,31 +213,24 @@ public class SpotTwapIndicator implements Indicator {
         }
     }
 
-    /**
-     * Unregisters a previously registered {@link SpotTwapListener}.
-     *
-     * @param listener listener to remove
-     */
+    @Override
     public void removeListener(SpotTwapListener listener) {
         if (listener != null) {
             listeners.remove(listener);
         }
     }
 
-    /**
-     * Removes all registered {@link SpotTwapListener} instances.
-     */
+    @Override
     public void clearListeners() {
         listeners.clear();
     }
 
-    /**
-     * Dispatches the latest calculated spot & 60s TWAP values to all registered {@link SpotTwapListener}
-     * instances without heap allocation when a valid spot and TWAP price are available.
-     *
-     * @param timestampMs effective timestamp in milliseconds UTC
-     * @param symbol lowercase USD asset symbol (e.g. {@code "btcusd"})
-     */
+    @Override
+    public boolean hasListeners() {
+        return !listeners.isEmpty();
+    }
+
+    @Override
     public void notifyListeners(long timestampMs, String symbol) {
         if (listeners.isEmpty()
                 || lastSpotPriceUsd <= 0.0

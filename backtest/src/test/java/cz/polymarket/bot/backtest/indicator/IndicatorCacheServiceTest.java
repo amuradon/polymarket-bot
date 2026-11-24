@@ -7,6 +7,12 @@ import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapIndicatorConfig;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategy;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategyConfig;
+import cz.polymarket.bot.strategy.TradingStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategy;
+import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
+import cz.polymarket.bot.strategy.UtterParameciumStrategyV0;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -103,9 +109,11 @@ class IndicatorCacheServiceTest {
 
             assertThat(Files.exists(expectedParquetFile)).isFalse();
 
+            TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+
             // 1. First run (Cache Miss): streams raw exchange data and creates config.json + daily Parquet file
             List<DailyIndicatorTrack> firstTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
 
             assertThat(Files.isRegularFile(expectedConfigJson)).isTrue();
             assertThat(Files.isRegularFile(expectedParquetFile)).isTrue();
@@ -134,7 +142,7 @@ class IndicatorCacheServiceTest {
 
             // 3. Second run (Cache Hit): loads directly from cached Parquet file
             List<DailyIndicatorTrack> secondTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
 
             assertThat(secondTracks).hasSize(1);
             DailyIndicatorTrack track2 = secondTracks.getFirst();
@@ -190,9 +198,11 @@ class IndicatorCacheServiceTest {
             Path ind1Parquet = cacheService.resolveDailyCacheFile(indicator1, "BTCUSDT", DATE_STR);
             Path ind2Parquet = cacheService.resolveDailyCacheFile(indicator2, "BTCUSDT", DATE_STR);
 
+            TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+
             // 1. Both indicators missing -> single pass computes both
             List<DailyIndicatorTrack> initialTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
 
             assertThat(initialTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1);
@@ -205,7 +215,7 @@ class IndicatorCacheServiceTest {
             // 2. Delete only indicator2's cache file -> indicator1 must be loaded from cache (0 new sessions), indicator2 recomputed
             Files.delete(ind2Parquet);
             List<DailyIndicatorTrack> partialHitTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
 
             assertThat(partialHitTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1); // NOT recomputed!
@@ -219,7 +229,7 @@ class IndicatorCacheServiceTest {
             Files.deleteIfExists(krakenUsdtFile);
 
             List<DailyIndicatorTrack> fullHitTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
 
             assertThat(fullHitTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1);
@@ -272,7 +282,9 @@ class IndicatorCacheServiceTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, new ObjectMapper(), List.of(fastInd), 100L, 50L, 50L);
 
-            List<DailyIndicatorTrack> missTracks = cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR);
+            TradingStrategy fastSpotStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
+            List<DailyIndicatorTrack> missTracks = cacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy);
             assertThat(missTracks).hasSize(1);
             DailyIndicatorTrack t1 = missTracks.getFirst();
             assertThat(t1.size()).isEqualTo(3);
@@ -289,13 +301,61 @@ class IndicatorCacheServiceTest {
             Files.deleteIfExists(krakenSpotFile);
             Files.deleteIfExists(krakenUsdtFile);
 
-            List<DailyIndicatorTrack> hitTracks = cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR);
+            List<DailyIndicatorTrack> hitTracks = cacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy);
             DailyIndicatorTrack t2 = hitTracks.getFirst();
             assertThat(t2.size()).isEqualTo(3);
             BacktestEvent.CalculatedFastSpotMicroEvent cachedLast =
                     (BacktestEvent.CalculatedFastSpotMicroEvent) t2.eventAt(2);
             assertThat(cachedLast.fastDirectUsd()).isCloseTo(lastEv.fastDirectUsd(), within(1e-9));
             assertThat(cachedLast.signedOfi1s()).isCloseTo(lastEv.signedOfi1s(), within(1e-9));
+        }
+    }
+
+    @Test
+    @DisplayName("Should compute and cache only indicators consumed by the active strategy")
+    void shouldComputeAndCacheOnlyIndicatorsConsumedByActiveStrategy(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector");
+            Path cacheDir = tempDir.resolve("cache");
+            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), duckDb);
+
+            Path binanceSpotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", DATE_STR);
+            Path coinbaseSpotFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", DATE_STR);
+            Path krakenSpotFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", DATE_STR);
+            Path krakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(DATE_STR);
+            writeSyntheticRawExchangeFiles(duckDb, binanceSpotFile, coinbaseSpotFile, krakenSpotFile, krakenUsdtFile);
+
+            SpotTwapBacktestIndicator spotTwapIndicator = new SpotTwapBacktestIndicator();
+            FastSpotMicroBacktestIndicator fastSpotIndicator = new FastSpotMicroBacktestIndicator(FastSpotMicroIndicatorConfig.defaults());
+            IndicatorCacheService cacheService = new IndicatorCacheService(
+                    cacheDir, new ObjectMapper(), List.of(spotTwapIndicator, fastSpotIndicator), 100L, 50L, 50L);
+
+            Path spotTwapCacheFile = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", DATE_STR);
+            Path fastSpotCacheFile = cacheService.resolveDailyCacheFile(fastSpotIndicator, "BTCUSDT", DATE_STR);
+
+            // 1. Strategy consuming neither indicator -> returns empty and creates no cache files
+            TradingStrategy noIndicatorStrategy = new UtterParameciumStrategyV0(UtterParameciumStrategyV0.Config.defaultConfig());
+            assertThat(cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR, noIndicatorStrategy)).isEmpty();
+            assertThat(Files.exists(spotTwapCacheFile)).isFalse();
+            assertThat(Files.exists(fastSpotCacheFile)).isFalse();
+
+            // 2. OraclePulseLockStrategy -> computes & caches ONLY FastSpotMicroIndicator
+            TradingStrategy oracleStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
+            List<DailyIndicatorTrack> oracleTracks = cacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", DATE_STR, oracleStrategy);
+            assertThat(oracleTracks).hasSize(1);
+            assertThat(oracleTracks.getFirst().indicatorName()).isEqualTo(fastSpotIndicator.getName());
+            assertThat(Files.isRegularFile(fastSpotCacheFile)).isTrue();
+            assertThat(Files.exists(spotTwapCacheFile)).isFalse();
+
+            // 3. UtterParameciumStrategy -> computes & caches ONLY SpotTwapIndicator
+            TradingStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
+            List<DailyIndicatorTrack> utterTracks = cacheService.loadOrComputeDailyIndicators(
+                    datasetService, "BTCUSDT", DATE_STR, utterStrategy);
+            assertThat(utterTracks).hasSize(1);
+            assertThat(utterTracks.getFirst().indicatorName()).isEqualTo(spotTwapIndicator.getName());
+            assertThat(Files.isRegularFile(spotTwapCacheFile)).isTrue();
         }
     }
 
@@ -353,6 +413,11 @@ class IndicatorCacheServiceTest {
         @Override
         public Map<String, Object> getConfigurationParameters() {
             return delegate.getConfigurationParameters();
+        }
+
+        @Override
+        public boolean isConsumedBy(TradingStrategy strategy) {
+            return delegate.isConsumedBy(strategy);
         }
 
         @Override

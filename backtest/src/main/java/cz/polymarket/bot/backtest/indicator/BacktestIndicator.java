@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest.indicator;
 
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
+import cz.polymarket.bot.strategy.TradingStrategy;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -34,6 +35,14 @@ public interface BacktestIndicator {
      * @return configuration parameter map
      */
     Map<String, Object> getConfigurationParameters();
+
+    /**
+     * Returns whether the given {@link TradingStrategy} consumes updates produced by this indicator.
+     *
+     * @param strategy target trading strategy
+     * @return {@code true} if the strategy subscribes to this indicator's events
+     */
+    boolean isConsumedBy(TradingStrategy strategy);
 
     /**
      * Returns the pre-day spot trade warm-up duration in milliseconds required before {@code 00:00:00 UTC}.

@@ -133,24 +133,31 @@ public class SpotTwapProcessor {
                 || recvTimestampMs <= 0L) {
             return;
         }
-        double twap60sUsd = applyBinanceAggTradeBytes(rawUtf8Bytes, recvTimestampMs);
-        if (Double.isNaN(twap60sUsd)) {
+        boolean spotTwapActive = spotTwapIndicator.hasListeners();
+        boolean fastSpotActive = fastSpotMicroIndicator.hasListeners();
+        if (!spotTwapActive && !fastSpotActive) {
             return;
         }
-        long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-        spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
-        fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+        if (!applyBinanceAggTradeBytes(rawUtf8Bytes, recvTimestampMs, spotTwapActive, fastSpotActive)) {
+            return;
+        }
+        notifyActiveIndicators(recvTimestampMs, spotTwapActive, fastSpotActive);
     }
 
     /**
      * Processes a batch of forward-progressing Binance {@code SPOT_AGG_TRADES} frames into
-     * {@link SpotTwapIndicator} and {@link FastSpotMicroIndicator} without allocation and notifies
-     * registered listeners at most once for the final aggregated state of the batch.
+     * active indicators without allocation and notifies registered listeners at most once for
+     * the final aggregated state of the batch.
      *
      * @param batch chronological batch of deduplicated/fast-forwarded Binance {@code aggTrade} frames
      */
     public void processBinanceFrameBatch(List<TimestampedFrame> batch) {
         if (batch == null || batch.isEmpty()) {
+            return;
+        }
+        boolean spotTwapActive = spotTwapIndicator.hasListeners();
+        boolean fastSpotActive = fastSpotMicroIndicator.hasListeners();
+        if (!spotTwapActive && !fastSpotActive) {
             return;
         }
         boolean anyApplied = false;
@@ -166,8 +173,7 @@ public class SpotTwapProcessor {
             if (rawBytes == null || rawBytes.length == 0 || recvTs <= 0L) {
                 continue;
             }
-            double twap = applyBinanceAggTradeBytes(rawBytes, recvTs);
-            if (!Double.isNaN(twap)) {
+            if (applyBinanceAggTradeBytes(rawBytes, recvTs, spotTwapActive, fastSpotActive)) {
                 anyApplied = true;
                 if (recvTs > latestRecvTs) {
                     latestRecvTs = recvTs;
@@ -176,16 +182,18 @@ public class SpotTwapProcessor {
         }
 
         if (anyApplied) {
-            long effectiveTsMs = resolveEffectiveTimestampMs(latestRecvTs);
-            spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
-            fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+            notifyActiveIndicators(latestRecvTs, spotTwapActive, fastSpotActive);
         }
     }
 
-    private double applyBinanceAggTradeBytes(byte[] rawUtf8Bytes, long recvTimestampMs) {
+    private boolean applyBinanceAggTradeBytes(
+            byte[] rawUtf8Bytes,
+            long recvTimestampMs,
+            boolean spotTwapActive,
+            boolean fastSpotActive) {
         try (JsonParser parser = objectMapper.createParser(rawUtf8Bytes)) {
             if (parser.nextToken() != JsonToken.START_OBJECT) {
-                return Double.NaN;
+                return false;
             }
             double price = 0.0;
             double quantity = 1.0;
@@ -211,13 +219,18 @@ public class SpotTwapProcessor {
             }
 
             if (price <= 0.0 || Double.isNaN(price)) {
-                return Double.NaN;
+                return false;
             }
-            fastSpotMicroIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity, isTakerBuy);
-            return spotTwapIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
+            if (fastSpotActive) {
+                fastSpotMicroIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity, isTakerBuy);
+            }
+            if (spotTwapActive) {
+                spotTwapIndicator.onBinanceUsdtTrade(recvTimestampMs, price, quantity);
+            }
+            return true;
         } catch (Exception e) {
             Log.warnf("Failed to parse Binance SPOT_AGG_TRADES frame: %s", e.getMessage());
-            return Double.NaN;
+            return false;
         }
     }
 
@@ -254,6 +267,11 @@ public class SpotTwapProcessor {
             byte[] rawUtf8Bytes,
             long recvTimestampMs) {
         if (rawUtf8Bytes == null || rawUtf8Bytes.length == 0 || recvTimestampMs <= 0L) {
+            return;
+        }
+        boolean spotTwapActive = spotTwapIndicator.hasListeners();
+        boolean fastSpotActive = fastSpotMicroIndicator.hasListeners();
+        if (!spotTwapActive && !fastSpotActive) {
             return;
         }
         boolean defaultUsdtUsd = isUsdtUsdSymbol(streamSymbol);
@@ -307,19 +325,25 @@ public class SpotTwapProcessor {
                 double price = scratchKrakenPrices[i];
                 double qty = scratchKrakenQtys[i];
                 if (scratchKrakenIsUsdt[i]) {
-                    spotTwapIndicator.onUsdtUsdTrade(recvTimestampMs, price);
-                    fastSpotMicroIndicator.onUsdtUsdTrade(recvTimestampMs, price);
+                    if (spotTwapActive) {
+                        spotTwapIndicator.onUsdtUsdTrade(recvTimestampMs, price);
+                    }
+                    if (fastSpotActive) {
+                        fastSpotMicroIndicator.onUsdtUsdTrade(recvTimestampMs, price);
+                    }
                 } else {
-                    spotTwapIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty);
-                    fastSpotMicroIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty, scratchKrakenIsBuy[i]);
+                    if (spotTwapActive) {
+                        spotTwapIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty);
+                    }
+                    if (fastSpotActive) {
+                        fastSpotMicroIndicator.onKrakenUsdTrade(recvTimestampMs, price, qty, scratchKrakenIsBuy[i]);
+                    }
                     updatedAssetSpot = true;
                 }
             }
 
             if (updatedAssetSpot) {
-                long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-                spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
-                fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+                notifyActiveIndicators(recvTimestampMs, spotTwapActive, fastSpotActive);
             }
         } catch (Exception e) {
             Log.warnf("Failed to parse Kraken Spot trade frame: %s", e.getMessage());
@@ -431,6 +455,11 @@ public class SpotTwapProcessor {
         if (rawUtf8Bytes == null || rawUtf8Bytes.length == 0 || recvTimestampMs <= 0L) {
             return;
         }
+        boolean spotTwapActive = spotTwapIndicator.hasListeners();
+        boolean fastSpotActive = fastSpotMicroIndicator.hasListeners();
+        if (!spotTwapActive && !fastSpotActive) {
+            return;
+        }
         try (JsonParser parser = objectMapper.createParser(rawUtf8Bytes)) {
             if (parser.nextToken() != JsonToken.START_OBJECT) {
                 return;
@@ -474,18 +503,37 @@ public class SpotTwapProcessor {
             if (!isMatchType || price <= 0.0 || Double.isNaN(price)) {
                 return;
             }
-            spotTwapIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size);
-            fastSpotMicroIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size, isTakerBuy);
-            long effectiveTsMs = resolveEffectiveTimestampMs(recvTimestampMs);
-            spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
-            fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+            if (spotTwapActive) {
+                spotTwapIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size);
+            }
+            if (fastSpotActive) {
+                fastSpotMicroIndicator.onCoinbaseUsdTrade(recvTimestampMs, price, size, isTakerBuy);
+            }
+            notifyActiveIndicators(recvTimestampMs, spotTwapActive, fastSpotActive);
         } catch (Exception e) {
             Log.warnf("Failed to parse Coinbase Spot match frame: %s", e.getMessage());
         }
     }
 
-    private long resolveEffectiveTimestampMs(long recvTimestampMs) {
-        long engineTs = spotTwapIndicator.getLastAssetTimestampMs();
-        return engineTs > 0L ? Math.max(recvTimestampMs, engineTs) : recvTimestampMs;
+    private void notifyActiveIndicators(long recvTimestampMs, boolean spotTwapActive, boolean fastSpotActive) {
+        long effectiveTsMs = recvTimestampMs;
+        if (spotTwapActive) {
+            long ts = spotTwapIndicator.getLastAssetTimestampMs();
+            if (ts > effectiveTsMs) {
+                effectiveTsMs = ts;
+            }
+        }
+        if (fastSpotActive) {
+            long ts = fastSpotMicroIndicator.getLastAssetTimestampMs();
+            if (ts > effectiveTsMs) {
+                effectiveTsMs = ts;
+            }
+        }
+        if (spotTwapActive) {
+            spotTwapIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+        }
+        if (fastSpotActive) {
+            fastSpotMicroIndicator.notifyListeners(effectiveTsMs, cryptoSymbol);
+        }
     }
 }

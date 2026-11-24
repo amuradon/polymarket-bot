@@ -280,4 +280,67 @@ class SpotTwapProcessorTest {
         );
         assertThat(fastCallbacks.getLast()[1]).isCloseTo(0.70 * 70_100.0 + 0.30 * 70_200.0, within(1e-6));
     }
+
+    @Test
+    void shouldSkipComputingUnusedIndicatorWhenOnlyOneOrNeitherHasListeners() {
+        String krakenUsdt = "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"USDT/USD\",\"side\":\"sell\",\"price\":0.9985,\"qty\":500.0}]}";
+        String binanceTrade = "{\"e\":\"aggTrade\",\"p\":\"70000.00\",\"q\":\"1.0\",\"m\":false}";
+        String coinbaseTrade = "{\"type\":\"match\",\"side\":\"sell\",\"size\":\"1.0\",\"price\":\"70020.00\",\"product_id\":\"BTC-USD\"}";
+        String krakenTrade = "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"price\":70040.0,\"qty\":1.0}]}";
+
+        // 1. Neither indicator has listeners -> both remain untouched
+        assertThat(indicator.hasListeners()).isFalse();
+        assertThat(fastIndicator.hasListeners()).isFalse();
+        processor.processKrakenFrame("USDTUSD", krakenUsdt, 1_000L);
+        processor.processBinanceFrame(BinanceStreamType.SPOT_AGG_TRADES, binanceTrade, 1_010L);
+        processor.processCoinbaseFrame("BTCUSD", coinbaseTrade, 1_020L);
+        processor.processKrakenFrame("BTCUSD", krakenTrade, 1_030L);
+
+        assertThat(indicator.getLastSpotPriceUsd()).isNaN();
+        assertThat(indicator.getLastAssetTimestampMs()).isEqualTo(-1L);
+        assertThat(indicator.getUsdtUsdEma()).isEqualTo(1.0);
+        assertThat(fastIndicator.getLastFastDirectUsd()).isNaN();
+        assertThat(fastIndicator.getLastAssetTimestampMs()).isEqualTo(-1L);
+        assertThat(fastIndicator.getUsdtUsdEma()).isEqualTo(1.0);
+
+        // 2. Only FastSpotMicroListener registered (e.g. OraclePulseLockStrategy) -> SpotTwapIndicator untouched
+        List<Double> fastPrices = new ArrayList<>();
+        fastIndicator.addListener((ts, sym, fastDirectUsd, ofi, sync) -> fastPrices.add(fastDirectUsd));
+        assertThat(fastIndicator.hasListeners()).isTrue();
+        assertThat(indicator.hasListeners()).isFalse();
+
+        processor.processKrakenFrame("USDTUSD", krakenUsdt, 2_000L);
+        processor.processBinanceFrame(BinanceStreamType.SPOT_AGG_TRADES, binanceTrade, 2_010L);
+        processor.processCoinbaseFrame("BTCUSD", coinbaseTrade, 2_020L);
+        processor.processKrakenFrame("BTCUSD", krakenTrade, 2_030L);
+
+        assertThat(fastPrices).hasSize(3);
+        assertThat(fastIndicator.getLastFastDirectUsd()).isFinite();
+        assertThat(fastIndicator.getLastAssetTimestampMs()).isEqualTo(2_030L);
+        assertThat(fastIndicator.getUsdtUsdEma()).isCloseTo(0.9985, within(1e-8));
+        assertThat(indicator.getLastSpotPriceUsd()).isNaN();
+        assertThat(indicator.getLastAssetTimestampMs()).isEqualTo(-1L);
+        assertThat(indicator.getUsdtUsdEma()).isEqualTo(1.0);
+
+        // 3. Only SpotTwapListener registered (e.g. UtterParameciumStrategy) -> FastSpotMicroIndicator untouched
+        fastIndicator.clearListeners();
+        processor.reset();
+        List<Double> twapPrices = new ArrayList<>();
+        indicator.addListener((ts, sym, spotUsd, twap60sUsd) -> twapPrices.add(spotUsd));
+        assertThat(indicator.hasListeners()).isTrue();
+        assertThat(fastIndicator.hasListeners()).isFalse();
+
+        processor.processKrakenFrame("USDTUSD", krakenUsdt, 3_000L);
+        processor.processBinanceFrame(BinanceStreamType.SPOT_AGG_TRADES, binanceTrade, 3_010L);
+        processor.processCoinbaseFrame("BTCUSD", coinbaseTrade, 3_020L);
+        processor.processKrakenFrame("BTCUSD", krakenTrade, 3_030L);
+
+        assertThat(twapPrices).hasSize(3);
+        assertThat(indicator.getLastSpotPriceUsd()).isFinite();
+        assertThat(indicator.getLastAssetTimestampMs()).isEqualTo(3_030L);
+        assertThat(indicator.getUsdtUsdEma()).isCloseTo(0.9985, within(1e-8));
+        assertThat(fastIndicator.getLastFastDirectUsd()).isNaN();
+        assertThat(fastIndicator.getLastAssetTimestampMs()).isEqualTo(-1L);
+        assertThat(fastIndicator.getUsdtUsdEma()).isEqualTo(1.0);
+    }
 }

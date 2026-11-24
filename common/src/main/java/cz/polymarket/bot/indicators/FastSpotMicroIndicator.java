@@ -25,7 +25,7 @@ import java.util.Map;
  * </ol>
  */
 @ApplicationScoped
-public class FastSpotMicroIndicator implements Indicator {
+public class FastSpotMicroIndicator implements Indicator<FastSpotMicroListener> {
 
     /** Canonical indicator name used for cache directories and metadata descriptors. */
     public static final String INDICATOR_NAME = "FastSpotMicroIndicator";
@@ -123,6 +123,7 @@ public class FastSpotMicroIndicator implements Indicator {
      *
      * @param listener listener to register
      */
+    @Override
     public void addListener(FastSpotMicroListener listener) {
         if (listener == null) {
             throw new IllegalArgumentException("listener cannot be null");
@@ -132,30 +133,24 @@ public class FastSpotMicroIndicator implements Indicator {
         }
     }
 
-    /**
-     * Unregisters a previously registered {@link FastSpotMicroListener}.
-     *
-     * @param listener listener to remove
-     */
+    @Override
     public void removeListener(FastSpotMicroListener listener) {
         if (listener != null) {
             listeners.remove(listener);
         }
     }
 
-    /**
-     * Clears all registered {@link FastSpotMicroListener} instances.
-     */
+    @Override
     public void clearListeners() {
         listeners.clear();
     }
 
-    /**
-     * Dispatches the latest calculated microstructure state to all registered listeners without heap allocation.
-     *
-     * @param timestampMs effective timestamp in milliseconds UTC
-     * @param symbol      lowercase USD crypto symbol (e.g. {@code "btcusd"})
-     */
+    @Override
+    public boolean hasListeners() {
+        return !listeners.isEmpty();
+    }
+
+    @Override
     public void notifyListeners(long timestampMs, String symbol) {
         if (listeners.isEmpty() || Double.isNaN(lastFastDirectUsd) || lastFastDirectUsd <= 0.0) {
             return;

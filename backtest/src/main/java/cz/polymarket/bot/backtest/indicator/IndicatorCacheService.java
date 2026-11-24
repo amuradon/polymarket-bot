@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
+import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -289,35 +290,53 @@ public class IndicatorCacheService {
     }
 
     /**
-     * Loads or computes the daily indicator tracks for all registered {@link BacktestIndicator}s on a single UTC day.
+     * Loads or computes the daily indicator tracks for registered {@link BacktestIndicator}s consumed
+     * by {@code strategy} on a single UTC day.
      * <p>
-     * Indicators with an existing daily Parquet cache file are loaded directly from disk without touching
-     * raw exchange archives. All indicators missing a cache file for {@code dateStr} are computed together
+     * Indicators not consumed by {@code strategy} are skipped completely (neither read from cache nor computed).
+     * Consumed indicators with an existing daily Parquet cache file are loaded directly from disk without touching
+     * raw exchange archives; any consumed indicators missing a cache file for {@code dateStr} are computed together
      * in a single chronological streaming pass over the raw exchange Parquet files and saved to the cache.
      *
      * @param datasetService collector Parquet dataset service
      * @param symbol trading asset symbol (e.g. {@code "BTCUSDT"})
      * @param dateStr UTC date string ({@code yyyy-MM-dd})
-     * @return ordered list of {@link DailyIndicatorTrack}s for all registered indicators on {@code dateStr}
+     * @param strategy active {@link TradingStrategy} determining which indicators are required
+     * @return ordered list of {@link DailyIndicatorTrack}s for indicators consumed by {@code strategy} on {@code dateStr}
      */
     public List<DailyIndicatorTrack> loadOrComputeDailyIndicators(
             CollectorParquetDatasetService datasetService,
             String symbol,
-            String dateStr) {
+            String dateStr,
+            TradingStrategy strategy) {
+        if (strategy == null) {
+            throw new IllegalArgumentException("strategy cannot be null");
+        }
         if (datasetService == null || dateStr == null || dateStr.isBlank() || indicators.isEmpty()) {
+            return List.of();
+        }
+
+        List<BacktestIndicator> activeIndicators = new ArrayList<>(indicators.size());
+        for (int i = 0, n = indicators.size(); i < n; i++) {
+            BacktestIndicator indicator = indicators.get(i);
+            if (indicator.isConsumedBy(strategy)) {
+                activeIndicators.add(indicator);
+            }
+        }
+        if (activeIndicators.isEmpty()) {
             return List.of();
         }
 
         String trimmedDate = dateStr.trim();
         String cryptoSymbol = CollectorParquetDatasetService.extractBaseAsset(symbol).toLowerCase(Locale.ROOT) + "usd";
-        int indicatorCount = indicators.size();
+        int indicatorCount = activeIndicators.size();
         DailyIndicatorTrack[] resolvedTracks = new DailyIndicatorTrack[indicatorCount];
 
         List<IndicatorSlot> missingSlots = new ArrayList<>(indicatorCount);
         List<IndicatorSlot> hitSlots = new ArrayList<>(indicatorCount);
 
         for (int i = 0; i < indicatorCount; i++) {
-            BacktestIndicator indicator = indicators.get(i);
+            BacktestIndicator indicator = activeIndicators.get(i);
             Path cacheFile = resolveDailyCacheFile(indicator, symbol, trimmedDate);
             if (Files.isRegularFile(cacheFile)) {
                 hitSlots.add(new IndicatorSlot(i, indicator, cacheFile));

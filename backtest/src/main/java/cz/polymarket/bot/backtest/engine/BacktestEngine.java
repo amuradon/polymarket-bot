@@ -301,9 +301,9 @@ public class BacktestEngine {
                     ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr)
                     : new BacktestEvent[0];
 
-            // 2. Load cached daily indicator tracks (or compute and cache missing indicators in a single raw pass)
+            // 2. Load cached daily indicator tracks consumed by this strategy (computing missing ones in a single raw pass)
             List<DailyIndicatorTrack> dailyIndicatorTracks = !dateStr.isBlank()
-                    ? indicatorCacheService.loadOrComputeDailyIndicators(datasetService, sym, dateStr)
+                    ? indicatorCacheService.loadOrComputeDailyIndicators(datasetService, sym, dateStr, strategy)
                     : List.of();
 
             // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
