@@ -17,7 +17,7 @@
 ---
 
 ## Step 1: Provision Base Stack (`infra/polymarket-bot-base.yaml`)
-Creates encrypted `PolymarketBotArtifactBucket` (S3), CloudWatch Log Group `/polymarket-bot/polymarket-bot-base/bot`, IAM role (SSM/S3/SecretsManager/Logs/EBS), Security Group (`443` from `178.17.13.13/32`), and persistent **100 GiB `gp3` EBS volume** (or reuses `ExistingEbsVolumeId` when specified).
+Creates encrypted `PolymarketBotArtifactBucket` (S3), CloudWatch Log Group `/polymarket-bot/polymarket-bot-base/bot`, IAM role (SSM/S3/SecretsManager/Logs/EBS), Security Group (`443` and `22` from `178.17.13.13/32`), and persistent **100 GiB `gp3` EBS volume** (or reuses `ExistingEbsVolumeId` when specified).
 
 ```powershell
 aws cloudformation deploy `

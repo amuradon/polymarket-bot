@@ -88,7 +88,7 @@ Resources:
               touch /var/log/polymarket-bot/bot.log
               chown -R polymarket:polymarket /opt/polymarket-bot /var/log/polymarket-bot
 
-              # Configure SSH public key for ec2-user (used by scripts/download-collector-data.ps1 & .sh over SSM)
+              # Configure SSH public key for ec2-user (used by scripts/download-collector-data.ps1 & .sh via direct SSH)
               mkdir -p /home/ec2-user/.ssh
               if ! grep -q "amuradon@gmail.com" /home/ec2-user/.ssh/authorized_keys 2>/dev/null; then
                 echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZCdXFERd9b2J0Y/AaI6cNEzlHOQIXHP6ffee948/aR amuradon@gmail.com' >> /home/ec2-user/.ssh/authorized_keys

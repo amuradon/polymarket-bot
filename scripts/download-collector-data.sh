@@ -48,8 +48,10 @@ Modes:
 Options:
   -o, --destination-dir <path>  Local root directory for collector data.
                                 (Default: /data/polymarket/collector or ./collector)
-  -h, --ec2-host <alias>        EC2 SSH host alias / Instance ID configured in ~/.ssh/config.
-                                (Default: resolved from stack polymarket-bot-ec2 in eu-west-1)
+  -h, --ec2-host <host>         EC2 public IP, hostname, or SSH host alias (with optional user@).
+                                (Default: PublicIp resolved from stack polymarket-bot-ec2 in eu-west-1)
+  -u, --ssh-user <user>         SSH username for IP/hostname without user@ prefix. (Default: ec2-user)
+  -i, --identity-file <path>    Optional SSH private key path. (Default: ~/.ssh/id_ed25519 if present)
   -r, --remote-base-dir <path>  Root directory of collector data on EC2.
                                 (Default: /mnt/ebs/polymarket-bot/collector)
   -n, --dry-run                 Preview matching files and operations without downloading or deleting.
@@ -71,6 +73,8 @@ STREAM_FILTER=""
 CLEAN_ALREADY_DOWNLOADED=false
 DESTINATION_DIR=""
 EC2_HOST=""
+SSH_USER="ec2-user"
+IDENTITY_FILE=""
 REMOTE_BASE_DIR="/mnt/ebs/polymarket-bot/collector"
 DRY_RUN=false
 KEEP_REMOTE_FILES=false
@@ -105,6 +109,14 @@ while [[ $# -gt 0 ]]; do
             EC2_HOST="$2"
             shift 2
             ;;
+        -u|--ssh-user)
+            SSH_USER="$2"
+            shift 2
+            ;;
+        -i|--identity-file)
+            IDENTITY_FILE="$2"
+            shift 2
+            ;;
         -r|--remote-base-dir)
             REMOTE_BASE_DIR="$2"
             shift 2
@@ -135,26 +147,36 @@ for bin in ssh scp tar python3; do
     fi
 done
 
-# Check session manager plugin path if present
-if [ -d "/usr/local/sessionmanagerplugin/bin" ] && [[ ":$PATH:" != *":/usr/local/sessionmanagerplugin/bin:"* ]]; then
-    export PATH="/usr/local/sessionmanagerplugin/bin:$PATH"
-fi
-
 if [ -z "$EC2_HOST" ]; then
     if command -v aws >/dev/null 2>&1; then
         EC2_HOST=$(aws cloudformation describe-stacks \
             --stack-name "polymarket-bot-ec2" \
             --region "eu-west-1" \
-            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+            --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" \
             --output text 2>/dev/null || true)
         if [ "$EC2_HOST" = "None" ]; then
             EC2_HOST=""
         fi
     fi
     if [ -z "$EC2_HOST" ]; then
-        log_error "Could not resolve EC2 Instance ID from stack 'polymarket-bot-ec2' in eu-west-1. Specify -h|--ec2-host explicitly."
+        log_error "Could not resolve EC2 PublicIp from stack 'polymarket-bot-ec2' in eu-west-1. Specify -h|--ec2-host explicitly."
         exit 1
     fi
+fi
+
+if [[ "$EC2_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    SSH_TARGET="${SSH_USER}@${EC2_HOST}"
+else
+    SSH_TARGET="$EC2_HOST"
+fi
+
+if [ -z "$IDENTITY_FILE" ] && [ -f "$HOME/.ssh/id_ed25519" ]; then
+    IDENTITY_FILE="$HOME/.ssh/id_ed25519"
+fi
+
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o Compression=no -o ProxyCommand=none)
+if [ -n "$IDENTITY_FILE" ]; then
+    SSH_OPTS+=(-i "$IDENTITY_FILE")
 fi
 
 # ==============================================================================
@@ -163,7 +185,7 @@ fi
 if [ "$CLEAN_ALREADY_DOWNLOADED" = true ]; then
     log_info "================================================================="
     log_info " Polymarket Data Collector - Remote Reconcile & Cleanup (Linux)"
-    echo -e "${COLOR_WHITE} EC2 Instance Host : ${EC2_HOST}${COLOR_RESET}"
+    echo -e "${COLOR_WHITE} EC2 Instance Host : ${SSH_TARGET}${COLOR_RESET}"
     echo -e "${COLOR_WHITE} Remote Base Dir   : ${REMOTE_BASE_DIR}${COLOR_RESET}"
     echo -e "${COLOR_WHITE} Local Destination : ${DESTINATION_DIR}${COLOR_RESET}"
     if [ "$DRY_RUN" = true ]; then
@@ -248,9 +270,9 @@ with open("/tmp/reconcile_delete.txt", "w") as out:
 EOF
 
     log_info "[2/3] Comparing with EC2 EBS volume..."
-    scp -q -o BatchMode=yes "$TEMP_MANIFEST" "${EC2_HOST}:/tmp/reconcile_manifest.tsv"
-    scp -q -o BatchMode=yes "$TEMP_PY" "${EC2_HOST}:/tmp/reconcile_check.py"
-    REC_OUTPUT=$(ssh -o BatchMode=yes "$EC2_HOST" "python3 /tmp/reconcile_check.py '$REMOTE_BASE_DIR'")
+    scp -q "${SSH_OPTS[@]}" "$TEMP_MANIFEST" "${SSH_TARGET}:/tmp/reconcile_manifest.tsv"
+    scp -q "${SSH_OPTS[@]}" "$TEMP_PY" "${SSH_TARGET}:/tmp/reconcile_check.py"
+    REC_OUTPUT=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "python3 /tmp/reconcile_check.py '$REMOTE_BASE_DIR'")
 
     if [[ ! "$REC_OUTPUT" =~ ^RECONCILE[[:space:]]+([0-9]+)[[:space:]]+([0-9\.]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]]; then
         log_error "Reconciliation script failed. Output: $REC_OUTPUT"
@@ -272,21 +294,21 @@ EOF
 
     if [ "$MATCHED_COUNT" -eq 0 ]; then
         log_warn "[INFO] No matching files to delete on EC2."
-        ssh -o BatchMode=yes "$EC2_HOST" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
         exit 0
     fi
 
     if [ "$DRY_RUN" = true ]; then
         log_warn "[DRY-RUN] Files that would be deleted from EC2:"
-        ssh -o BatchMode=yes "$EC2_HOST" "head -n 20 /tmp/reconcile_delete.txt"
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "head -n 20 /tmp/reconcile_delete.txt"
         log_warn "[DRY-RUN] Completed. No files deleted."
-        ssh -o BatchMode=yes "$EC2_HOST" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
         exit 0
     fi
 
     log_info "[3/3] Deleting $MATCHED_COUNT verified files on EC2..."
-    ssh -o BatchMode=yes "$EC2_HOST" "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
-    DF_OUTPUT=$(ssh -o BatchMode=yes "$EC2_HOST" "df -h '$REMOTE_BASE_DIR'")
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+    DF_OUTPUT=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "df -h '$REMOTE_BASE_DIR'")
     log_success "      Files deleted successfully. Remote EBS volume status:\n$DF_OUTPUT"
     log_success "\nSUCCESS: Reclaimed $MATCHED_MB MB across $MATCHED_COUNT files on EC2."
     exit 0
@@ -395,10 +417,10 @@ PYEOF
 EOF
 )
 
-SCAN_RESULT=$(ssh -o BatchMode=yes "$EC2_HOST" "$REMOTE_SCAN_CMD")
+SCAN_RESULT=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$REMOTE_SCAN_CMD")
 
 if [[ ! "$SCAN_RESULT" =~ ^FOUND[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]]; then
-    log_error "Failed to scan remote files on EC2 host $EC2_HOST. Output: $SCAN_RESULT"
+    log_error "Failed to scan remote files on EC2 host $SSH_TARGET. Output: $SCAN_RESULT"
     exit 1
 fi
 
@@ -408,7 +430,7 @@ TOTAL_MB=$(awk -v b="$TOTAL_BYTES" 'BEGIN { printf "%.2f", b / (1024*1024) }')
 
 if [ "$FILE_COUNT" -eq 0 ]; then
     log_warn "[INFO] No files found on EC2 for date $TARGET_DATE."
-    ssh -o BatchMode=yes "$EC2_HOST" "rm -f /tmp/collector-$TARGET_DATE.manifest /tmp/collector-$TARGET_DATE.files"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/collector-$TARGET_DATE.manifest /tmp/collector-$TARGET_DATE.files"
     exit 0
 fi
 
@@ -416,14 +438,14 @@ log_success "      Found $FILE_COUNT files ($TOTAL_MB MB) on EC2 for date $TARGE
 
 if [ "$DRY_RUN" = true ]; then
     log_warn "[DRY-RUN] Remote file manifest:"
-    MANIFEST_CONTENT=$(ssh -o BatchMode=yes "$EC2_HOST" "cat /tmp/collector-$TARGET_DATE.manifest")
+    MANIFEST_CONTENT=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat /tmp/collector-$TARGET_DATE.manifest")
     while IFS=$'\t' read -r rel size; do
         if [ -n "$rel" ]; then
             size_mb=$(awk -v b="$size" 'BEGIN { printf "%.2f", b / (1024*1024) }')
             echo -e "${COLOR_GRAY}  - $rel ($size_mb MB)${COLOR_RESET}"
         fi
     done <<< "$MANIFEST_CONTENT"
-    ssh -o BatchMode=yes "$EC2_HOST" "rm -f /tmp/collector-$TARGET_DATE.manifest /tmp/collector-$TARGET_DATE.files"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/collector-$TARGET_DATE.manifest /tmp/collector-$TARGET_DATE.files"
     log_warn "[DRY-RUN] Dry run completed. No files downloaded or deleted."
     exit 0
 fi
@@ -431,10 +453,10 @@ fi
 log_info "[2/4] Preparing local directory: $DESTINATION_DIR..."
 mkdir -p "$DESTINATION_DIR"
 
-log_info "[3/4] Streaming $FILE_COUNT files ($TOTAL_MB MB) via SSH..."
+log_info "[3/4] Streaming $FILE_COUNT files ($TOTAL_MB MB) via direct SSH..."
 START_TIME=$(date +%s)
 
-ssh -o BatchMode=yes "$EC2_HOST" "tar -cf - -C '$REMOTE_BASE_DIR' -T '/tmp/collector-$TARGET_DATE.files'" | tar -xf - -C "$DESTINATION_DIR"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "tar -cf - -C '$REMOTE_BASE_DIR' -T '/tmp/collector-$TARGET_DATE.files'" | tar -xf - -C "$DESTINATION_DIR"
 
 END_TIME=$(date +%s)
 ELAPSED_SEC=$(( END_TIME - START_TIME ))
@@ -447,7 +469,7 @@ log_success "      Download completed in ${ELAPSED_SEC}s (${SPEED_MB_SEC} MB/s).
 log_info "[4/4] Verifying all $FILE_COUNT downloaded files locally..."
 LOCAL_VERIFY_MANIFEST=$(mktemp /tmp/local_manifest_XXXXXX.tsv)
 trap 'rm -f "$LOCAL_VERIFY_MANIFEST"' EXIT
-ssh -o BatchMode=yes "$EC2_HOST" "cat /tmp/collector-$TARGET_DATE.manifest" > "$LOCAL_VERIFY_MANIFEST"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat /tmp/collector-$TARGET_DATE.manifest" > "$LOCAL_VERIFY_MANIFEST"
 
 VERIFY_RESULT=$(python3 - << EOF
 import os, sys
@@ -496,11 +518,11 @@ log_success "      Verification 100% SUCCESSFUL: All $FILE_COUNT files match exp
 if [ "$KEEP_REMOTE_FILES" = false ]; then
     log_info "[CLEANUP] Deleting $FILE_COUNT verified files from EC2 ($REMOTE_BASE_DIR)..."
     DELETE_CMD="cut -f1 '/tmp/collector-$TARGET_DATE.manifest' | sed 's|^|$REMOTE_BASE_DIR/|' | xargs -r -d '\n' sudo rm -f && rm -f '/tmp/collector-$TARGET_DATE.manifest' '/tmp/collector-$TARGET_DATE.files'"
-    ssh -o BatchMode=yes "$EC2_HOST" "$DELETE_CMD"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$DELETE_CMD"
     log_success "          Remote files successfully deleted from EC2."
 else
     log_warn "[CLEANUP] Keeping remote files on EC2 (--keep-remote-files was specified)."
-    ssh -o BatchMode=yes "$EC2_HOST" "rm -f '/tmp/collector-$TARGET_DATE.manifest' '/tmp/collector-$TARGET_DATE.files'"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f '/tmp/collector-$TARGET_DATE.manifest' '/tmp/collector-$TARGET_DATE.files'"
 fi
 
 log_success "\nSUCCESS: Successfully downloaded, verified, and cleaned $FILE_COUNT files ($TOTAL_MB MB) for $TARGET_DATE."

@@ -32,8 +32,8 @@ description: >-
   - Stops `polymarket-bot` (`SIGTERM` saves `runtime-state.json` with `twapOpenPrice`, `strategyMode`, and open `Position`s + flushes `.jsonl.zst`), swaps `/opt/polymarket-bot` -> `/opt/polymarket-bot.previous` and `.staging` -> `/opt/polymarket-bot` in `< 1 ms`, and starts the new version.
   - Verifies `GET http://127.0.0.1:443/api/health` returns `.healthy == true` twice consecutively; on failure, stops the broken version and **automatically rolls back to `/opt/polymarket-bot.previous`**.
 - **Access & Security**:
-  - Inbound port `443` (bound directly by Quarkus) is whitelisted strictly for **`178.17.13.13/32`**.
-  - Public SSH (port `22`) is closed; all administration and deployments run via **AWS Systems Manager (SSM)**.
+  - Inbound port `443` (Quarkus) and port `22` (direct SSH for collector `.jsonl.zst` sync) are whitelisted strictly for **`178.17.13.13/32`** (`AllowedInboundCidr`).
+  - Administration and deployments run via **AWS Systems Manager (SSM)**.
 
 ---
 

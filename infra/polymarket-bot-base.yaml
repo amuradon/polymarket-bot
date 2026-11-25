@@ -4,7 +4,7 @@ Description: >
   artifact bucket, CloudWatch Logs group, least-privilege IAM role with SSM Session Manager, S3 artifact
   read, Secrets Manager, and EBS volume attachment access, a persistent 100 GiB gp3 encrypted EBS volume
   (or references an existing retained EBS volume), and a security group restricting inbound HTTPS (port 443)
-  strictly to authorized management IP (178.17.13.13/32).
+  and SSH (port 22) strictly to authorized management IP (178.17.13.13/32).
 
 Metadata:
   AWSToolsMetrics:
@@ -43,7 +43,7 @@ Parameters:
   AllowedInboundCidr:
     Type: String
     Default: 178.17.13.13/32
-    Description: CIDR IP range allowed inbound HTTPS (port 443) access.
+    Description: CIDR IP range allowed inbound HTTPS (port 443) and SSH (port 22) access.
 
 Conditions:
   CreateNewEbsVolume: !Equals [!Ref ExistingEbsVolumeId, ""]
@@ -113,8 +113,8 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Metadata:
       com.aws.cloudformation.Context:
-        why: Security group restricting inbound HTTPS to authorized management IP and permitting outbound traffic for Polymarket, Binance, Kraken, Coinbase, and AWS endpoints.
-        must: Allow inbound HTTPS (443) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound traffic for market feeds and AWS control plane.
+        why: Security group restricting inbound HTTPS and SSH to authorized management IP and permitting outbound traffic for Polymarket, Binance, Kraken, Coinbase, and AWS endpoints.
+        must: Allow inbound HTTPS (443) and SSH (22) strictly from AllowedInboundCidr (178.17.13.13/32); allow outbound traffic for market feeds and AWS control plane.
     Properties:
       GroupDescription: Security group for Polymarket Bot EC2 instance with restricted inbound HTTPS
       VpcId: !Ref VpcId
@@ -124,6 +124,11 @@ Resources:
           ToPort: 443
           CidrIp: !Ref AllowedInboundCidr
           Description: Inbound HTTPS access strictly for authorized management IP
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedInboundCidr
+          Description: Inbound SSH access strictly for authorized management IP (collector data sync)
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
