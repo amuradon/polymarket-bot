@@ -437,9 +437,14 @@ public class BacktestResource {
     }
 
     private static BacktestJobStatusResponse toJobStatusResponse(BacktestJob job) {
-        Integer totalMarkets = (job.result() != null)
-                ? job.result().totalMarkets()
-                : (job.totalMarkets() > 0 ? job.totalMarkets() : null);
+        Integer totalMarkets;
+        if (job.result() != null) {
+            totalMarkets = job.result().totalMarkets();
+        } else if (job.totalMarkets() > 0) {
+            totalMarkets = job.totalMarkets();
+        } else {
+            totalMarkets = null;
+        }
         Integer tradeCount = (job.result() != null && job.result().trades() != null)
                 ? job.result().trades().size()
                 : null;

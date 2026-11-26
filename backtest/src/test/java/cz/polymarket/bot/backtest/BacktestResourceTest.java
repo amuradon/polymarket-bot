@@ -1,12 +1,18 @@
 package cz.polymarket.bot.backtest;
 
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
+import cz.polymarket.bot.backtest.data.BacktestJob;
+import cz.polymarket.bot.backtest.data.BacktestRunRequest;
+import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
+import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.backtest.service.StrategyParameterService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,6 +21,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -313,5 +320,49 @@ class BacktestResourceTest {
                 .when().get("/api/backtest/runs/" + runId)
                 .then()
                 .statusCode(404);
+    }
+
+    @Test
+    @DisplayName("listJobs and getJobStatus should return null totalMarkets without NPE when job is still QUEUED")
+    void shouldReturnNullTotalMarketsWithoutNpeForQueuedJob() {
+        BacktestJob queuedJob = new BacktestJob(new BacktestRunRequest(
+                null, "OraclePulseLockStrategy", "BTCUSDT", "2026-10-12", "2026-11-21",
+                false, 10000.0, 1.0, 100L, 50L, 50L, Map.of(), false, false
+        ));
+
+        BacktestJobManager mockJobManager = Mockito.mock(BacktestJobManager.class);
+        Mockito.when(mockJobManager.listJobs()).thenReturn(List.of(queuedJob));
+        Mockito.when(mockJobManager.getJob(queuedJob.jobId())).thenReturn(Optional.of(queuedJob));
+
+        BacktestResource directResource = new BacktestResource(
+                mockJobManager,
+                Mockito.mock(StrategyParameterService.class),
+                datasetService,
+                Mockito.mock(IndicatorCacheService.class),
+                "OraclePulseLockStrategy",
+                "2026-10-12",
+                10000.0,
+                1.0
+        );
+
+        List<BacktestResource.BacktestJobStatusResponse> jobs = directResource.listJobs();
+        assertThat(jobs).hasSize(1);
+        BacktestResource.BacktestJobStatusResponse listed = jobs.getFirst();
+        assertThat(listed.status()).isEqualTo("QUEUED");
+        assertThat(listed.totalMarkets()).isNull();
+        assertThat(listed.tradeCount()).isNull();
+        assertThat(listed.durationMs()).isNull();
+        assertThat(listed.metrics()).isNull();
+
+        try (var response = directResource.getJobStatus(queuedJob.jobId())) {
+            assertThat(response.getStatus()).isEqualTo(200);
+            BacktestResource.BacktestJobStatusResponse entity =
+                    (BacktestResource.BacktestJobStatusResponse) response.getEntity();
+            assertThat(entity.status()).isEqualTo("QUEUED");
+            assertThat(entity.totalMarkets()).isNull();
+            assertThat(entity.tradeCount()).isNull();
+            assertThat(entity.durationMs()).isNull();
+            assertThat(entity.metrics()).isNull();
+        }
     }
 }
