@@ -150,3 +150,8 @@ Execute the full multi-module test suite across all submodules:
 ```bash
 ./mvnw clean test
 ```
+
+```bash
+./mvnw package -pl backtest -am -DskipTests
+java -Xms2g -Xmx8g -XX:+UseG1GC -jar backtest/target/quarkus-app/quarkus-run.jar
+```
