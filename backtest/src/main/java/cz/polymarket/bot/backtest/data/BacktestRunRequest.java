@@ -2,57 +2,60 @@ package cz.polymarket.bot.backtest.data;
 
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
+import java.util.Map;
+
 /**
  * Request payload containing parameters for launching a backtest simulation run.
  *
- * @param strategyName optional name of the registered trading strategy to evaluate (defaults to OraclePulseLockStrategy)
+ * @param label optional human-readable label identifying the run in history and comparison views
+ * @param strategyName optional name of the registered trading strategy to evaluate (defaults to configured strategy)
  * @param symbol optional cryptocurrency symbol (defaults to BTCUSDT if omitted)
- * @param startDate optional start date filter in ISO format (yyyy-MM-dd, defaults to 2026-10-12)
- * @param endDate optional end date filter in ISO format (yyyy-MM-dd, defaults to current UTC date)
- * @param initialCapital optional initial starting capital in USD (defaults to 10000.0)
- * @param outputDirectory optional directory path where exported JSON reports are saved
- * @param latencyFactor optional multiplier for simulated order execution latency (defaults to 1.0)
+ * @param startDate optional start date filter in ISO format (yyyy-MM-dd)
+ * @param endDate optional end date filter in ISO format (yyyy-MM-dd)
+ * @param fullRange when true, evaluates the full available dataset date range for the requested symbol
+ * @param initialCapital optional initial starting capital in USD (defaults to configured initial capital)
+ * @param latencyFactor optional multiplier for simulated order execution latency (defaults to configured latency factor)
+ * @param binanceDelayMs optional simulated Binance one-way feed delay in ms
+ * @param krakenDelayMs optional simulated Kraken one-way feed delay in ms
+ * @param coinbaseDelayMs optional simulated Coinbase one-way feed delay in ms
+ * @param strategyParams optional strategy parameter overrides keyed by parameter name
  */
 @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
 public record BacktestRunRequest(
+        @Schema(description = "Optional custom label for the backtest run", examples = "OraclePulse v2 tight spread")
+        String label,
+
         @Schema(description = "Optional trading strategy name to execute (default OraclePulseLockStrategy)", examples = "OraclePulseLockStrategy")
         String strategyName,
 
         @Schema(description = "Optional symbol to evaluate (default BTCUSDT)", examples = "BTCUSDT")
         String symbol,
 
-        @Schema(description = "Optional start date filter (yyyy-MM-dd, default 2026-10-12)", examples = "2026-10-12")
+        @Schema(description = "Optional start date filter (yyyy-MM-dd)", examples = "2026-10-12")
         String startDate,
 
-        @Schema(description = "Optional end date filter (yyyy-MM-dd, default current UTC date)", examples = "2026-11-11")
+        @Schema(description = "Optional end date filter (yyyy-MM-dd)", examples = "2026-11-11")
         String endDate,
+
+        @Schema(description = "When true, runs across the entire available dataset date range for the symbol", examples = "false")
+        Boolean fullRange,
 
         @Schema(description = "Optional initial capital in USD", examples = "10000.0")
         Double initialCapital,
 
-        @Schema(description = "Optional directory to store exported JSON results", examples = "/data/polymarket/backtesting")
-        String outputDirectory,
-
         @Schema(description = "Optional latency scaling factor (default 1.0)", examples = "1.0")
-        Double latencyFactor
+        Double latencyFactor,
+
+        @Schema(description = "Optional Binance one-way feed delay in milliseconds", examples = "100")
+        Long binanceDelayMs,
+
+        @Schema(description = "Optional Kraken one-way feed delay in milliseconds", examples = "50")
+        Long krakenDelayMs,
+
+        @Schema(description = "Optional Coinbase one-way feed delay in milliseconds", examples = "50")
+        Long coinbaseDelayMs,
+
+        @Schema(description = "Optional map of strategy parameter overrides")
+        Map<String, Object> strategyParams
 ) {
-    /**
-     * Convenience constructor defaulting {@code latencyFactor} to {@code null} (uses engine default 1.0).
-     *
-     * @param strategyName mandatory name of the registered trading strategy
-     * @param symbol optional cryptocurrency symbol
-     * @param startDate optional start date filter (yyyy-MM-dd)
-     * @param endDate optional end date filter (yyyy-MM-dd)
-     * @param initialCapital optional initial capital in USD
-     * @param outputDirectory optional output directory path
-     */
-    public BacktestRunRequest(
-            String strategyName,
-            String symbol,
-            String startDate,
-            String endDate,
-            Double initialCapital,
-            String outputDirectory) {
-        this(strategyName, symbol, startDate, endDate, initialCapital, outputDirectory, null);
-    }
 }

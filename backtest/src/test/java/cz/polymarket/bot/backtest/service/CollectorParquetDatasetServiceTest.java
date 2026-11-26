@@ -3,6 +3,8 @@ package cz.polymarket.bot.backtest.service;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
+import cz.polymarket.bot.backtest.data.DatasetSymbolSummary;
+import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService.DateBounds;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
 import cz.polymarket.bot.strategy.TradeDirection;
@@ -163,6 +165,40 @@ class CollectorParquetDatasetServiceTest {
             assertThat(service.loadMarketMetadata(discovered.get(4), sharedDailyEvents)).isEmpty();
             // Missing twapOpen -> skipped
             assertThat(service.loadMarketMetadata(discovered.get(5), sharedDailyEvents)).isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("Should discover available symbol datasets and resolve min/max UTC date bounds")
+    void shouldDiscoverAvailableDatasetsAndDateBounds(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+            CollectorParquetDatasetService service = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
+
+            Path btcDir = service.getPolymarket15mDir("BTCUSDT");
+            Path ethDir = service.getPolymarket15mDir("ETHUSDT");
+            Files.createDirectories(btcDir);
+            Files.createDirectories(ethDir);
+
+            long day1 = 1785542400L; // 2026-08-01
+            long day2 = 1785628800L; // 2026-08-02
+            Files.writeString(btcDir.resolve("btc-updown-15m-" + day1 + ".parquet"), "dummy");
+            Files.writeString(btcDir.resolve("btc-updown-15m-" + day2 + ".parquet"), "dummy");
+            Files.writeString(ethDir.resolve("eth-updown-15m-" + day1 + ".parquet"), "dummy");
+
+            List<DatasetSymbolSummary> datasets = service.discoverAvailableDatasets();
+            assertThat(datasets).hasSize(2);
+            assertThat(datasets.get(0).symbol()).isEqualTo("BTCUSDT");
+            assertThat(datasets.get(0).minDate()).isEqualTo("2026-08-01");
+            assertThat(datasets.get(0).maxDate()).isEqualTo("2026-08-02");
+            assertThat(datasets.get(0).dayCount()).isEqualTo(2);
+            assertThat(datasets.get(0).marketCount()).isEqualTo(2);
+            assertThat(datasets.get(1).symbol()).isEqualTo("ETHUSDT");
+
+            Optional<DateBounds> btcBounds = service.resolveDateBounds("BTCUSDT");
+            assertThat(btcBounds).isPresent();
+            assertThat(btcBounds.get().minDate()).isEqualTo("2026-08-01");
+            assertThat(btcBounds.get().maxDate()).isEqualTo("2026-08-02");
+            assertThat(service.resolveDateBounds("SOLUSDT")).isEmpty();
         }
     }
 }

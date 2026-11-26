@@ -120,7 +120,7 @@ class ChronologicalEventStreamerTest {
                     datasetService, "BTCUSDT", dateStr);
             TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy);
+                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy, null);
 
             try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
                 streamer.loadCandleEvents(metadata, sharedDaily, dailyIndicators, Long.MAX_VALUE);
@@ -301,7 +301,7 @@ class ChronologicalEventStreamerTest {
 
             TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy);
+                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy, null);
 
             try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
                 streamer.loadCandleEvents(metadata, new BacktestEvent[0], dailyIndicators, Long.MAX_VALUE);
@@ -476,7 +476,7 @@ class ChronologicalEventStreamerTest {
 
             TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             List<DailyIndicatorTrack> dailyIndicators = indicatorCacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy);
+                    datasetService, "BTCUSDT", dateStr, spotTwapStrategy, null);
 
             try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
                 streamer.loadCandleEvents(metadata, new BacktestEvent[0], dailyIndicators, Long.MAX_VALUE);

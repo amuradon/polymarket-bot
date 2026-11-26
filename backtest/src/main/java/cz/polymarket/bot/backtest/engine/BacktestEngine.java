@@ -1,10 +1,18 @@
 package cz.polymarket.bot.backtest.engine;
 
+import cz.polymarket.bot.backtest.data.BacktestProgressListener;
+import cz.polymarket.bot.backtest.data.BacktestRunConfig;
+import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
-import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.data.ExchangeDelays;
+import cz.polymarket.bot.backtest.data.MarketEquityPoint;
 import cz.polymarket.bot.backtest.indicator.DailyIndicatorTrack;
 import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
+import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
+import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService.DateBounds;
+import cz.polymarket.bot.backtest.service.StrategyParameterService;
+import cz.polymarket.bot.backtest.service.StrategyParameterService.ConfiguredStrategy;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
@@ -16,7 +24,6 @@ import cz.polymarket.bot.domain.TradeRecord;
 import cz.polymarket.bot.indicators.FastSpotMicroListener;
 import cz.polymarket.bot.indicators.SpotTwapListener;
 import cz.polymarket.bot.strategy.ExecutionReport;
-import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.logging.Log;
@@ -25,16 +32,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-import java.io.IOException;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,7 +52,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * High-performance event-driven backtesting engine streaming historical market data directly from
  * converted collector Parquet archives ({@code /data/polymarket/collector}) and cached
- * indicator Parquet archives ({@code /data/polymarket/cache/<indicator>/<hash>}).
+ * indicator Parquet archives ({@code /data/polymarket/cache/<indicator>/<hash>}), and persisting
+ * completed simulation runs into DuckDB history ({@link BacktestHistoryRepository}).
  * <p>
  * Orders all events strictly by the local EC2 receipt timestamp ({@code ts}), simulates
  * time-varying execution latency derived from Polymarket CLOB server-vs-receipt timestamps
@@ -56,52 +66,46 @@ public class BacktestEngine {
 
     private final CollectorParquetDatasetService datasetService;
     private final IndicatorCacheService indicatorCacheService;
-    private final StrategyRegistry strategyRegistry;
+    private final StrategyParameterService strategyParameterService;
     private final PerformanceMetricsCalculator metricsCalculator;
-    private final BacktestJsonExporter jsonExporter;
+    private final BacktestHistoryRepository historyRepository;
     private final String defaultStrategy;
     private final String defaultStartDate;
-    private final String defaultOutputDir;
     private final double defaultCapital;
     private final double defaultLatencyFactor;
     private final int workerCount;
-    private final long binanceDelayMs;
-    private final long krakenDelayMs;
-    private final long coinbaseDelayMs;
+    private final ExchangeDelays defaultExchangeDelays;
     private final ExecutorService workerPool;
 
     /**
-     * Primary constructor with all dependencies, indicator cache service, worker pool sizing,
-     * and simulated exchange delays injected.
+     * Primary constructor injecting all backtest engine dependencies, strategy parameter resolver,
+     * DuckDB history repository, worker pool sizing, and default exchange feed delays.
      *
      * @param datasetService collector Parquet dataset discovery and path resolution service
      * @param indicatorCacheService deterministic indicator Parquet cache and single-pass computation service
-     * @param strategyRegistry registry resolving requested strategies
+     * @param strategyParameterService service resolving and instantiating configured strategies
      * @param metricsCalculator performance metrics calculation service
-     * @param jsonExporter exporter serializing backtest results to disk
+     * @param historyRepository persistent DuckDB history repository
      * @param defaultStrategy default trading strategy name configured in application properties
      * @param defaultStartDate default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
-     * @param defaultOutputDir default destination directory for output JSON artifacts
      * @param defaultCapital default initial trading balance in USD
      * @param defaultLatencyFactor default multiplier for simulated order execution latency (default {@code 1.0})
      * @param configuredWorkers number of parallel simulation workers (default {@code 4} physical cores)
-     * @param binanceDelayMs simulated one-way feed delay for Binance in milliseconds (default {@code 100})
-     * @param krakenDelayMs simulated one-way feed delay for Kraken in milliseconds (default {@code 50})
-     * @param coinbaseDelayMs simulated one-way feed delay for Coinbase in milliseconds (default {@code 50})
+     * @param binanceDelayMs default simulated one-way feed delay for Binance in milliseconds (default {@code 100})
+     * @param krakenDelayMs default simulated one-way feed delay for Kraken in milliseconds (default {@code 50})
+     * @param coinbaseDelayMs default simulated one-way feed delay for Coinbase in milliseconds (default {@code 50})
      */
     @Inject
     public BacktestEngine(
             CollectorParquetDatasetService datasetService,
             IndicatorCacheService indicatorCacheService,
-            StrategyRegistry strategyRegistry,
+            StrategyParameterService strategyParameterService,
             PerformanceMetricsCalculator metricsCalculator,
-            BacktestJsonExporter jsonExporter,
+            BacktestHistoryRepository historyRepository,
             @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "OraclePulseLockStrategy")
             String defaultStrategy,
             @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
             String defaultStartDate,
-            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "/data/polymarket/backtesting")
-            String defaultOutputDir,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultCapital,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
@@ -122,48 +126,33 @@ public class BacktestEngine {
             Log.fatal("Fatal initialization error in BacktestEngine: indicatorCacheService cannot be null");
             throw new IllegalArgumentException("indicatorCacheService cannot be null");
         }
-        if (strategyRegistry == null) {
-            Log.fatal("Fatal initialization error in BacktestEngine: strategyRegistry cannot be null");
-            throw new IllegalArgumentException("strategyRegistry cannot be null");
+        if (strategyParameterService == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: strategyParameterService cannot be null");
+            throw new IllegalArgumentException("strategyParameterService cannot be null");
         }
         if (metricsCalculator == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: metricsCalculator cannot be null");
             throw new IllegalArgumentException("metricsCalculator cannot be null");
         }
-        if (jsonExporter == null) {
-            Log.fatal("Fatal initialization error in BacktestEngine: jsonExporter cannot be null");
-            throw new IllegalArgumentException("jsonExporter cannot be null");
+        if (historyRepository == null) {
+            Log.fatal("Fatal initialization error in BacktestEngine: historyRepository cannot be null");
+            throw new IllegalArgumentException("historyRepository cannot be null");
         }
-        if (binanceDelayMs < 0L) {
-            Log.fatal("Fatal initialization error in BacktestEngine: binanceDelayMs must be non-negative");
-            throw new IllegalArgumentException("binanceDelayMs must be non-negative");
-        }
-        if (krakenDelayMs < 0L) {
-            Log.fatal("Fatal initialization error in BacktestEngine: krakenDelayMs must be non-negative");
-            throw new IllegalArgumentException("krakenDelayMs must be non-negative");
-        }
-        if (coinbaseDelayMs < 0L) {
-            Log.fatal("Fatal initialization error in BacktestEngine: coinbaseDelayMs must be non-negative");
-            throw new IllegalArgumentException("coinbaseDelayMs must be non-negative");
-        }
+        this.defaultExchangeDelays = new ExchangeDelays(binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
         this.datasetService = datasetService;
         this.indicatorCacheService = indicatorCacheService;
-        this.strategyRegistry = strategyRegistry;
+        this.strategyParameterService = strategyParameterService;
         this.metricsCalculator = metricsCalculator;
-        this.jsonExporter = jsonExporter;
+        this.historyRepository = historyRepository;
         this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
                 ? defaultStrategy.trim()
                 : "OraclePulseLockStrategy";
         this.defaultStartDate = (defaultStartDate != null && !defaultStartDate.isBlank())
                 ? defaultStartDate.trim()
                 : "2026-10-12";
-        this.defaultOutputDir = defaultOutputDir;
         this.defaultCapital = defaultCapital;
         this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
         this.workerCount = configuredWorkers > 0 ? configuredWorkers : 4;
-        this.binanceDelayMs = binanceDelayMs;
-        this.krakenDelayMs = krakenDelayMs;
-        this.coinbaseDelayMs = coinbaseDelayMs;
 
         AtomicInteger threadSeq = new AtomicInteger(0);
         this.workerPool = Executors.newFixedThreadPool(this.workerCount, runnable -> {
@@ -182,86 +171,114 @@ public class BacktestEngine {
     }
 
     /**
-     * Executes an event-driven backtest simulation for a specified strategy over collector Parquet archives.
+     * Executes an event-driven backtest simulation using the provided run request, reporting live
+     * progress and honoring cooperative cancellation via {@code progressListener}, and persists
+     * the completed run to DuckDB history.
      *
-     * @param strategyName registered name of trading strategy (defaults to configured strategy if null/blank)
-     * @param symbol trading asset pair (e.g. {@code "BTCUSDT"})
-     * @param startDate optional start date string ({@code yyyy-MM-dd}, defaults to configured {@code polymarket.backtest.from})
-     * @param endDate optional end date string ({@code yyyy-MM-dd}, defaults to current UTC date)
-     * @param initialCapital optional initial account balance in USD (defaults to configured {@code polymarket.backtest.initial-capital})
-     * @param outputDirectory optional directory path to store output JSON (defaults to configured {@code polymarket.backtest.output-dir})
-     * @param latencyFactor optional multiplier for simulated order execution latency (defaults to configured {@code polymarket.backtest.latency-factor})
-     * @return BacktestResult containing summary metrics, trade records, and exported file path
+     * @param runId optional pre-assigned persistent run ID (random UUID generated when null or blank)
+     * @param request validated or raw {@link BacktestRunRequest} specifying strategy, overrides, dates, and engine settings
+     * @param progressListener optional progress &amp; cancellation listener (defaults to {@link BacktestProgressListener#NOOP})
+     * @return completed {@link BacktestResult}
      */
     public BacktestResult runBacktest(
-            String strategyName,
-            String symbol,
-            String startDate,
-            String endDate,
-            Double initialCapital,
-            String outputDirectory,
-            Double latencyFactor) {
+            String runId,
+            BacktestRunRequest request,
+            BacktestProgressListener progressListener) {
+        if (request == null) {
+            Log.error("Cannot start backtest: request cannot be null");
+            throw new IllegalArgumentException("request cannot be null");
+        }
+        BacktestProgressListener listener = progressListener != null ? progressListener : BacktestProgressListener.NOOP;
+        long startWallNs = System.nanoTime();
+        String resolvedRunId = (runId != null && !runId.isBlank()) ? runId.trim() : UUID.randomUUID().toString();
 
-        String resolvedStrategyName = (strategyName != null && !strategyName.isBlank())
-                ? strategyName.trim()
+        String resolvedStrategyName = (request.strategyName() != null && !request.strategyName().isBlank())
+                ? request.strategyName().trim()
                 : defaultStrategy;
 
-        TradingStrategy strategy;
+        ConfiguredStrategy configuredStrategy;
         try {
-            strategy = strategyRegistry.getStrategy(resolvedStrategyName);
+            configuredStrategy = strategyParameterService.instantiateStrategy(resolvedStrategyName, request.strategyParams());
         } catch (IllegalArgumentException e) {
             Log.errorf("Cannot start backtest: %s", e.getMessage());
             throw e;
         }
+        TradingStrategy strategy = configuredStrategy.strategy();
         strategy.reset();
 
-        String sym = (symbol != null && !symbol.isBlank()) ? symbol.toUpperCase() : "BTCUSDT";
-        double capital = (initialCapital != null) ? initialCapital : defaultCapital;
-        if (Double.isNaN(capital) || capital <= 0.0) {
+        String sym = (request.symbol() != null && !request.symbol().isBlank())
+                ? request.symbol().trim().toUpperCase(Locale.ROOT)
+                : "BTCUSDT";
+
+        double capital = (request.initialCapital() != null) ? request.initialCapital() : defaultCapital;
+        if (Double.isNaN(capital) || Double.isInfinite(capital) || capital <= 0.0) {
             Log.errorf("Cannot start backtest: initialCapital must be greater than 0 (received %s)", capital);
             throw new IllegalArgumentException("initialCapital must be greater than 0");
         }
 
-        String resolvedStartDate = (startDate != null && !startDate.isBlank())
-                ? startDate.trim()
-                : defaultStartDate;
-        String resolvedEndDate = (endDate != null && !endDate.isBlank())
-                ? endDate.trim()
-                : LocalDate.now(ZoneOffset.UTC).toString();
-
-        LocalDate parsedStart;
-        try {
-            parsedStart = LocalDate.parse(resolvedStartDate);
-        } catch (DateTimeParseException e) {
-            Log.errorf("Cannot start backtest: invalid startDate format '%s'", resolvedStartDate);
-            throw new IllegalArgumentException("Invalid startDate format: " + resolvedStartDate, e);
-        }
-
-        LocalDate parsedEnd;
-        try {
-            parsedEnd = LocalDate.parse(resolvedEndDate);
-        } catch (DateTimeParseException e) {
-            Log.errorf("Cannot start backtest: invalid endDate format '%s'", resolvedEndDate);
-            throw new IllegalArgumentException("Invalid endDate format: " + resolvedEndDate, e);
-        }
-
-        if (parsedStart.isAfter(parsedEnd)) {
-            Log.errorf("Cannot start backtest: startDate %s must not be after endDate %s",
-                    resolvedStartDate, resolvedEndDate);
-            throw new IllegalArgumentException("startDate must not be after endDate");
-        }
-
-        String resolvedOutputDir = (outputDirectory != null && !outputDirectory.isBlank()) ? outputDirectory : defaultOutputDir;
-        double resolvedLatencyFactor = (latencyFactor != null) ? latencyFactor : defaultLatencyFactor;
-        if (Double.isNaN(resolvedLatencyFactor) || resolvedLatencyFactor < 0.0) {
+        double resolvedLatencyFactor = (request.latencyFactor() != null) ? request.latencyFactor() : defaultLatencyFactor;
+        if (Double.isNaN(resolvedLatencyFactor) || Double.isInfinite(resolvedLatencyFactor) || resolvedLatencyFactor < 0.0) {
             Log.errorf("Cannot start backtest: latencyFactor must be non-negative (received %s)", resolvedLatencyFactor);
             throw new IllegalArgumentException("latencyFactor must be non-negative");
         }
 
+        ExchangeDelays effectiveDelays = new ExchangeDelays(
+                request.binanceDelayMs() != null ? request.binanceDelayMs() : defaultExchangeDelays.binanceDelayMs(),
+                request.krakenDelayMs() != null ? request.krakenDelayMs() : defaultExchangeDelays.krakenDelayMs(),
+                request.coinbaseDelayMs() != null ? request.coinbaseDelayMs() : defaultExchangeDelays.coinbaseDelayMs()
+        );
+
+        String resolvedStartDate;
+        String resolvedEndDate;
+        LocalDate parsedStart;
+        LocalDate parsedEnd;
+        if (Boolean.TRUE.equals(request.fullRange())) {
+            DateBounds bounds = datasetService.resolveDateBounds(sym).orElse(null);
+            if (bounds == null) {
+                String msg = "No market rows available for backtest for symbol " + sym;
+                Log.error(msg);
+                throw new IllegalArgumentException(msg);
+            }
+            resolvedStartDate = bounds.minDate();
+            resolvedEndDate = bounds.maxDate();
+            parsedStart = LocalDate.parse(resolvedStartDate);
+            parsedEnd = LocalDate.parse(resolvedEndDate);
+        } else {
+            resolvedStartDate = (request.startDate() != null && !request.startDate().isBlank())
+                    ? request.startDate().trim()
+                    : defaultStartDate;
+            resolvedEndDate = (request.endDate() != null && !request.endDate().isBlank())
+                    ? request.endDate().trim()
+                    : LocalDate.now(ZoneOffset.UTC).toString();
+
+            try {
+                parsedStart = LocalDate.parse(resolvedStartDate);
+            } catch (DateTimeParseException e) {
+                Log.errorf("Cannot start backtest: invalid startDate format '%s'", resolvedStartDate);
+                throw new IllegalArgumentException("Invalid startDate format: " + resolvedStartDate, e);
+            }
+            try {
+                parsedEnd = LocalDate.parse(resolvedEndDate);
+            } catch (DateTimeParseException e) {
+                Log.errorf("Cannot start backtest: invalid endDate format '%s'", resolvedEndDate);
+                throw new IllegalArgumentException("Invalid endDate format: " + resolvedEndDate, e);
+            }
+            if (parsedStart.isAfter(parsedEnd)) {
+                Log.errorf("Cannot start backtest: startDate %s must not be after endDate %s",
+                        resolvedStartDate, resolvedEndDate);
+                throw new IllegalArgumentException("startDate must not be after endDate");
+            }
+        }
+
+        String resolvedLabel = (request.label() != null && !request.label().isBlank())
+                ? request.label().trim()
+                : strategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")";
+
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting backtest: strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
-                    strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
-                    capital, resolvedLatencyFactor, workerCount, binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
+            Log.infof("Starting backtest: runId=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
+                    resolvedRunId, resolvedLabel, strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
+                    capital, resolvedLatencyFactor, workerCount,
+                    effectiveDelays.binanceDelayMs(), effectiveDelays.krakenDelayMs(), effectiveDelays.coinbaseDelayMs());
         }
 
         List<CollectorMarketMetadata> markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
@@ -278,18 +295,28 @@ public class BacktestEngine {
             marketsByDay.computeIfAbsent(dayKey, k -> new ArrayList<>()).add(market);
         }
 
+        listener.onDiscovered(marketsByDay.size(), markets.size());
+
         TradingStrategy probeInstance = strategy.createInstance();
         boolean parallelCapable = (probeInstance != null && probeInstance != strategy);
 
         List<TradeRecord> trades = new ArrayList<>();
+        List<MarketEquityPoint> marketPoints = new ArrayList<>(markets.size());
         double currentBalance = capital;
         double brierSum = 0.0;
         int evaluatedCount = 0;
+        int completedDays = 0;
+        int completedMarkets = 0;
 
         for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
+            if (listener.isCancelled()) {
+                throw new BacktestCancelledException("Backtest run " + resolvedRunId + " cancelled");
+            }
             String dateStr = dayEntry.getKey();
             List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
             int dayMarketCount = dayMarkets.size();
+
+            listener.onDayStarted(dateStr);
 
             if (Log.isInfoEnabled()) {
                 Log.infof("Processing UTC day %s (%d markets) for symbol %s",
@@ -303,7 +330,8 @@ public class BacktestEngine {
 
             // 2. Load cached daily indicator tracks consumed by this strategy (computing missing ones in a single raw pass)
             List<DailyIndicatorTrack> dailyIndicatorTracks = !dateStr.isBlank()
-                    ? indicatorCacheService.loadOrComputeDailyIndicators(datasetService, sym, dateStr, strategy)
+                    ? indicatorCacheService.loadOrComputeDailyIndicators(
+                            datasetService, sym, dateStr, strategy, effectiveDelays)
                     : List.of();
 
             // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
@@ -319,7 +347,8 @@ public class BacktestEngine {
                         dayOutcomes,
                         strategy,
                         parallelCapable,
-                        resolvedLatencyFactor
+                        resolvedLatencyFactor,
+                        listener
                 );
             } else {
                 AtomicInteger cursor = new AtomicInteger(0);
@@ -333,21 +362,38 @@ public class BacktestEngine {
                             dayOutcomes,
                             strategy,
                             true,
-                            resolvedLatencyFactor
+                            resolvedLatencyFactor,
+                            listener
                     ), workerPool);
                 }
                 CompletableFuture.allOf(workers).join();
             }
 
-            // 4. Deterministic chronological reduction of trades, account balance, and Brier score
+            if (listener.isCancelled()) {
+                throw new BacktestCancelledException("Backtest run " + resolvedRunId + " cancelled");
+            }
+
+            // 4. Deterministic chronological reduction of trades, per-market equity points, balance, and Brier score
             boolean traceEnabled = Log.isTraceEnabled();
             for (int i = 0; i < dayMarketCount; i++) {
+                CollectorMarketMetadata discoveredMarket = dayMarkets.get(i);
                 MarketSimulationOutcome outcome = dayOutcomes[i];
                 if (outcome == null) {
                     continue;
                 }
+                double marketNetPnl = 0.0;
+                double marketFees = 0.0;
+                int marketTradesCount = 0;
+                int marketWinningTrades = 0;
+
                 for (TradeRecord rawTrade : outcome.rawTrades()) {
                     currentBalance += rawTrade.netPnl();
+                    marketNetPnl += rawTrade.netPnl();
+                    marketFees += rawTrade.feeUsd();
+                    marketTradesCount++;
+                    if (rawTrade.isWin()) {
+                        marketWinningTrades++;
+                    }
                     TradeRecord finalizedTrade = new TradeRecord(
                             rawTrade.entryTimeUtc(),
                             rawTrade.intervalStartSec(),
@@ -386,36 +432,65 @@ public class BacktestEngine {
                 if (outcome.evaluated()) {
                     brierSum += outcome.brierDiffSq();
                     evaluatedCount++;
+                    marketPoints.add(new MarketEquityPoint(
+                            discoveredMarket.tStart(),
+                            dateStr,
+                            marketTradesCount,
+                            marketWinningTrades,
+                            marketNetPnl,
+                            marketFees,
+                            outcome.brierDiffSq(),
+                            true,
+                            currentBalance
+                    ));
                 }
             }
+
+            completedDays++;
+            completedMarkets += dayMarketCount;
+            listener.onDayCompleted(completedDays, completedMarkets, dateStr);
         }
 
         double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
-        PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier);
+        double durationDays = Math.max(1.0, ChronoUnit.DAYS.between(parsedStart, parsedEnd) + 1.0);
+        PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier, durationDays);
+        long durationMs = Math.max(1L, (System.nanoTime() - startWallNs) / 1_000_000L);
 
-        BacktestResult rawResult = new BacktestResult(
+        BacktestRunConfig runConfig = new BacktestRunConfig(
+                strategy.getName(),
+                sym,
+                resolvedStartDate,
+                resolvedEndDate,
+                capital,
+                resolvedLatencyFactor,
+                effectiveDelays.binanceDelayMs(),
+                effectiveDelays.krakenDelayMs(),
+                effectiveDelays.coinbaseDelayMs(),
+                configuredStrategy.effectiveParams(),
+                configuredStrategy.appliedOverrides()
+        );
+
+        BacktestResult result = new BacktestResult(
+                resolvedRunId,
+                resolvedLabel,
                 strategy.getName(),
                 sym,
                 Instant.now(),
+                durationMs,
                 markets.size(),
+                runConfig,
                 metrics,
-                trades,
-                null
+                Collections.unmodifiableList(marketPoints),
+                Collections.unmodifiableList(trades)
         );
 
-        try {
-            Path exportedPath = jsonExporter.export(rawResult, resolvedOutputDir);
-            String absPath = exportedPath.toAbsolutePath().toString();
-            if (Log.isInfoEnabled()) {
-                Log.infof("Completed backtest for strategy=%s on %s: totalMarkets=%d, evaluatedMarkets=%d, totalTrades=%d, netPnl=%.2f, winRate=%.2f%%, report=%s",
-                        strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
-                        metrics.totalNetPnl(), metrics.winRatePct(), absPath);
-            }
-            return rawResult.withJsonFilePath(absPath);
-        } catch (IOException e) {
-            Log.errorf(e, "Failed to export backtest results to JSON in %s: %s", resolvedOutputDir, e.getMessage());
-            throw new RuntimeException("Failed to export backtest results to JSON: " + e.getMessage(), e);
+        historyRepository.saveRun(result);
+        if (Log.isInfoEnabled()) {
+            Log.infof("Completed backtest runId=%s for strategy=%s on %s: totalMarkets=%d, evaluatedMarkets=%d, totalTrades=%d, netPnl=%.2f, winRate=%.2f%%, durationMs=%d",
+                    resolvedRunId, strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
+                    metrics.totalNetPnl(), metrics.winRatePct(), durationMs);
         }
+        return result;
     }
 
     private void executeWorkerLoop(
@@ -426,7 +501,8 @@ public class BacktestEngine {
             MarketSimulationOutcome[] dayOutcomes,
             TradingStrategy templateStrategy,
             boolean createWorkerStrategyCopy,
-            double resolvedLatencyFactor) {
+            double resolvedLatencyFactor,
+            BacktestProgressListener listener) {
 
         int total = dayMarkets.size();
         PolymarketOrderBook orderBook = new PolymarketOrderBook();
@@ -443,7 +519,7 @@ public class BacktestEngine {
             activeStrategy.init(context);
             long clobLookbackMs = activeStrategy.getRequiredClobLookbackMs();
 
-            while (true) {
+            while (!listener.isCancelled()) {
                 int idx = cursor.getAndIncrement();
                 if (idx >= total) {
                     break;
@@ -513,15 +589,15 @@ public class BacktestEngine {
                         }
                         case BacktestEvent.CalculatedFastSpotMicroEvent e -> {
                             context.setLastReferencePrice(e.fastDirectUsd());
-                            if (activeStrategy instanceof FastSpotMicroListener listener) {
-                                listener.onFastSpotMicro(
+                            if (activeStrategy instanceof FastSpotMicroListener listenerStrategy) {
+                                listenerStrategy.onFastSpotMicro(
                                         evTs, e.symbol(), e.fastDirectUsd(), e.signedOfi1s(), e.syncMove500Usd());
                             }
                         }
                         case BacktestEvent.CalculatedSpotTwapEvent e -> {
                             context.setLastReferencePrice(e.spotPrice());
-                            if (activeStrategy instanceof SpotTwapListener listener) {
-                                listener.onSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
+                            if (activeStrategy instanceof SpotTwapListener listenerStrategy) {
+                                listenerStrategy.onSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
                             }
                         }
                         case BacktestEvent.PolymarketCryptoPriceEvent e -> {

@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest.indicator;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import cz.polymarket.bot.backtest.data.ExchangeDelays;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
@@ -65,12 +66,13 @@ class IndicatorCacheServiceTest {
         IndicatorCacheService diffCoinbaseDelayService = new IndicatorCacheService(
                 tempDir, mapper, List.of(defaultInd1), 100L, 50L, 75L);
 
-        String hash1 = service1.computeIndicatorHash(defaultInd1);
-        String hash2 = service2.computeIndicatorHash(defaultInd2);
-        String customParamHash = service1.computeIndicatorHash(customInd);
-        String diffBinanceHash = diffBinanceDelayService.computeIndicatorHash(defaultInd1);
-        String diffKrakenHash = diffKrakenDelayService.computeIndicatorHash(defaultInd1);
-        String diffCoinbaseHash = diffCoinbaseDelayService.computeIndicatorHash(defaultInd1);
+        String hash1 = service1.computeIndicatorHash(defaultInd1, null);
+        String hash2 = service2.computeIndicatorHash(defaultInd2, null);
+        String customParamHash = service1.computeIndicatorHash(customInd, null);
+        String diffBinanceHash = diffBinanceDelayService.computeIndicatorHash(defaultInd1, null);
+        String diffKrakenHash = diffKrakenDelayService.computeIndicatorHash(defaultInd1, null);
+        String diffCoinbaseHash = diffCoinbaseDelayService.computeIndicatorHash(defaultInd1, null);
+        String perRunOverrideHash = service1.computeIndicatorHash(defaultInd1, new ExchangeDelays(120L, 50L, 50L));
 
         assertThat(hash1)
                 .hasSize(16)
@@ -80,6 +82,7 @@ class IndicatorCacheServiceTest {
         assertThat(diffBinanceHash).isNotEqualTo(hash1);
         assertThat(diffKrakenHash).isNotEqualTo(hash1);
         assertThat(diffCoinbaseHash).isNotEqualTo(hash1);
+        assertThat(perRunOverrideHash).isEqualTo(diffBinanceHash);
     }
 
     @Test
@@ -102,7 +105,7 @@ class IndicatorCacheServiceTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, mapper, List.of(indicator), 100L, 50L, 50L);
 
-            String expectedHash = cacheService.computeIndicatorHash(indicator);
+            String expectedHash = cacheService.computeIndicatorHash(indicator, null);
             Path expectedHashDir = cacheDir.resolve("SpotTwapIndicator").resolve(expectedHash);
             Path expectedConfigJson = expectedHashDir.resolve("config.json");
             Path expectedParquetFile = expectedHashDir.resolve("btcusd-" + DATE_STR + ".parquet");
@@ -113,7 +116,7 @@ class IndicatorCacheServiceTest {
 
             // 1. First run (Cache Miss): streams raw exchange data and creates config.json + daily Parquet file
             List<DailyIndicatorTrack> firstTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy, null);
 
             assertThat(Files.isRegularFile(expectedConfigJson)).isTrue();
             assertThat(Files.isRegularFile(expectedParquetFile)).isTrue();
@@ -142,7 +145,7 @@ class IndicatorCacheServiceTest {
 
             // 3. Second run (Cache Hit): loads directly from cached Parquet file
             List<DailyIndicatorTrack> secondTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy, null);
 
             assertThat(secondTracks).hasSize(1);
             DailyIndicatorTrack track2 = secondTracks.getFirst();
@@ -195,27 +198,27 @@ class IndicatorCacheServiceTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, mapper, List.of(indicator1, indicator2), 100L, 50L, 50L);
 
-            Path ind1Parquet = cacheService.resolveDailyCacheFile(indicator1, "BTCUSDT", DATE_STR);
-            Path ind2Parquet = cacheService.resolveDailyCacheFile(indicator2, "BTCUSDT", DATE_STR);
+            Path ind1Parquet = cacheService.resolveDailyCacheFile(indicator1, "BTCUSDT", DATE_STR, null);
+            Path ind2Parquet = cacheService.resolveDailyCacheFile(indicator2, "BTCUSDT", DATE_STR, null);
 
             TradingStrategy spotTwapStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
 
             // 1. Both indicators missing -> single pass computes both
             List<DailyIndicatorTrack> initialTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy, null);
 
             assertThat(initialTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1);
             assertThat(ind2ComputeSessions.get()).isEqualTo(1);
             assertThat(Files.isRegularFile(ind1Parquet)).isTrue();
             assertThat(Files.isRegularFile(ind2Parquet)).isTrue();
-            assertThat(Files.isRegularFile(cacheService.resolveConfigJsonFile(indicator1))).isTrue();
-            assertThat(Files.isRegularFile(cacheService.resolveConfigJsonFile(indicator2))).isTrue();
+            assertThat(Files.isRegularFile(cacheService.resolveConfigJsonFile(indicator1, null))).isTrue();
+            assertThat(Files.isRegularFile(cacheService.resolveConfigJsonFile(indicator2, null))).isTrue();
 
             // 2. Delete only indicator2's cache file -> indicator1 must be loaded from cache (0 new sessions), indicator2 recomputed
             Files.delete(ind2Parquet);
             List<DailyIndicatorTrack> partialHitTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy, null);
 
             assertThat(partialHitTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1); // NOT recomputed!
@@ -229,7 +232,7 @@ class IndicatorCacheServiceTest {
             Files.deleteIfExists(krakenUsdtFile);
 
             List<DailyIndicatorTrack> fullHitTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, spotTwapStrategy, null);
 
             assertThat(fullHitTracks).hasSize(2);
             assertThat(ind1ComputeSessions.get()).isEqualTo(1);
@@ -284,7 +287,7 @@ class IndicatorCacheServiceTest {
 
             TradingStrategy fastSpotStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
             List<DailyIndicatorTrack> missTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy, null);
             assertThat(missTracks).hasSize(1);
             DailyIndicatorTrack t1 = missTracks.getFirst();
             assertThat(t1.size()).isEqualTo(3);
@@ -302,7 +305,7 @@ class IndicatorCacheServiceTest {
             Files.deleteIfExists(krakenUsdtFile);
 
             List<DailyIndicatorTrack> hitTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, fastSpotStrategy, null);
             DailyIndicatorTrack t2 = hitTracks.getFirst();
             assertThat(t2.size()).isEqualTo(3);
             BacktestEvent.CalculatedFastSpotMicroEvent cachedLast =
@@ -331,19 +334,19 @@ class IndicatorCacheServiceTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, new ObjectMapper(), List.of(spotTwapIndicator, fastSpotIndicator), 100L, 50L, 50L);
 
-            Path spotTwapCacheFile = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", DATE_STR);
-            Path fastSpotCacheFile = cacheService.resolveDailyCacheFile(fastSpotIndicator, "BTCUSDT", DATE_STR);
+            Path spotTwapCacheFile = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", DATE_STR, null);
+            Path fastSpotCacheFile = cacheService.resolveDailyCacheFile(fastSpotIndicator, "BTCUSDT", DATE_STR, null);
 
             // 1. Strategy consuming neither indicator -> returns empty and creates no cache files
             TradingStrategy noIndicatorStrategy = new UtterParameciumStrategyV0(UtterParameciumStrategyV0.Config.defaultConfig());
-            assertThat(cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR, noIndicatorStrategy)).isEmpty();
+            assertThat(cacheService.loadOrComputeDailyIndicators(datasetService, "BTCUSDT", DATE_STR, noIndicatorStrategy, null)).isEmpty();
             assertThat(Files.exists(spotTwapCacheFile)).isFalse();
             assertThat(Files.exists(fastSpotCacheFile)).isFalse();
 
             // 2. OraclePulseLockStrategy -> computes & caches ONLY FastSpotMicroIndicator
             TradingStrategy oracleStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
             List<DailyIndicatorTrack> oracleTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, oracleStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, oracleStrategy, null);
             assertThat(oracleTracks).hasSize(1);
             assertThat(oracleTracks.getFirst().indicatorName()).isEqualTo(fastSpotIndicator.getName());
             assertThat(Files.isRegularFile(fastSpotCacheFile)).isTrue();
@@ -352,7 +355,7 @@ class IndicatorCacheServiceTest {
             // 3. UtterParameciumStrategy -> computes & caches ONLY SpotTwapIndicator
             TradingStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             List<DailyIndicatorTrack> utterTracks = cacheService.loadOrComputeDailyIndicators(
-                    datasetService, "BTCUSDT", DATE_STR, utterStrategy);
+                    datasetService, "BTCUSDT", DATE_STR, utterStrategy, null);
             assertThat(utterTracks).hasSize(1);
             assertThat(utterTracks.getFirst().indicatorName()).isEqualTo(spotTwapIndicator.getName());
             assertThat(Files.isRegularFile(spotTwapCacheFile)).isTrue();

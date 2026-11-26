@@ -1,6 +1,7 @@
 package cz.polymarket.bot.backtest.service;
 
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
+import cz.polymarket.bot.backtest.data.DatasetSymbolSummary;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.strategy.TradeDirection;
 import io.quarkus.logging.Log;
@@ -21,9 +22,11 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -307,6 +310,124 @@ public class CollectorParquetDatasetService {
             Log.infof("Discovered %d markets for symbol=%s", result.size(), symbol);
         }
         return result;
+    }
+
+    /**
+     * Scans {@code <collectorDir>/polymarket/*-updown-15m} directories to discover all available symbols
+     * together with their earliest/latest UTC dates, market counts, and day counts.
+     *
+     * @return list of discovered {@link DatasetSymbolSummary} sorted with BTCUSDT first, then alphabetically
+     */
+    public List<DatasetSymbolSummary> discoverAvailableDatasets() {
+        Path polymarketDir = collectorRootDir.resolve("polymarket");
+        if (!Files.isDirectory(polymarketDir)) {
+            return List.of();
+        }
+
+        List<DatasetSymbolSummary> summaries = new ArrayList<>();
+        try (Stream<Path> dirs = Files.list(polymarketDir)) {
+            dirs.filter(Files::isDirectory).forEach(dir -> {
+                String dirName = dir.getFileName().toString();
+                if (!dirName.endsWith("-updown-15m") || dirName.length() <= "-updown-15m".length()) {
+                    return;
+                }
+                String assetLower = dirName.substring(0, dirName.length() - "-updown-15m".length());
+                String baseAsset = assetLower.toUpperCase(Locale.ROOT);
+                String symbol = baseAsset + "USDT";
+                resolveDateBounds(symbol).ifPresent(bounds -> summaries.add(new DatasetSymbolSummary(
+                        symbol,
+                        baseAsset,
+                        bounds.minDate(),
+                        bounds.maxDate(),
+                        bounds.marketCount(),
+                        bounds.dayCount()
+                )));
+            });
+        } catch (IOException e) {
+            Log.warnf("Failed scanning available datasets in %s: %s", polymarketDir, e.getMessage());
+            return List.of();
+        }
+
+        summaries.sort((a, b) -> {
+            if ("BTCUSDT".equals(a.symbol()) && !"BTCUSDT".equals(b.symbol())) {
+                return -1;
+            }
+            if (!"BTCUSDT".equals(a.symbol()) && "BTCUSDT".equals(b.symbol())) {
+                return 1;
+            }
+            return a.symbol().compareTo(b.symbol());
+        });
+        return List.copyOf(summaries);
+    }
+
+    /**
+     * Resolves the inclusive earliest and latest UTC dates available for the specified symbol
+     * purely from {@code <asset>-updown-15m-<epoch>.parquet} filenames.
+     *
+     * @param symbol trading symbol (e.g. {@code "BTCUSDT"})
+     * @return optional {@link DateBounds}, or empty if no market files exist
+     */
+    public Optional<DateBounds> resolveDateBounds(String symbol) {
+        Path marketDir = getPolymarket15mDir(symbol);
+        if (!Files.isDirectory(marketDir)) {
+            return Optional.empty();
+        }
+
+        String assetLower = extractBaseAsset(symbol).toLowerCase(Locale.ROOT);
+        String filePrefix = assetLower + "-updown-15m-";
+        String fileSuffix = ".parquet";
+
+        long minEpoch = Long.MAX_VALUE;
+        long maxEpoch = Long.MIN_VALUE;
+        int count = 0;
+        Set<String> days = new HashSet<>();
+
+        try (Stream<Path> stream = Files.list(marketDir)) {
+            Iterable<Path> files = stream::iterator;
+            for (Path path : files) {
+                if (!Files.isRegularFile(path)) {
+                    continue;
+                }
+                String name = path.getFileName().toString();
+                if (name.startsWith(filePrefix) && name.endsWith(fileSuffix)) {
+                    String epochPart = name.substring(filePrefix.length(), name.length() - fileSuffix.length());
+                    try {
+                        long tStart = Long.parseLong(epochPart);
+                        if (tStart < minEpoch) {
+                            minEpoch = tStart;
+                        }
+                        if (tStart > maxEpoch) {
+                            maxEpoch = tStart;
+                        }
+                        days.add(DATE_FORMATTER.format(Instant.ofEpochSecond(tStart)));
+                        count++;
+                    } catch (NumberFormatException ignored) {
+                        // Ignore malformed filenames
+                    }
+                }
+            }
+        } catch (IOException e) {
+            Log.warnf("Failed resolving date bounds in %s: %s", marketDir, e.getMessage());
+            return Optional.empty();
+        }
+
+        if (count == 0) {
+            return Optional.empty();
+        }
+        String minDate = DATE_FORMATTER.format(Instant.ofEpochSecond(minEpoch));
+        String maxDate = DATE_FORMATTER.format(Instant.ofEpochSecond(maxEpoch));
+        return Optional.of(new DateBounds(minDate, maxDate, count, days.size()));
+    }
+
+    /**
+     * Summary of date bounds and file counts for a single symbol's 15-minute Polymarket archives.
+     *
+     * @param minDate earliest UTC date ({@code yyyy-MM-dd})
+     * @param maxDate latest UTC date ({@code yyyy-MM-dd})
+     * @param marketCount count of 15-minute market Parquet files
+     * @param dayCount count of distinct UTC days
+     */
+    public record DateBounds(String minDate, String maxDate, int marketCount, int dayCount) {
     }
 
     /**

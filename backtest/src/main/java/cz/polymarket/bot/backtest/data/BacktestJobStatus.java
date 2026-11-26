@@ -23,5 +23,10 @@ public enum BacktestJobStatus {
     /**
      * Job execution failed with an unrecoverable error.
      */
-    FAILED
+    FAILED,
+
+    /**
+     * Job was cancelled before completion.
+     */
+    CANCELLED
 }

@@ -3,11 +3,16 @@ package cz.polymarket.bot.backtest.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
-import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
+import cz.polymarket.bot.backtest.data.BacktestProgressListener;
+import cz.polymarket.bot.backtest.data.BacktestRunRequest;
+import cz.polymarket.bot.backtest.data.ExchangeDelays;
+import cz.polymarket.bot.backtest.data.MarketEquityPoint;
 import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
+import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
+import cz.polymarket.bot.backtest.service.StrategyParameterService;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
@@ -43,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class BacktestEngineTest {
 
     private DuckDbSessionManager duckDbSessionManager;
+    private BacktestHistoryRepository historyRepository;
     private BacktestEngine backtestEngine;
     private final AtomicInteger polymarketCryptoPriceCount = new AtomicInteger();
     private final AtomicInteger polymarketTwap60sCount = new AtomicInteger();
@@ -125,7 +131,8 @@ class BacktestEngineTest {
         }
 
         PerformanceMetricsCalculator metricsCalculator = new PerformanceMetricsCalculator();
-        BacktestJsonExporter jsonExporter = new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export").toString());
+        historyRepository = new BacktestHistoryRepository(
+                tempDir.resolve("history.duckdb"), new ObjectMapper(), metricsCalculator);
 
         class PolymarketOnlyBatchStrategy implements TradingStrategy {
             private StrategyContext ctx;
@@ -204,12 +211,11 @@ class BacktestEngineTest {
         backtestEngine = new BacktestEngine(
                 datasetService,
                 indicatorCacheService,
-                strategyRegistry,
+                new StrategyParameterService(strategyRegistry),
                 metricsCalculator,
-                jsonExporter,
+                historyRepository,
                 "OraclePulseLockStrategy",
                 "2026-08-01",
-                tempDir.resolve("export").toString(),
                 10000.0,
                 1.0,
                 2,
@@ -224,53 +230,44 @@ class BacktestEngineTest {
         if (backtestEngine != null) {
             backtestEngine.shutdown();
         }
+        if (historyRepository != null) {
+            historyRepository.close();
+        }
         if (duckDbSessionManager != null) {
             duckDbSessionManager.close();
         }
     }
 
     @Test
-    @DisplayName("Should run backtest over collector Parquet archives with time-varying latency and latencyFactor")
-    void shouldRunBacktestOverCollectorParquetArchives(@TempDir Path tempDir) {
-        BacktestResult result = backtestEngine.runBacktest(
-                "PolymarketOnlyStrategy",
-                "BTCUSDT",
-                "2026-08-01",
-                "2026-08-01",
-                10000.0,
-                tempDir.toString(),
-                1.5
-        );
+    @DisplayName("Should run backtest over collector Parquet archives, record per-market equity points, and persist to DuckDB")
+    void shouldRunBacktestOverCollectorParquetArchives() {
+        BacktestRunRequest req = new BacktestRunRequest(
+                "PM Only 1.5x", "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, null, null, null, null);
+        BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
         assertThat(result.strategyName()).isEqualTo("PolymarketOnlyStrategy");
         assertThat(result.totalMarkets()).isEqualTo(3);
+        assertThat(result.marketPoints()).hasSize(3);
+        assertThat(result.marketPoints()).extracting(MarketEquityPoint::evaluated).containsOnly(true);
 
         assertThat(result.trades()).isNotEmpty();
         assertThat(result.metrics().totalTrades()).isEqualTo(result.trades().size());
         assertThat(result.metrics().totalNetPnl()).isGreaterThan(0.0);
-
-        assertThat(result.jsonFilePath()).isNotNull();
-        Path jsonPath = Path.of(result.jsonFilePath());
-        assertThat(Files.exists(jsonPath)).isTrue();
-        assertThat(Files.exists(tempDir.resolve("latest.json"))).isTrue();
+        assertThat(historyRepository.getRun(result.runId())).isPresent();
     }
 
     @Test
     @DisplayName("Should execute Polymarket-only batch strategy across multiple markets")
-    void shouldExecutePolymarketOnlyBatchStrategy(@TempDir Path tempDir) {
+    void shouldExecutePolymarketOnlyBatchStrategy() {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);
 
-        BacktestResult result = backtestEngine.runBacktest(
-                "PolymarketOnlyStrategy",
-                "BTCUSDT",
-                "2026-08-01",
-                "2026-08-01",
-                10000.0,
-                tempDir.toString(),
-                1.0
-        );
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null);
+        BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
         assertThat(result.totalMarkets()).isEqualTo(3);
@@ -351,45 +348,46 @@ class BacktestEngineTest {
                     List.of(new SpotTwapBacktestIndicator()),
                     100L, 50L, 50L
             );
-            BacktestEngine utterEngine = new BacktestEngine(
-                    datasetService,
-                    localCacheService,
-                    localRegistry,
-                    new PerformanceMetricsCalculator(),
-                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_utter").toString()),
-                    "UtterParameciumStrategy",
-                    "2026-08-01",
-                    tempDir.resolve("export_utter").toString(),
-                    10000.0,
-                    1.0,
-                    2,
-                    100L,
-                    50L,
-                    50L
-            );
-
-            try {
-                BacktestResult result = utterEngine.runBacktest(
-                        "utter_paramecium",
-                        "BTCUSDT",
-                        "2026-08-01",
+            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_utter.duckdb"), new ObjectMapper(), localCalc)) {
+                BacktestEngine utterEngine = new BacktestEngine(
+                        datasetService,
+                        localCacheService,
+                        new StrategyParameterService(localRegistry),
+                        localCalc,
+                        localHistory,
+                        "UtterParameciumStrategy",
                         "2026-08-01",
                         10000.0,
-                        tempDir.resolve("export_utter").toString(),
-                        1.0
+                        1.0,
+                        2,
+                        100L,
+                        50L,
+                        50L
                 );
 
-                assertThat(result).isNotNull();
-                assertThat(result.totalMarkets()).isEqualTo(2);
-                assertThat(result.trades()).isNotEmpty();
-                assertThat(result.trades()).allSatisfy(trade -> {
-                    assertThat(trade.intervalStartSec()).isEqualTo(c1Start);
-                    assertThat(trade.isWin()).isTrue();
-                    assertThat(trade.exitPrice()).isEqualTo(1.0);
-                    assertThat(trade.netPnl()).isGreaterThan(0.0);
-                });
-            } finally {
-                utterEngine.shutdown();
+                try {
+                    BacktestResult result = utterEngine.runBacktest(
+                            null,
+                            new BacktestRunRequest(
+                                    null, "utter_paramecium", "BTCUSDT", "2026-08-01", "2026-08-01",
+                                    false, 10000.0, 1.0, null, null, null, null),
+                            BacktestProgressListener.NOOP
+                    );
+
+                    assertThat(result).isNotNull();
+                    assertThat(result.totalMarkets()).isEqualTo(2);
+                    assertThat(result.trades()).isNotEmpty();
+                    assertThat(result.trades()).allSatisfy(trade -> {
+                        assertThat(trade.intervalStartSec()).isEqualTo(c1Start);
+                        assertThat(trade.isWin()).isTrue();
+                        assertThat(trade.exitPrice()).isEqualTo(1.0);
+                        assertThat(trade.netPnl()).isGreaterThan(0.0);
+                    });
+                } finally {
+                    utterEngine.shutdown();
+                }
             }
         }
     }
@@ -507,39 +505,42 @@ class BacktestEngineTest {
                     List.of(new SpotTwapBacktestIndicator()),
                     100L, 50L, 50L
             );
-            BacktestEngine engine = new BacktestEngine(
-                    datasetService,
-                    eqCacheService,
-                    registry,
-                    new PerformanceMetricsCalculator(),
-                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_eq").toString()),
-                    "UtterParameciumStrategy",
-                    "2026-08-01",
-                    tempDir.resolve("export_eq").toString(),
-                    10000.0,
-                    1.0,
-                    2,
-                    100L,
-                    50L,
-                    50L
-            );
+            PerformanceMetricsCalculator eqCalc = new PerformanceMetricsCalculator();
+            try (BacktestHistoryRepository eqHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_eq.duckdb"), new ObjectMapper(), eqCalc)) {
+                BacktestEngine engine = new BacktestEngine(
+                        datasetService,
+                        eqCacheService,
+                        new StrategyParameterService(registry),
+                        eqCalc,
+                        eqHistory,
+                        "UtterParameciumStrategy",
+                        "2026-08-01",
+                        10000.0,
+                        1.0,
+                        2,
+                        100L,
+                        50L,
+                        50L
+                );
 
-            try {
-                BacktestResult windowedRes = engine.runBacktest(
-                        windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                        10000.0, tempDir.resolve("export_eq_win").toString(), 1.0);
-                BacktestResult fullRes = engine.runBacktest(
-                        fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                        10000.0, tempDir.resolve("export_eq_full").toString(), 1.0);
+                try {
+                    BacktestResult windowedRes = engine.runBacktest(null, new BacktestRunRequest(
+                            null, windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
+                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
+                    BacktestResult fullRes = engine.runBacktest(null, new BacktestRunRequest(
+                            null, fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
+                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
 
-                assertThat(windowedRes.trades()).isNotEmpty();
-                assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
-                for (int i = 0; i < windowedRes.trades().size(); i++) {
-                    assertThat(windowedRes.trades().get(i)).isEqualTo(fullRes.trades().get(i));
+                    assertThat(windowedRes.trades()).isNotEmpty();
+                    assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
+                    for (int i = 0; i < windowedRes.trades().size(); i++) {
+                        assertThat(windowedRes.trades().get(i)).isEqualTo(fullRes.trades().get(i));
+                    }
+                    assertThat(windowedRes.metrics()).isEqualTo(fullRes.metrics());
+                } finally {
+                    engine.shutdown();
                 }
-                assertThat(windowedRes.metrics()).isEqualTo(fullRes.metrics());
-            } finally {
-                engine.shutdown();
             }
         }
     }
@@ -547,7 +548,9 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should throw IllegalArgumentException when unknown strategy requested")
     void shouldThrowWhenUnknownStrategy() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest("UnknownStrategy", "BTCUSDT", null, null, 10000.0, null, null))
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null);
+        assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown strategy");
     }
@@ -555,39 +558,55 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should throw IllegalArgumentException when no market rows available")
     void shouldThrowWhenNoMarketRowsAvailable() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest("UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, 10000.0, null, null))
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null);
+        assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
     }
 
     @Test
-    @DisplayName("Should resolve default strategy, default startDate, current UTC endDate, default capital, and default outputDir when omitted")
-    void shouldResolveDefaultParametersWhenOmitted(@TempDir Path tempDir) {
-        BacktestResult result = backtestEngine.runBacktest(
-                null,
-                "BTCUSDT",
-                null,
-                null,
-                null,
-                tempDir.toString(),
-                null
-        );
+    @DisplayName("Should resolve default strategy, default startDate, current UTC endDate, default capital, and support fullRange & strategyParams")
+    void shouldResolveDefaultParametersWhenOmitted() {
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, null, "BTCUSDT", null, null, true, null, null, null, null, null,
+                Map.of("minTauMs", 3000L));
+        BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
         assertThat(result.strategyName()).isEqualTo("OraclePulseLockStrategy");
         assertThat(result.totalMarkets()).isEqualTo(3);
         assertThat(result.metrics().initialCapital()).isEqualTo(10000.0);
-        assertThat(result.jsonFilePath()).isNotBlank();
-        assertThat(Files.exists(Path.of(result.jsonFilePath()))).isTrue();
+        assertThat(result.config().strategyOverrides()).containsEntry("minTauMs", 3000L);
+        assertThat(result.marketPoints()).hasSize(3);
     }
 
     @Test
     @DisplayName("Should throw IllegalArgumentException when startDate is after endDate")
     void shouldThrowWhenStartDateIsAfterEndDate() {
-        assertThatThrownBy(() -> backtestEngine.runBacktest(
-                "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01", 10000.0, null, 1.0))
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01",
+                false, 10000.0, 1.0, null, null, null, null);
+        assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("startDate must not be after endDate");
+    }
+
+    @Test
+    @DisplayName("Should support cooperative cancellation via BacktestProgressListener")
+    void shouldCancelBacktestCooperatively() {
+        BacktestRunRequest req = new BacktestRunRequest(
+                null, "PolymarketOnlyStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
+                false, 10000.0, 1.0, null, null, null, null);
+        BacktestProgressListener cancelledListener = new BacktestProgressListener() {
+            @Override
+            public boolean isCancelled() {
+                return true;
+            }
+        };
+        assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, cancelledListener))
+                .isInstanceOf(BacktestCancelledException.class)
+                .hasMessageContaining("cancelled");
     }
 
     @Test
@@ -596,27 +615,26 @@ class BacktestEngineTest {
         CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDbSessionManager);
         IndicatorCacheService cacheService = new IndicatorCacheService(
                 tempDir.resolve("cache"), new ObjectMapper(), List.of(new SpotTwapBacktestIndicator()), 100L, 50L, 50L);
-        StrategyRegistry registry = new StrategyRegistry(Map.of());
+        StrategyParameterService paramService = new StrategyParameterService(new StrategyRegistry(Map.of()));
         PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
-        BacktestJsonExporter exporter = new BacktestJsonExporter(new ObjectMapper(), tempDir.toString());
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, registry, calc, exporter,
-                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                datasetService, cacheService, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
                 -1L, 50L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("binanceDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, registry, calc, exporter,
-                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                datasetService, cacheService, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
                 100L, -1L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("krakenDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, registry, calc, exporter,
-                "UtterParameciumStrategy", "2026-08-01", tempDir.toString(), 10000.0, 1.0, 2,
+                datasetService, cacheService, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
                 100L, 50L, -1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("coinbaseDelayMs");
@@ -687,46 +705,55 @@ class BacktestEngineTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, new ObjectMapper(), List.of(spotTwapIndicator), 100L, 50L, 50L);
             StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
+            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
 
-            BacktestEngine localEngine = new BacktestEngine(
-                    datasetService,
-                    cacheService,
-                    localRegistry,
-                    new PerformanceMetricsCalculator(),
-                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_cache_e2e").toString()),
-                    recordingStrategy.getName(),
-                    dateStr,
-                    tempDir.resolve("export_cache_e2e").toString(),
-                    10000.0,
-                    1.0,
-                    1,
-                    100L,
-                    50L,
-                    50L
-            );
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_cache_e2e.duckdb"), new ObjectMapper(), localCalc)) {
+                BacktestEngine localEngine = new BacktestEngine(
+                        datasetService,
+                        cacheService,
+                        new StrategyParameterService(localRegistry),
+                        localCalc,
+                        localHistory,
+                        recordingStrategy.getName(),
+                        dateStr,
+                        10000.0,
+                        1.0,
+                        1,
+                        100L,
+                        50L,
+                        50L
+                );
 
-            try {
-                // First run: Cache Miss -> computes and caches indicator values
-                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
-                        tempDir.resolve("export_cache_e2e_1").toString(), 1.0);
-                List<String> firstRunTicks = new ArrayList<>(observedSpotTwapTicks);
-                assertThat(firstRunTicks).hasSize(2);
+                try {
+                    BacktestRunRequest req = new BacktestRunRequest(
+                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
+                            false, 10000.0, 1.0, null, null, null, null);
+                    // First run: Cache Miss -> computes and caches indicator values
+                    localEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
+                    List<String> firstRunTicks = new ArrayList<>(observedSpotTwapTicks);
+                    assertThat(firstRunTicks).hasSize(2);
 
-                Path cachedParquet = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", dateStr);
-                Path configJson = cacheService.resolveConfigJsonFile(spotTwapIndicator);
-                assertThat(Files.isRegularFile(cachedParquet)).isTrue();
-                assertThat(Files.isRegularFile(configJson)).isTrue();
+                    Path cachedParquet = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", dateStr, null);
+                    Path configJson = cacheService.resolveConfigJsonFile(spotTwapIndicator, null);
+                    assertThat(Files.isRegularFile(cachedParquet)).isTrue();
+                    assertThat(Files.isRegularFile(configJson)).isTrue();
 
-                // Delete raw exchange Parquet file and re-run -> must read purely from cache
-                Files.delete(spotFile);
-                observedSpotTwapTicks.clear();
+                    // Per-run exchange delay override creates isolated hash directory
+                    Path customDelayParquet = cacheService.resolveDailyCacheFile(
+                            spotTwapIndicator, "BTCUSDT", dateStr, new ExchangeDelays(150L, 50L, 50L));
+                    assertThat(customDelayParquet).isNotEqualTo(cachedParquet);
 
-                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
-                        tempDir.resolve("export_cache_e2e_2").toString(), 1.0);
+                    // Delete raw exchange Parquet file and re-run -> must read purely from cache
+                    Files.delete(spotFile);
+                    observedSpotTwapTicks.clear();
 
-                assertThat(observedSpotTwapTicks).isEqualTo(firstRunTicks);
-            } finally {
-                localEngine.shutdown();
+                    localEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
+
+                    assertThat(observedSpotTwapTicks).isEqualTo(firstRunTicks);
+                } finally {
+                    localEngine.shutdown();
+                }
             }
         }
     }
@@ -812,33 +839,37 @@ class BacktestEngineTest {
             IndicatorCacheService cacheService = new IndicatorCacheService(
                     cacheDir, new ObjectMapper(), List.of(spotTwapIndicator, fastIndicator), 100L, 50L, 50L);
             StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
+            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
 
-            BacktestEngine localEngine = new BacktestEngine(
-                    datasetService,
-                    cacheService,
-                    localRegistry,
-                    new PerformanceMetricsCalculator(),
-                    new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("export_fast_e2e").toString()),
-                    recordingStrategy.getName(),
-                    dateStr,
-                    tempDir.resolve("export_fast_e2e").toString(),
-                    10000.0,
-                    1.0,
-                    1,
-                    100L,
-                    50L,
-                    50L
-            );
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_fast_e2e.duckdb"), new ObjectMapper(), localCalc)) {
+                BacktestEngine localEngine = new BacktestEngine(
+                        datasetService,
+                        cacheService,
+                        new StrategyParameterService(localRegistry),
+                        localCalc,
+                        localHistory,
+                        recordingStrategy.getName(),
+                        dateStr,
+                        10000.0,
+                        1.0,
+                        1,
+                        100L,
+                        50L,
+                        50L
+                );
 
-            try {
-                localEngine.runBacktest(recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr, 10000.0,
-                        tempDir.resolve("export_fast_e2e_1").toString(), 1.0);
-                assertThat(observedFastTicks).isNotEmpty();
-                double[] tick = observedFastTicks.getLast();
-                assertThat(tick[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, org.assertj.core.api.Assertions.within(1e-4));
-                assertThat(tick[2]).isBetween(0.95, 1.0);
-            } finally {
-                localEngine.shutdown();
+                try {
+                    localEngine.runBacktest(null, new BacktestRunRequest(
+                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
+                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
+                    assertThat(observedFastTicks).isNotEmpty();
+                    double[] tick = observedFastTicks.getLast();
+                    assertThat(tick[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, org.assertj.core.api.Assertions.within(1e-4));
+                    assertThat(tick[2]).isBetween(0.95, 1.0);
+                } finally {
+                    localEngine.shutdown();
+                }
             }
         }
     }

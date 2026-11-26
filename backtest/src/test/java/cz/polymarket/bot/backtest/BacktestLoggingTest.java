@@ -4,14 +4,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.BacktestJob;
 import cz.polymarket.bot.backtest.data.BacktestJobStatus;
+import cz.polymarket.bot.backtest.data.BacktestProgressListener;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
-import cz.polymarket.bot.backtest.export.BacktestJsonExporter;
 import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
+import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
+import cz.polymarket.bot.backtest.service.StrategyParameterService;
 import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
@@ -76,6 +78,7 @@ class BacktestLoggingTest {
     private CapturingLogHandler logHandler;
     private DuckDbSessionManager activeDuckDb;
     private BacktestEngine activeEngine;
+    private BacktestHistoryRepository activeHistoryRepo;
 
     @BeforeEach
     void setUpLogger() {
@@ -91,6 +94,10 @@ class BacktestLoggingTest {
         if (activeEngine != null) {
             activeEngine.shutdown();
             activeEngine = null;
+        }
+        if (activeHistoryRepo != null) {
+            activeHistoryRepo.close();
+            activeHistoryRepo = null;
         }
         if (activeDuckDb != null) {
             activeDuckDb.close();
@@ -159,7 +166,7 @@ class BacktestLoggingTest {
         backtestLogger.setLevel(Level.INFO);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
 
-        engine.runBacktest("TestBatchStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, tempDir.resolve("out").toString(), 1.0);
+        engine.runBacktest(null, runRequest("TestBatchStrategy", "BTCUSDT"), BacktestProgressListener.NOOP);
 
         List<ExtLogRecord> records = logHandler.records();
         assertThat(records).anySatisfy(r -> {
@@ -182,7 +189,7 @@ class BacktestLoggingTest {
         backtestLogger.setLevel(Level.DEBUG);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
 
-        engine.runBacktest("TestBatchStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, tempDir.resolve("out").toString(), 1.0);
+        engine.runBacktest(null, runRequest("TestBatchStrategy", "BTCUSDT"), BacktestProgressListener.NOOP);
 
         List<ExtLogRecord> records = logHandler.records();
         assertThat(records).anySatisfy(r -> {
@@ -205,7 +212,7 @@ class BacktestLoggingTest {
         backtestLogger.setLevel(Level.TRACE);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
 
-        engine.runBacktest("TestBatchStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, tempDir.resolve("out").toString(), 1.0);
+        engine.runBacktest(null, runRequest("TestBatchStrategy", "BTCUSDT"), BacktestProgressListener.NOOP);
 
         List<ExtLogRecord> traceRecords = logHandler.records().stream()
                 .filter(r -> r.getLevel().equals(Level.TRACE))
@@ -222,7 +229,7 @@ class BacktestLoggingTest {
         backtestLogger.setLevel(Level.INFO);
         BacktestEngine engine = createSyntheticBacktestEngine(tempDir);
 
-        assertThatThrownBy(() -> engine.runBacktest("UnknownInvalidStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, null, 1.0))
+        assertThatThrownBy(() -> engine.runBacktest(null, runRequest("UnknownInvalidStrategy", "BTCUSDT"), BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class);
 
         assertThat(logHandler.records()).anySatisfy(r -> {
@@ -232,7 +239,7 @@ class BacktestLoggingTest {
 
         logHandler.clear();
 
-        assertThatThrownBy(() -> engine.runBacktest("TestBatchStrategy", "SOLUSDT", "2026-08-01", "2026-08-01", 10000.0, null, 1.0))
+        assertThatThrownBy(() -> engine.runBacktest(null, runRequest("TestBatchStrategy", "SOLUSDT"), BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class);
 
         assertThat(logHandler.records()).anySatisfy(r -> {
@@ -260,15 +267,13 @@ class BacktestLoggingTest {
     void shouldLogFatalWhenEngineCannotContinueInBacktestJobManager() {
         backtestLogger.setLevel(Level.INFO);
         BacktestEngine mockEngine = Mockito.mock(BacktestEngine.class);
-        when(mockEngine.runBacktest(any(), any(), any(), any(), any(), any(), any()))
+        when(mockEngine.runBacktest(any(), any(), any()))
                 .thenThrow(new OutOfMemoryError("Simulated fatal heap exhaustion"));
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             BacktestJobManager manager = new BacktestJobManager(mockEngine, executor);
-            BacktestJob job = manager.submitJob(new BacktestRunRequest(
-                    "TestBatchStrategy", "BTCUSDT", "2026-08-01", "2026-08-01", 10000.0, null, 1.0
-            ));
+            BacktestJob job = manager.submitJob(runRequest("TestBatchStrategy", "BTCUSDT"));
 
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
                 Optional<BacktestJob> current = manager.getJob(job.jobId());
@@ -367,6 +372,10 @@ class BacktestLoggingTest {
         };
 
         StrategyRegistry registry = new StrategyRegistry(Map.of(testStrategy.getName(), testStrategy));
+        StrategyParameterService paramService = new StrategyParameterService(registry);
+        PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
+        activeHistoryRepo = new BacktestHistoryRepository(
+                tempDir.resolve("history_log_test.duckdb"), new ObjectMapper(), calc);
         IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
                 tempDir.resolve("cache_log_test"),
                 new ObjectMapper(),
@@ -376,12 +385,11 @@ class BacktestLoggingTest {
         activeEngine = new BacktestEngine(
                 datasetService,
                 indicatorCacheService,
-                registry,
-                new PerformanceMetricsCalculator(),
-                new BacktestJsonExporter(new ObjectMapper(), tempDir.resolve("out").toString()),
+                paramService,
+                calc,
+                activeHistoryRepo,
                 "TestBatchStrategy",
                 "2026-08-01",
-                tempDir.resolve("out").toString(),
                 10000.0,
                 1.0,
                 2,
@@ -390,6 +398,13 @@ class BacktestLoggingTest {
                 50L
         );
         return activeEngine;
+    }
+
+    private static BacktestRunRequest runRequest(String strategyName, String symbol) {
+        return new BacktestRunRequest(
+                null, strategyName, symbol, "2026-08-01", "2026-08-01",
+                false, 10000.0, 1.0, null, null, null, null
+        );
     }
 
     private static final class CapturingLogHandler extends ExtHandler {

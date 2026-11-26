@@ -1,5 +1,7 @@
 package cz.polymarket.bot.backtest;
 
+import cz.polymarket.bot.backtest.data.BacktestRunConfig;
+import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
 import cz.polymarket.bot.backtest.engine.BacktestResult;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
@@ -10,6 +12,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Method;
@@ -20,12 +23,13 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -69,28 +73,25 @@ class BacktestApplicationTest {
 
     @Test
     @DisplayName("Batch mode should execute backtest on startup with configured defaults and exit with code 0")
-    void shouldRunBacktestAndExitZeroInBatchModeWithDefaults() throws Exception {
+    void shouldRunBacktestAndExitZeroInBatchModeWithDefaults() {
         BacktestEngine mockEngine = Mockito.mock(BacktestEngine.class);
         String todayUtc = LocalDate.now(ZoneOffset.UTC).toString();
         BacktestResult expectedResult = new BacktestResult(
+                "run-default",
+                "UtterParameciumStrategy (2026-10-12 .. " + todayUtc + ")",
                 "UtterParameciumStrategy",
                 "BTCUSDT",
                 Instant.now(),
+                100L,
                 42,
+                new BacktestRunConfig("UtterParameciumStrategy", "BTCUSDT", "2026-10-12", todayUtc,
+                        10000.0, 1.0, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(10000.0),
                 List.of(),
-                "/data/polymarket/backtesting/backtest_UtterParameciumStrategy_20261111_180000.json"
+                List.of()
         );
 
-        when(mockEngine.runBacktest(
-                eq("UtterParameciumStrategy"),
-                eq("BTCUSDT"),
-                eq("2026-10-12"),
-                eq(todayUtc),
-                eq(10000.0),
-                eq("/data/polymarket/backtesting"),
-                eq(1.0)
-        )).thenReturn(expectedResult);
+        when(mockEngine.runBacktest(isNull(), any(BacktestRunRequest.class), any())).thenReturn(expectedResult);
 
         BacktestApplication batchApp = new BacktestApplication(
                 mockEngine,
@@ -100,47 +101,43 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.empty(),
                 10000.0,
-                "/data/polymarket/backtesting",
                 1.0
         );
 
         int exitCode = batchApp.run();
 
         assertThat(exitCode).isZero();
-        verify(mockEngine).runBacktest(
-                "UtterParameciumStrategy",
-                "BTCUSDT",
-                "2026-10-12",
-                todayUtc,
-                10000.0,
-                "/data/polymarket/backtesting",
-                1.0
-        );
+        ArgumentCaptor<BacktestRunRequest> captor = ArgumentCaptor.forClass(BacktestRunRequest.class);
+        verify(mockEngine).runBacktest(isNull(), captor.capture(), any());
+        BacktestRunRequest req = captor.getValue();
+        assertThat(req.strategyName()).isEqualTo("UtterParameciumStrategy");
+        assertThat(req.symbol()).isEqualTo("BTCUSDT");
+        assertThat(req.startDate()).isEqualTo("2026-10-12");
+        assertThat(req.endDate()).isEqualTo(todayUtc);
+        assertThat(req.initialCapital()).isEqualTo(10000.0);
+        assertThat(req.latencyFactor()).isEqualTo(1.0);
     }
 
     @Test
-    @DisplayName("Batch mode should pass custom strategy, capital, from, to, and dir overrides to BacktestEngine")
-    void shouldRunBacktestWithCustomParametersInBatchMode() throws Exception {
+    @DisplayName("Batch mode should pass custom strategy, capital, from, to, and latency overrides to BacktestEngine")
+    void shouldRunBacktestWithCustomParametersInBatchMode() {
         BacktestEngine mockEngine = Mockito.mock(BacktestEngine.class);
         BacktestResult expectedResult = new BacktestResult(
+                "run-custom",
+                "UtterParameciumStrategy (2026-10-15 .. 2026-10-20)",
                 "UtterParameciumStrategy",
                 "BTCUSDT",
                 Instant.now(),
+                80L,
                 10,
+                new BacktestRunConfig("UtterParameciumStrategy", "BTCUSDT", "2026-10-15", "2026-10-20",
+                        25000.0, 1.25, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(25000.0),
                 List.of(),
-                "/tmp/custom-out/backtest_UtterParameciumStrategy_20261111_180000.json"
+                List.of()
         );
 
-        when(mockEngine.runBacktest(
-                eq("UtterParameciumStrategy"),
-                eq("BTCUSDT"),
-                eq("2026-10-15"),
-                eq("2026-10-20"),
-                eq(25000.0),
-                eq("/tmp/custom-out"),
-                eq(1.25)
-        )).thenReturn(expectedResult);
+        when(mockEngine.runBacktest(isNull(), any(BacktestRunRequest.class), any())).thenReturn(expectedResult);
 
         BacktestApplication batchApp = new BacktestApplication(
                 mockEngine,
@@ -150,29 +147,26 @@ class BacktestApplicationTest {
                 "2026-10-15",
                 Optional.of("2026-10-20"),
                 25000.0,
-                "/tmp/custom-out",
                 1.25
         );
 
         int exitCode = batchApp.run();
 
         assertThat(exitCode).isZero();
-        verify(mockEngine).runBacktest(
-                "UtterParameciumStrategy",
-                "BTCUSDT",
-                "2026-10-15",
-                "2026-10-20",
-                25000.0,
-                "/tmp/custom-out",
-                1.25
-        );
+        ArgumentCaptor<BacktestRunRequest> captor = ArgumentCaptor.forClass(BacktestRunRequest.class);
+        verify(mockEngine).runBacktest(isNull(), captor.capture(), any());
+        BacktestRunRequest req = captor.getValue();
+        assertThat(req.startDate()).isEqualTo("2026-10-15");
+        assertThat(req.endDate()).isEqualTo("2026-10-20");
+        assertThat(req.initialCapital()).isEqualTo(25000.0);
+        assertThat(req.latencyFactor()).isEqualTo(1.25);
     }
 
     @Test
     @DisplayName("Batch mode should return exit code 1 when BacktestEngine fails")
-    void shouldReturnExitCodeOneWhenBacktestEngineFailsInBatchMode() throws Exception {
+    void shouldReturnExitCodeOneWhenBacktestEngineFailsInBatchMode() {
         BacktestEngine mockEngine = Mockito.mock(BacktestEngine.class);
-        when(mockEngine.runBacktest(any(), any(), any(), any(), any(), any(), any()))
+        when(mockEngine.runBacktest(any(), any(), any()))
                 .thenThrow(new IllegalArgumentException("Unknown strategy: InvalidStrategy"));
 
         BacktestApplication batchApp = new BacktestApplication(
@@ -183,7 +177,6 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.of("2026-10-15"),
                 10000.0,
-                "/data/polymarket/backtesting",
                 1.0
         );
 

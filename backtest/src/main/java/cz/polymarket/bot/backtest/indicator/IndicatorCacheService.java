@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import cz.polymarket.bot.backtest.data.ExchangeDelays;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.indicators.SpotTwapIndicator;
@@ -68,10 +69,7 @@ public class IndicatorCacheService {
     private final Path cacheRootDir;
     private final ObjectMapper prettyJsonMapper;
     private final List<BacktestIndicator> indicators;
-    private final long binanceDelayMs;
-    private final long krakenDelayMs;
-    private final long coinbaseDelayMs;
-    private final Map<String, Long> sortedExchangeDelaysMs;
+    private final ExchangeDelays defaultExchangeDelays;
 
     /**
      * CDI constructor injecting configured cache root directory, Jackson mapper, discovered
@@ -149,15 +147,7 @@ public class IndicatorCacheService {
         sorted.sort(Comparator.comparing(BacktestIndicator::getName));
         this.indicators = Collections.unmodifiableList(sorted);
 
-        this.binanceDelayMs = binanceDelayMs;
-        this.krakenDelayMs = krakenDelayMs;
-        this.coinbaseDelayMs = coinbaseDelayMs;
-
-        Map<String, Long> delays = new TreeMap<>();
-        delays.put("binanceDelayMs", binanceDelayMs);
-        delays.put("coinbaseDelayMs", coinbaseDelayMs);
-        delays.put("krakenDelayMs", krakenDelayMs);
-        this.sortedExchangeDelaysMs = Collections.unmodifiableMap(new LinkedHashMap<>(delays));
+        this.defaultExchangeDelays = new ExchangeDelays(binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
     }
 
     private static Path validateCacheDirString(String cacheDir) {
@@ -198,16 +188,27 @@ public class IndicatorCacheService {
     }
 
     /**
+     * Returns the configured default exchange feed delays used when a run does not specify overrides.
+     *
+     * @return default {@link ExchangeDelays}
+     */
+    public ExchangeDelays getDefaultExchangeDelays() {
+        return defaultExchangeDelays;
+    }
+
+    /**
      * Computes a deterministic, repeatable hexadecimal hash over the indicator's canonical name,
-     * configuration parameters, and the configured exchange stream delays.
+     * configuration parameters, and the provided (or default) exchange stream delays.
      *
      * @param indicator indicator to hash
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return deterministic 16-character lowercase hex SHA-256 hash
      */
-    public String computeIndicatorHash(BacktestIndicator indicator) {
+    public String computeIndicatorHash(BacktestIndicator indicator, ExchangeDelays exchangeDelays) {
         if (indicator == null) {
             throw new IllegalArgumentException("indicator cannot be null");
         }
+        ExchangeDelays resolvedDelays = exchangeDelays != null ? exchangeDelays : defaultExchangeDelays;
         Map<String, Object> sortedParams = new TreeMap<>();
         Map<String, Object> rawParams = indicator.getConfigurationParameters();
         if (rawParams != null) {
@@ -216,7 +217,7 @@ public class IndicatorCacheService {
 
         Map<String, Object> canonicalPayload = new LinkedHashMap<>();
         canonicalPayload.put("indicator", indicator.getName());
-        canonicalPayload.put("exchangeDelaysMs", sortedExchangeDelaysMs);
+        canonicalPayload.put("exchangeDelaysMs", resolvedDelays.toSortedMap());
         canonicalPayload.put("parameters", sortedParams);
 
         try {
@@ -230,13 +231,15 @@ public class IndicatorCacheService {
     }
 
     /**
-     * Builds the serializable {@link IndicatorCacheConfigDescriptor} for the given indicator.
+     * Builds the serializable {@link IndicatorCacheConfigDescriptor} for the given indicator and delays.
      *
      * @param indicator target indicator
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return immutable {@link IndicatorCacheConfigDescriptor}
      */
-    public IndicatorCacheConfigDescriptor buildConfigDescriptor(BacktestIndicator indicator) {
-        String hash = computeIndicatorHash(indicator);
+    public IndicatorCacheConfigDescriptor buildConfigDescriptor(BacktestIndicator indicator, ExchangeDelays exchangeDelays) {
+        ExchangeDelays resolvedDelays = exchangeDelays != null ? exchangeDelays : defaultExchangeDelays;
+        String hash = computeIndicatorHash(indicator, resolvedDelays);
         Map<String, Object> sortedParams = new TreeMap<>();
         if (indicator.getConfigurationParameters() != null) {
             sortedParams.putAll(indicator.getConfigurationParameters());
@@ -244,54 +247,61 @@ public class IndicatorCacheService {
         return new IndicatorCacheConfigDescriptor(
                 indicator.getName(),
                 hash,
-                sortedExchangeDelaysMs,
+                resolvedDelays.toSortedMap(),
                 Collections.unmodifiableMap(new LinkedHashMap<>(sortedParams))
         );
     }
 
     /**
-     * Resolves the cache directory {@code <cacheRootDir>/<indicator>/<hash>} for the specified indicator.
+     * Resolves the cache directory {@code <cacheRootDir>/<indicator>/<hash>} for the specified indicator and delays.
      *
      * @param indicator target indicator
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return directory path
      */
-    public Path resolveIndicatorHashDir(BacktestIndicator indicator) {
+    public Path resolveIndicatorHashDir(BacktestIndicator indicator, ExchangeDelays exchangeDelays) {
         if (indicator == null) {
             throw new IllegalArgumentException("indicator cannot be null");
         }
-        return cacheRootDir.resolve(indicator.getName()).resolve(computeIndicatorHash(indicator));
+        return cacheRootDir.resolve(indicator.getName()).resolve(computeIndicatorHash(indicator, exchangeDelays));
     }
 
     /**
      * Resolves the {@code config.json} metadata file path inside {@code <cacheRootDir>/<indicator>/<hash>}.
      *
      * @param indicator target indicator
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return {@code config.json} file path
      */
-    public Path resolveConfigJsonFile(BacktestIndicator indicator) {
-        return resolveIndicatorHashDir(indicator).resolve(CONFIG_JSON_FILENAME);
+    public Path resolveConfigJsonFile(BacktestIndicator indicator, ExchangeDelays exchangeDelays) {
+        return resolveIndicatorHashDir(indicator, exchangeDelays).resolve(CONFIG_JSON_FILENAME);
     }
 
     /**
      * Resolves the daily Parquet cache file path {@code <cacheRootDir>/<indicator>/<hash>/<cryptoSymbol>-<dateStr>.parquet}
-     * for the given indicator, asset symbol, and UTC date string.
+     * for the given indicator, asset symbol, UTC date string, and exchange delays.
      *
      * @param indicator target indicator
      * @param symbol trading symbol (e.g. {@code "BTCUSDT"} or {@code "btcusd"})
      * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return daily Parquet cache file path
      */
-    public Path resolveDailyCacheFile(BacktestIndicator indicator, String symbol, String dateStr) {
+    public Path resolveDailyCacheFile(
+            BacktestIndicator indicator,
+            String symbol,
+            String dateStr,
+            ExchangeDelays exchangeDelays) {
         if (dateStr == null || dateStr.isBlank()) {
             throw new IllegalArgumentException("dateStr cannot be null or blank");
         }
         String cryptoSymbol = CollectorParquetDatasetService.extractBaseAsset(symbol).toLowerCase(Locale.ROOT) + "usd";
-        return resolveIndicatorHashDir(indicator).resolve(cryptoSymbol + "-" + dateStr.trim() + ".parquet");
+        return resolveIndicatorHashDir(indicator, exchangeDelays).resolve(cryptoSymbol + "-" + dateStr.trim() + ".parquet");
     }
 
     /**
      * Loads or computes the daily indicator tracks for registered {@link BacktestIndicator}s consumed
-     * by {@code strategy} on a single UTC day.
+     * by {@code strategy} on a single UTC day using the specified (or default) exchange feed delays.
      * <p>
      * Indicators not consumed by {@code strategy} are skipped completely (neither read from cache nor computed).
      * Consumed indicators with an existing daily Parquet cache file are loaded directly from disk without touching
@@ -302,19 +312,22 @@ public class IndicatorCacheService {
      * @param symbol trading asset symbol (e.g. {@code "BTCUSDT"})
      * @param dateStr UTC date string ({@code yyyy-MM-dd})
      * @param strategy active {@link TradingStrategy} determining which indicators are required
+     * @param exchangeDelays optional per-run exchange feed delays (defaults to configured delays when null)
      * @return ordered list of {@link DailyIndicatorTrack}s for indicators consumed by {@code strategy} on {@code dateStr}
      */
     public List<DailyIndicatorTrack> loadOrComputeDailyIndicators(
             CollectorParquetDatasetService datasetService,
             String symbol,
             String dateStr,
-            TradingStrategy strategy) {
+            TradingStrategy strategy,
+            ExchangeDelays exchangeDelays) {
         if (strategy == null) {
             throw new IllegalArgumentException("strategy cannot be null");
         }
         if (datasetService == null || dateStr == null || dateStr.isBlank() || indicators.isEmpty()) {
             return List.of();
         }
+        ExchangeDelays resolvedDelays = exchangeDelays != null ? exchangeDelays : defaultExchangeDelays;
 
         List<BacktestIndicator> activeIndicators = new ArrayList<>(indicators.size());
         for (int i = 0, n = indicators.size(); i < n; i++) {
@@ -337,7 +350,7 @@ public class IndicatorCacheService {
 
         for (int i = 0; i < indicatorCount; i++) {
             BacktestIndicator indicator = activeIndicators.get(i);
-            Path cacheFile = resolveDailyCacheFile(indicator, symbol, trimmedDate);
+            Path cacheFile = resolveDailyCacheFile(indicator, symbol, trimmedDate, resolvedDelays);
             if (Files.isRegularFile(cacheFile)) {
                 hitSlots.add(new IndicatorSlot(i, indicator, cacheFile));
             } else {
@@ -351,7 +364,7 @@ public class IndicatorCacheService {
         if (!hitSlots.isEmpty()) {
             try (Connection conn = sessionManager.openSession()) {
                 for (IndicatorSlot hit : hitSlots) {
-                    ensureConfigJsonExists(hit.indicator());
+                    ensureConfigJsonExists(hit.indicator(), resolvedDelays);
                     DailyIndicatorTrack track = hit.indicator().readCachedTrack(conn, hit.cacheFile(), cryptoSymbol);
                     resolvedTracks[hit.index()] = track;
                     if (Log.isDebugEnabled()) {
@@ -372,6 +385,7 @@ public class IndicatorCacheService {
                     symbol,
                     cryptoSymbol,
                     trimmedDate,
+                    resolvedDelays,
                     missingSlots,
                     resolvedTracks
             );
@@ -394,8 +408,13 @@ public class IndicatorCacheService {
             String symbol,
             String cryptoSymbol,
             String dateStr,
+            ExchangeDelays resolvedDelays,
             List<IndicatorSlot> missingSlots,
             DailyIndicatorTrack[] resolvedTracks) {
+
+        long binanceDelayMs = resolvedDelays.binanceDelayMs();
+        long krakenDelayMs = resolvedDelays.krakenDelayMs();
+        long coinbaseDelayMs = resolvedDelays.coinbaseDelayMs();
 
         String prevDateStr;
         long dayStartMs;
@@ -596,7 +615,7 @@ public class IndicatorCacheService {
                 BacktestIndicator indicator = missingIndicators[i];
                 Path cacheFile = targetCacheFiles[i];
                 try {
-                    ensureConfigJsonExists(indicator);
+                    ensureConfigJsonExists(indicator, resolvedDelays);
                     DailyIndicatorTrack track = sessions[i].writeParquetAndBuildTrack(writeConn, cacheFile);
                     resolvedTracks[targetIndices[i]] = track;
                     if (Log.isDebugEnabled()) {
@@ -613,8 +632,8 @@ public class IndicatorCacheService {
         }
     }
 
-    private void ensureConfigJsonExists(BacktestIndicator indicator) {
-        Path configJsonFile = resolveConfigJsonFile(indicator);
+    private void ensureConfigJsonExists(BacktestIndicator indicator, ExchangeDelays resolvedDelays) {
+        Path configJsonFile = resolveConfigJsonFile(indicator, resolvedDelays);
         if (Files.isRegularFile(configJsonFile)) {
             return;
         }
@@ -623,7 +642,7 @@ public class IndicatorCacheService {
             if (hashDir != null) {
                 Files.createDirectories(hashDir);
             }
-            IndicatorCacheConfigDescriptor descriptor = buildConfigDescriptor(indicator);
+            IndicatorCacheConfigDescriptor descriptor = buildConfigDescriptor(indicator, resolvedDelays);
             Path tempJson = configJsonFile.resolveSibling(CONFIG_JSON_FILENAME + ".tmp." + System.nanoTime());
             try {
                 prettyJsonMapper.writeValue(tempJson.toFile(), descriptor);

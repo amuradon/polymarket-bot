@@ -1,5 +1,7 @@
 package cz.polymarket.bot.backtest;
 
+import cz.polymarket.bot.backtest.data.BacktestProgressListener;
+import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
 import cz.polymarket.bot.backtest.engine.BacktestResult;
 import io.quarkus.logging.Log;
@@ -22,8 +24,8 @@ import java.util.Optional;
  * Supports two execution modes controlled by {@code polymarket.backtest.batchMode}:
  * <ul>
  *     <li><b>Batch mode ({@code true})</b>: Immediately executes the configured backtest on startup,
- *     exports the JSON report identical to {@code /api/backtest/run}, and terminates the application.</li>
- *     <li><b>Server mode ({@code false})</b>: Runs continuously as a REST server on port 8083.</li>
+ *     persists the run to DuckDB history, and terminates the application.</li>
+ *     <li><b>Server mode ({@code false})</b>: Runs continuously as a REST &amp; Web UI server on port 8083.</li>
  * </ul>
  */
 @QuarkusMain
@@ -37,20 +39,18 @@ public class BacktestApplication implements QuarkusApplication {
     private final String startDate;
     private final Optional<String> endDate;
     private final double initialCapital;
-    private final String outputDir;
     private final double latencyFactor;
 
     /**
      * Constructs a new {@link BacktestApplication} with injected engine and native Quarkus configuration properties.
      *
      * @param backtestEngine simulation engine executing the backtest
-     * @param batchMode {@code true} to execute backtest on startup and exit; {@code false} for REST server mode
+     * @param batchMode {@code true} to execute backtest on startup and exit; {@code false} for REST/UI server mode
      * @param strategyName trading strategy name (default {@code OraclePulseLockStrategy})
      * @param symbol trading symbol (default {@code BTCUSDT})
      * @param startDate inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
      * @param endDate optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
      * @param initialCapital initial account balance in USD (default {@code 10000.0})
-     * @param outputDir directory path for exported JSON reports (default {@code /data/polymarket/backtesting})
      * @param latencyFactor simulated order execution latency factor (default {@code 1.0})
      */
     @Inject
@@ -68,8 +68,6 @@ public class BacktestApplication implements QuarkusApplication {
             Optional<String> endDate,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double initialCapital,
-            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "/data/polymarket/backtesting")
-            String outputDir,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
             double latencyFactor) {
         if (backtestEngine == null) {
@@ -83,7 +81,6 @@ public class BacktestApplication implements QuarkusApplication {
         this.startDate = startDate;
         this.endDate = endDate != null ? endDate : Optional.empty();
         this.initialCapital = initialCapital;
-        this.outputDir = outputDir;
         this.latencyFactor = latencyFactor;
     }
 
@@ -115,26 +112,33 @@ public class BacktestApplication implements QuarkusApplication {
                 .orElseGet(() -> LocalDate.now(ZoneOffset.UTC).toString());
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Executing startup batch backtest: strategy=%s, symbol=%s, from=%s, to=%s, capital=%.2f, dir=%s",
-                    strategyName, symbol, startDate, resolvedEndDate, initialCapital, outputDir);
+            Log.infof("Executing startup batch backtest: strategy=%s, symbol=%s, from=%s, to=%s, capital=%.2f",
+                    strategyName, symbol, startDate, resolvedEndDate, initialCapital);
         }
 
         try {
-            BacktestResult result = backtestEngine.runBacktest(
+            BacktestRunRequest request = new BacktestRunRequest(
+                    null,
                     strategyName,
                     symbol,
                     startDate,
                     resolvedEndDate,
+                    false,
                     initialCapital,
-                    outputDir,
-                    latencyFactor
+                    latencyFactor,
+                    null,
+                    null,
+                    null,
+                    null
             );
+            BacktestResult result = backtestEngine.runBacktest(null, request, BacktestProgressListener.NOOP);
             if (Log.isInfoEnabled()) {
-                Log.infof("Startup batch backtest finished: strategy=%s, markets=%d, trades=%d, report=%s. Shutting down...",
+                Log.infof("Startup batch backtest finished: runId=%s, strategy=%s, markets=%d, trades=%d, netPnl=%.2f. Shutting down...",
+                        result.runId(),
                         result.strategyName(),
                         result.totalMarkets(),
                         result.trades() != null ? result.trades().size() : 0,
-                        result.jsonFilePath());
+                        result.metrics().totalNetPnl());
             }
             return 0;
         } catch (Throwable t) {

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Polymarket Backtest :: Equity křivka &amp; Porovnání strategií</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="app-shell">
+    <header class="topbar">
+        <div class="topbar-left">
+            <h1>Polymarket Backtest Studio</h1>
+            <span id="engine-status-badge" class="badge badge-neutral">Připojování…</span>
+            <span id="runs-count-badge" class="badge badge-info">0 běhů</span>
+        </div>
+        <div class="topbar-actions">
+            <a href="/swagger-ui" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">OpenAPI / Swagger</a>
+            <button type="button" id="btn-new-backtest" class="btn btn-primary">+ Nový backtest</button>
+        </div>
+    </header>
+
+    <div class="workspace-grid">
+        <aside class="sidebar" aria-label="Správa běhů a fronty">
+            <section id="jobs-panel" class="card hidden" aria-labelledby="jobs-heading">
+                <div class="card-header">
+                    <h2 id="jobs-heading" class="card-title">Fronta běhů</h2>
+                    <button type="button" id="btn-clear-finished-jobs" class="btn-link">Skrýt hotové</button>
+                </div>
+                <div id="jobs-list" class="jobs-list"></div>
+            </section>
+
+            <section class="card runs-card" aria-labelledby="runs-heading">
+                <div class="card-header">
+                    <h2 id="runs-heading" class="card-title">Historie běhů (DuckDB)</h2>
+                    <span id="selected-count-pill" class="pill">0 vybráno</span>
+                </div>
+
+                <div class="sidebar-filters">
+                    <input type="search" id="filter-run-search" class="input" placeholder="Hledat štítek nebo strategii…" aria-label="Hledat v historii běhů">
+                    <div class="filter-row">
+                        <select id="filter-run-strategy" class="select" aria-label="Filtrovat podle strategie">
+                            <option value="">Všechny strategie</option>
+                        </select>
+                        <select id="filter-run-symbol" class="select" aria-label="Filtrovat podle symbolu">
+                            <option value="">Všechny symboly</option>
+                        </select>
+                    </div>
+                    <div class="quick-select-row">
+                        <button type="button" id="btn-compare-same-strategy" class="btn btn-xs btn-secondary" title="Vybere všechny běhy stejné strategie jako první označený běh">Porovnat stejnou strategii</button>
+                        <button type="button" id="btn-clear-selection" class="btn btn-xs btn-secondary">Zrušit výběr</button>
+                    </div>
+                </div>
+
+                <div id="runs-list" class="runs-list" role="list"></div>
+            </section>
+        </aside>
+
+        <main class="main-content">
+            <section class="card controls-card" aria-label="Ovládání equity křivky a časového výseku">
+                <div class="controls-row">
+                    <div class="control-group">
+                        <span class="control-label">Granularita</span>
+                        <div class="segmented" role="group" aria-label="Granularita křivky">
+                            <button type="button" class="seg-btn active" data-granularity="DAY">Po dnech</button>
+                            <button type="button" class="seg-btn" data-granularity="MARKET">Po trzích</button>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <span class="control-label">Jednotka</span>
+                        <div class="segmented" role="group" aria-label="Jednotka osy Y">
+                            <button type="button" class="seg-btn active" data-unit="USD">PnL ($)</button>
+                            <button type="button" class="seg-btn" data-unit="PCT">Výnos (%)</button>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <span class="control-label">Podgraf</span>
+                        <div class="segmented" role="group" aria-label="Typ podgrafu">
+                            <button type="button" class="seg-btn active" data-subchart="DRAWDOWN">Drawdown (%)</button>
+                            <button type="button" class="seg-btn" data-subchart="PNL">PnL sloupce</button>
+                        </div>
+                    </div>
+
+                    <div class="control-group slice-group">
+                        <span class="control-label">Výsek období (rebased od 0)</span>
+                        <div class="slice-inputs">
+                            <input type="date" id="slice-from" class="input input-date" aria-label="Výsek od">
+                            <span class="muted">–</span>
+                            <input type="date" id="slice-to" class="input input-date" aria-label="Výsek do">
+                            <button type="button" id="btn-apply-slice" class="btn btn-xs btn-secondary">Použít</button>
+                            <button type="button" id="btn-preset-3d" class="btn btn-xs btn-ghost" data-days="3">3D</button>
+                            <button type="button" id="btn-preset-7d" class="btn btn-xs btn-ghost" data-days="7">7D</button>
+                            <button type="button" id="btn-preset-14d" class="btn btn-xs btn-ghost" data-days="14">14D</button>
+                            <button type="button" id="btn-preset-30d" class="btn btn-xs btn-ghost" data-days="30">30D</button>
+                            <button type="button" id="btn-zoom-to-slice" class="btn btn-xs btn-secondary" disabled title="Použije aktuální přiblížení v grafu jako přesný výsek a přepočítá metriky od nuly">Zoom → Výsek</button>
+                            <button type="button" id="btn-reset-slice" class="btn btn-xs btn-ghost">Celé období</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card chart-card" aria-labelledby="chart-heading">
+                <div class="card-header">
+                    <div>
+                        <h2 id="chart-heading" class="card-title">Equity křivka</h2>
+                        <p id="chart-subtitle" class="card-subtitle">Vyberte alespoň jeden běh z historie vlevo.</p>
+                    </div>
+                    <div id="slice-badge" class="badge badge-info hidden"></div>
+                </div>
+
+                <div id="chart-empty-state" class="empty-state">
+                    <p>Zatím není vybrán žádný backtest. Spusťte nový backtest tlačítkem <strong>+ Nový backtest</strong> nebo zaškrtněte uložený běh v panelu vlevo.</p>
+                </div>
+
+                <div id="charts-container" class="hidden">
+                    <div id="equity-chart" class="chart-box-main"></div>
+                    <div class="subchart-divider">
+                        <span id="subchart-title" class="subchart-label">Drawdown (%)</span>
+                    </div>
+                    <div id="sub-chart" class="chart-box-sub"></div>
+                </div>
+            </section>
+
+            <section class="card" aria-labelledby="metrics-heading">
+                <div class="card-header">
+                    <h2 id="metrics-heading" class="card-title">Porovnání metrik (pro aktivní výsek)</h2>
+                    <span class="card-subtitle">Všechny metriky jsou přepočítány od 0 na začátku vybraného výseku</span>
+                </div>
+                <div tabindex="0" role="region" aria-labelledby="metrics-heading" class="table-wrapper">
+                    <table id="metrics-table" class="data-table">
+                        <thead>
+                        <tr>
+                            <th>Běh</th>
+                            <th>Strategie</th>
+                            <th>Symbol</th>
+                            <th class="num">Trhy</th>
+                            <th class="num">Obchody</th>
+                            <th class="num">Win Rate</th>
+                            <th class="num">Net PnL</th>
+                            <th class="num">Výnos</th>
+                            <th class="num">Profit Factor</th>
+                            <th class="num">Max DD ($)</th>
+                            <th class="num">Max DD (%)</th>
+                            <th class="num">Sharpe</th>
+                            <th class="num">Sortino</th>
+                            <th class="num">Poplatky</th>
+                            <th class="num">Brier</th>
+                        </tr>
+                        </thead>
+                        <tbody id="metrics-tbody">
+                        <tr><td colspan="15" class="empty-cell">Žádná data k zobrazení.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="diff-section" class="card hidden" aria-labelledby="diff-heading">
+                <div class="card-header">
+                    <div>
+                        <h2 id="diff-heading" class="card-title">Diff parametrů enginu a strategií</h2>
+                        <p class="card-subtitle">Automaticky zvýrazňuje rozdíly mezi porovnávanými běhy</p>
+                    </div>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" id="toggle-show-all-params">
+                        <span>Zobrazit i shodné parametry</span>
+                    </label>
+                </div>
+                <div tabindex="0" role="region" aria-labelledby="diff-heading" class="table-wrapper">
+                    <table id="diff-table" class="data-table">
+                        <thead id="diff-thead"></thead>
+                        <tbody id="diff-tbody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="trades-section" class="card hidden" aria-labelledby="trades-heading">
+                <div class="card-header">
+                    <div>
+                        <h2 id="trades-heading" class="card-title">Detail obchodů ve výseku</h2>
+                        <p id="trades-summary" class="card-subtitle"></p>
+                    </div>
+                    <div class="trades-toolbar">
+                        <select id="trades-run-select" class="select select-sm" aria-label="Běh pro zobrazení obchodů"></select>
+                        <select id="trades-side-filter" class="select select-sm" aria-label="Filtr směru">
+                            <option value="ALL">Směr: Vše</option>
+                            <option value="UP">UP</option>
+                            <option value="DOWN">DOWN</option>
+                        </select>
+                        <select id="trades-outcome-filter" class="select select-sm" aria-label="Filtr výsledku">
+                            <option value="ALL">Výsledek: Vše</option>
+                            <option value="WIN">Výhry</option>
+                            <option value="LOSS">Prohry</option>
+                        </select>
+                        <input type="search" id="trades-search" class="input input-sm" placeholder="Hledat důvod / čas…" aria-label="Hledat v obchodech">
+                    </div>
+                </div>
+                <div tabindex="0" role="region" aria-labelledby="trades-heading" class="table-wrapper">
+                    <table id="trades-table" class="data-table">
+                        <thead>
+                        <tr>
+                            <th>Čas (UTC)</th>
+                            <th class="num">Trh (epoch)</th>
+                            <th>Strana</th>
+                            <th class="num">Vstup</th>
+                            <th class="num">Výstup</th>
+                            <th class="num">Objem ($)</th>
+                            <th class="num">Shares</th>
+                            <th class="num">Poplatek ($)</th>
+                            <th class="num">Net PnL ($)</th>
+                            <th class="num">Edge</th>
+                            <th>Důvod výstupu</th>
+                            <th class="num">Balance ($)</th>
+                        </tr>
+                        </thead>
+                        <tbody id="trades-tbody"></tbody>
+                    </table>
+                </div>
+                <div class="pagination-bar">
+                    <button type="button" id="btn-trades-prev" class="btn btn-xs btn-secondary">← Předchozí</button>
+                    <span id="trades-page-info" class="muted">Strana 1</span>
+                    <button type="button" id="btn-trades-next" class="btn btn-xs btn-secondary">Další →</button>
+                </div>
+            </section>
+        </main>
+    </div>
+</div>
+
+<!-- Modal: Spuštění nového / klonovaného backtestu -->
+<dialog id="runner-dialog" class="modal modal-lg" aria-labelledby="runner-title">
+    <form id="runner-form" method="dialog" novalidate>
+        <div class="modal-header">
+            <h1 id="runner-title">Spustit nový backtest</h1>
+            <button type="button" id="btn-runner-close" class="btn-icon" aria-label="Zavřít dialog">✕</button>
+        </div>
+
+        <div class="modal-body">
+            <div id="runner-error" class="alert-error hidden" role="alert"></div>
+
+            <div class="form-grid-2">
+                <div class="form-field">
+                    <label for="run-strategy">Strategie</label>
+                    <select id="run-strategy" class="select" required autofocus></select>
+                </div>
+                <div class="form-field">
+                    <label for="run-label">Vlastní štítek běhu (volitelné)</label>
+                    <input type="text" id="run-label" class="input" placeholder="např. OraclePulse tight spread 0.02">
+                </div>
+            </div>
+
+            <fieldset class="fieldset">
+                <legend>Trh a časové období</legend>
+                <div class="form-grid-3">
+                    <div class="form-field">
+                        <label for="run-symbol">Symbol</label>
+                        <select id="run-symbol" class="select"></select>
+                        <span id="run-dataset-hint" class="field-hint"></span>
+                    </div>
+                    <div class="form-field">
+                        <label for="run-start-date">Datum od (UTC)</label>
+                        <input type="date" id="run-start-date" class="input">
+                    </div>
+                    <div class="form-field">
+                        <label for="run-end-date">Datum do (UTC)</label>
+                        <input type="date" id="run-end-date" class="input">
+                    </div>
+                </div>
+                <label class="checkbox-inline mt-8">
+                    <input type="checkbox" id="run-full-range">
+                    <span>Spustit pro celé dostupné historické období</span>
+                </label>
+            </fieldset>
+
+            <fieldset class="fieldset">
+                <legend>Parametry backtest enginu</legend>
+                <div class="form-grid-5">
+                    <div class="form-field">
+                        <label for="run-capital">Initial balance ($)</label>
+                        <input type="number" id="run-capital" class="input" step="100" min="1" required>
+                    </div>
+                    <div class="form-field">
+                        <label for="run-latency-factor">Latency factor</label>
+                        <input type="number" id="run-latency-factor" class="input" step="0.1" min="0" required>
+                    </div>
+                    <div class="form-field">
+                        <label for="run-binance-delay">Binance delay (ms)</label>
+                        <input type="number" id="run-binance-delay" class="input" step="5" min="0" required>
+                    </div>
+                    <div class="form-field">
+                        <label for="run-kraken-delay">Kraken delay (ms)</label>
+                        <input type="number" id="run-kraken-delay" class="input" step="5" min="0" required>
+                    </div>
+                    <div class="form-field">
+                        <label for="run-coinbase-delay">Coinbase delay (ms)</label>
+                        <input type="number" id="run-coinbase-delay" class="input" step="5" min="0" required>
+                    </div>
+                </div>
+            </fieldset>
+
+            <fieldset class="fieldset">
+                <legend class="legend-between">
+                    <span>Klíčové parametry strategie</span>
+                    <button type="button" id="btn-reset-strategy-params" class="btn btn-xs btn-secondary">Obnovit výchozí hodnoty</button>
+                </legend>
+                <div id="key-params-grid" class="form-grid-3"></div>
+            </fieldset>
+
+            <details id="raw-json-details" class="raw-details">
+                <summary>Všechny parametry strategie (raw JSON editor)</summary>
+                <p class="field-hint mt-8">Můžete upravit libovolný parametr strategie. Změny se obousměrně synchronizují s poli výše.</p>
+                <textarea id="run-params-json" class="textarea-code" rows="12" spellcheck="false"></textarea>
+                <div id="json-parse-error" class="field-error hidden"></div>
+            </details>
+        </div>
+
+        <div class="modal-footer">
+            <button type="button" id="btn-runner-cancel" class="btn btn-secondary">Zrušit</button>
+            <button type="submit" id="btn-runner-submit" class="btn btn-primary">Zařadit do fronty a spustit</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- Modal: Přejmenování běhu -->
+<dialog id="rename-dialog" class="modal modal-sm" aria-labelledby="rename-title">
+    <form id="rename-form" method="dialog">
+        <div class="modal-header">
+            <h1 id="rename-title">Přejmenovat běh</h1>
+        </div>
+        <div class="modal-body">
+            <div class="form-field">
+                <label for="rename-input">Nový štítek</label>
+                <input type="text" id="rename-input" class="input" required autofocus>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="submit" value="cancel" class="btn btn-secondary" formnovalidate>Zrušit</button>
+            <button type="submit" value="confirm" class="btn btn-primary">Uložit</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- Modal: Potvrzení smazání -->
+<dialog id="delete-dialog" class="modal modal-sm" aria-labelledby="delete-title">
+    <form method="dialog">
+        <div class="modal-header">
+            <h1 id="delete-title">Smazat záznam backtestu?</h1>
+        </div>
+        <div class="modal-body">
+            <p id="delete-message">Opravdu chcete trvale odstranit tento běh z DuckDB historie?</p>
+        </div>
+        <div class="modal-footer">
+            <button type="submit" value="delete" class="btn btn-danger">Smazat</button>
+            <button type="submit" value="cancel" class="btn btn-secondary" autofocus>Zrušit</button>
+        </div>
+    </form>
+</dialog>
+
+<script src="/vendor/echarts.min.js"></script>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
