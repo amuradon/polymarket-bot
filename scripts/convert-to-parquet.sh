@@ -37,7 +37,7 @@ Usage:
 
 Options:
   -t, --target-dir <path>       Root directory containing collector archives.
-                                (Default: /data/polymarket/collector or ./collector)
+                                (Default: /run/media/amuradon/T7/Crypto/data/Polymarket/collector)
   -d, --date <YYYY-MM-DD>       Optional target UTC date filter.
   -s, --stream <pattern>        Optional substring to filter by stream type or symbol
                                 (e.g. 'bookTicker', 'price_crypto', 'btc-updown').
@@ -57,17 +57,13 @@ Examples:
   $(basename "$0") --dry-run
   $(basename "$0") -d 2026-10-15
   $(basename "$0") -s aggTrades -k
-  $(basename "$0") -t /data/polymarket/collector --force
+  $(basename "$0") -t /run/media/amuradon/T7/Crypto/data/Polymarket/collector --force
 EOF
     exit "${1:-0}"
 }
 
 # Defaults
-if [ -d "/data/polymarket/collector" ]; then
-    TARGET_DIR="/data/polymarket/collector"
-else
-    TARGET_DIR="${COLLECTOR_DATA_DIR:-./collector}"
-fi
+TARGET_DIR="${COLLECTOR_DATA_DIR:-/run/media/amuradon/T7/Crypto/data/Polymarket/collector}"
 
 DATE_FILTER=""
 STREAM_FILTER=""
