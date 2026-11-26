@@ -47,7 +47,7 @@ Modes:
 
 Options:
   -o, --destination-dir <path>  Local root directory for collector data.
-                                (Default: /run/media/amuradon/T7/Crypto/data/Polymarket/collector)
+                                (Default: /data/polymarket/collector)
   -h, --ec2-host <host>         EC2 public IP, hostname, or SSH host alias (with optional user@).
                                 (Default: PublicIp resolved from stack polymarket-bot-ec2 in eu-west-1)
   -u, --ssh-user <user>         SSH username for IP/hostname without user@ prefix. (Default: ec2-user)
@@ -62,7 +62,7 @@ Examples:
   $(basename "$0") -d 2026-10-15
   $(basename "$0") -d 2026-10-15 --dry-run
   $(basename "$0") -d 2026-10-15 -o /custom/data/path --keep-remote-files
-  $(basename "$0") --clean-already-downloaded -o /run/media/amuradon/T7/Crypto/data/Polymarket/collector
+  $(basename "$0") --clean-already-downloaded -o /data/polymarket/collector
 EOF
     exit "${1:-0}"
 }
@@ -80,7 +80,7 @@ DRY_RUN=false
 KEEP_REMOTE_FILES=false
 
 # Default destination dir if not provided via -o|--destination-dir
-DESTINATION_DIR="${COLLECTOR_DATA_DIR:-/run/media/amuradon/T7/Crypto/data/Polymarket/collector}"
+DESTINATION_DIR="${COLLECTOR_DATA_DIR:-/data/polymarket/collector}"
 
 # Parse CLI options
 while [[ $# -gt 0 ]]; do

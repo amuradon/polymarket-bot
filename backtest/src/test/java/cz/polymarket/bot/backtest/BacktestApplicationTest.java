@@ -79,7 +79,7 @@ class BacktestApplicationTest {
                 42,
                 PerformanceMetrics.empty(10000.0),
                 List.of(),
-                "D:/Crypto/data/Polymarket/backtesting/backtest_UtterParameciumStrategy_20261111_180000.json"
+                "/data/polymarket/backtesting/backtest_UtterParameciumStrategy_20261111_180000.json"
         );
 
         when(mockEngine.runBacktest(
@@ -88,7 +88,7 @@ class BacktestApplicationTest {
                 eq("2026-10-12"),
                 eq(todayUtc),
                 eq(10000.0),
-                eq("D:/Crypto/data/Polymarket/backtesting"),
+                eq("/data/polymarket/backtesting"),
                 eq(1.0)
         )).thenReturn(expectedResult);
 
@@ -100,7 +100,7 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.empty(),
                 10000.0,
-                "D:/Crypto/data/Polymarket/backtesting",
+                "/data/polymarket/backtesting",
                 1.0
         );
 
@@ -113,7 +113,7 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 todayUtc,
                 10000.0,
-                "D:/Crypto/data/Polymarket/backtesting",
+                "/data/polymarket/backtesting",
                 1.0
         );
     }
@@ -129,7 +129,7 @@ class BacktestApplicationTest {
                 10,
                 PerformanceMetrics.empty(25000.0),
                 List.of(),
-                "D:/Custom/Out/backtest_UtterParameciumStrategy_20261111_180000.json"
+                "/tmp/custom-out/backtest_UtterParameciumStrategy_20261111_180000.json"
         );
 
         when(mockEngine.runBacktest(
@@ -138,7 +138,7 @@ class BacktestApplicationTest {
                 eq("2026-10-15"),
                 eq("2026-10-20"),
                 eq(25000.0),
-                eq("D:/Custom/Out"),
+                eq("/tmp/custom-out"),
                 eq(1.25)
         )).thenReturn(expectedResult);
 
@@ -150,7 +150,7 @@ class BacktestApplicationTest {
                 "2026-10-15",
                 Optional.of("2026-10-20"),
                 25000.0,
-                "D:/Custom/Out",
+                "/tmp/custom-out",
                 1.25
         );
 
@@ -163,7 +163,7 @@ class BacktestApplicationTest {
                 "2026-10-15",
                 "2026-10-20",
                 25000.0,
-                "D:/Custom/Out",
+                "/tmp/custom-out",
                 1.25
         );
     }
@@ -183,7 +183,7 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.of("2026-10-15"),
                 10000.0,
-                "D:/Crypto/data/Polymarket/backtesting",
+                "/data/polymarket/backtesting",
                 1.0
         );
 

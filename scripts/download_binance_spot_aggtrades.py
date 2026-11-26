@@ -11,7 +11,7 @@ Fallback (for recent dates not yet published on data.binance.vision, e.g. today)
 Target path layout:
   <dir>/<SYMBOL>/aggTrades/<SYMBOL>-aggTrades-<YYYY-MM-DD>.parquet
 Default dir:
-  /run/media/amuradon/T7/Crypto/data/Polymarket/collector/binance/spot
+  /data/polymarket/collector/binance/spot
 
 Parquet schema:
   - event_time: uint64         (nullable; null for historical Vision/REST downloads)
@@ -41,7 +41,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-DEFAULT_ROOT_DIR = "/run/media/amuradon/T7/Crypto/data/Polymarket/collector/binance/spot"
+DEFAULT_ROOT_DIR = "/data/polymarket/collector/binance/spot"
 BINANCE_VISION_SPOT_BASE_URL = "https://data.binance.vision/data/spot/daily/aggTrades"
 BINANCE_SPOT_REST_URL = "https://api.binance.com/api/v3/aggTrades"
 

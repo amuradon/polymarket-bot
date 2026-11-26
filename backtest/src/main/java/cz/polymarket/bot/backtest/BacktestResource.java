@@ -372,11 +372,11 @@ public class BacktestResource {
             String symbol,
 
             @Schema(description = "File system path to the exported JSON results file when completed",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
+                    examples = "/data/polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
             String resultFilePath,
 
             @Schema(description = "File system path to the exported JSON results file (alias)",
-                    examples = "D:/Crypto/data/Polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
+                    examples = "/data/polymarket/backtesting/backtest_OraclePulseLockStrategy_20261003_114500.json")
             String jsonFilePath,
 
             @Schema(description = "Error description if execution failed", examples = "No market rows available")

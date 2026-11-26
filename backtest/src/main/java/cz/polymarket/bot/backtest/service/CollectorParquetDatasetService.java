@@ -28,7 +28,7 @@ import java.util.stream.Stream;
 
 /**
  * Service discovering and resolving historical Parquet archives captured by the data collector
- * in {@code D:\Crypto\data\Polymarket\collector}.
+ * in {@code /data/polymarket/collector}.
  * <p>
  * Mirrors the exact subdirectory hierarchy produced by the {@code data} collector module and
  * {@code scripts/convert-to-parquet.ps1}, reading the typed 10-column CLOB Parquet metadata header
@@ -53,7 +53,7 @@ public class CollectorParquetDatasetService {
      */
     @Inject
     public CollectorParquetDatasetService(
-            @ConfigProperty(name = "polymarket.backtest.collector-dir", defaultValue = "D:/Crypto/data/Polymarket/collector")
+            @ConfigProperty(name = "polymarket.backtest.collector-dir", defaultValue = "/data/polymarket/collector")
             String collectorDir,
             DuckDbSessionManager duckDbSessionManager) {
         if (collectorDir == null || collectorDir.isBlank()) {

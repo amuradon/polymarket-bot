@@ -22,7 +22,7 @@ public interface BacktestIndicator {
 
     /**
      * Returns the canonical indicator name used as the {@code <indicator>} directory name
-     * under {@code D:\Crypto\data\Polymarket\cache\<indicator>\<hash>}.
+     * under {@code /data/polymarket/cache/<indicator>/<hash>}.
      *
      * @return canonical indicator name
      */

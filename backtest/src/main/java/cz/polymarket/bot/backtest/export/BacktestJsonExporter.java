@@ -19,7 +19,7 @@ import java.time.format.DateTimeFormatter;
 
 /**
  * Exports backtest execution results and detailed trade records to formatted JSON files.
- * Defaults to saving in D:/Crypto/data/Polymarket/backtesting and maintains a latest.json copy.
+ * Defaults to saving in /data/polymarket/backtesting and maintains a latest.json copy.
  */
 @ApplicationScoped
 public class BacktestJsonExporter {
@@ -39,7 +39,7 @@ public class BacktestJsonExporter {
     @Inject
     public BacktestJsonExporter(
             ObjectMapper objectMapper,
-            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
+            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "/data/polymarket/backtesting")
             String defaultOutputDir) {
         if (objectMapper == null) {
             Log.fatal("Fatal initialization error in BacktestJsonExporter: objectMapper cannot be null");
@@ -51,7 +51,7 @@ public class BacktestJsonExporter {
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.defaultOutputDir = defaultOutputDir != null && !defaultOutputDir.isBlank()
                 ? defaultOutputDir
-                : "D:/Crypto/data/Polymarket/backtesting";
+                : "/data/polymarket/backtesting";
     }
 
     /**

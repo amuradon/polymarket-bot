@@ -52,7 +52,7 @@ class BacktestJobManagerTest {
                 "2026-08-01",
                 "2026-08-05",
                 10000.0,
-                "D:/Crypto/data/Polymarket/backtesting",
+                "/data/polymarket/backtesting",
                 1.5
         );
 
@@ -63,7 +63,7 @@ class BacktestJobManagerTest {
                 100,
                 PerformanceMetrics.empty(10000.0),
                 List.of(),
-                "D:/Crypto/data/Polymarket/backtesting/result.json"
+                "/data/polymarket/backtesting/result.json"
         );
 
         when(backtestEngine.runBacktest(
@@ -72,7 +72,7 @@ class BacktestJobManagerTest {
                 eq("2026-08-01"),
                 eq("2026-08-05"),
                 eq(10000.0),
-                eq("D:/Crypto/data/Polymarket/backtesting"),
+                eq("/data/polymarket/backtesting"),
                 eq(1.5)
         )).thenReturn(mockResult);
 
@@ -87,7 +87,7 @@ class BacktestJobManagerTest {
             assertThat(queried).isPresent();
             assertThat(queried.get().status()).isEqualTo(BacktestJobStatus.COMPLETED);
             assertThat(queried.get().result()).isNotNull();
-            assertThat(queried.get().result().jsonFilePath()).isEqualTo("D:/Crypto/data/Polymarket/backtesting/result.json");
+            assertThat(queried.get().result().jsonFilePath()).isEqualTo("/data/polymarket/backtesting/result.json");
             assertThat(queried.get().completedAt()).isNotNull();
             assertThat(queried.get().error()).isNull();
         });

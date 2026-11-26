@@ -40,7 +40,7 @@ import java.util.TreeMap;
 
 /**
  * Service managing deterministic Parquet caching of indicator values for backtesting in
- * {@code D:\Crypto\data\Polymarket\cache\<indicator>\<hash>}.
+ * {@code /data/polymarket/cache/<indicator>/<hash>}.
  * <p>
  * For each UTC day in a backtest run:
  * <ul>
@@ -86,7 +86,7 @@ public class IndicatorCacheService {
      */
     @Inject
     public IndicatorCacheService(
-            @ConfigProperty(name = "polymarket.backtest.cache-dir", defaultValue = "D:/Crypto/data/Polymarket/cache")
+            @ConfigProperty(name = "polymarket.backtest.cache-dir", defaultValue = "/data/polymarket/cache")
             String cacheDir,
             ObjectMapper objectMapper,
             Instance<BacktestIndicator> indicatorInstances,

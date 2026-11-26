@@ -42,8 +42,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * High-performance event-driven backtesting engine streaming historical market data directly from
- * converted collector Parquet archives ({@code D:\Crypto\data\Polymarket\collector}) and cached
- * indicator Parquet archives ({@code D:\Crypto\data\Polymarket\cache\<indicator>\<hash>}).
+ * converted collector Parquet archives ({@code /data/polymarket/collector}) and cached
+ * indicator Parquet archives ({@code /data/polymarket/cache/<indicator>/<hash>}).
  * <p>
  * Orders all events strictly by the local EC2 receipt timestamp ({@code ts}), simulates
  * time-varying execution latency derived from Polymarket CLOB server-vs-receipt timestamps
@@ -100,7 +100,7 @@ public class BacktestEngine {
             String defaultStrategy,
             @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
             String defaultStartDate,
-            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
+            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "/data/polymarket/backtesting")
             String defaultOutputDir,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultCapital,

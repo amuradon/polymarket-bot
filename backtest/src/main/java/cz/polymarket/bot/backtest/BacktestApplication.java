@@ -50,7 +50,7 @@ public class BacktestApplication implements QuarkusApplication {
      * @param startDate inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
      * @param endDate optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
      * @param initialCapital initial account balance in USD (default {@code 10000.0})
-     * @param outputDir directory path for exported JSON reports (default {@code D:/Crypto/data/Polymarket/backtesting})
+     * @param outputDir directory path for exported JSON reports (default {@code /data/polymarket/backtesting})
      * @param latencyFactor simulated order execution latency factor (default {@code 1.0})
      */
     @Inject
@@ -68,7 +68,7 @@ public class BacktestApplication implements QuarkusApplication {
             Optional<String> endDate,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double initialCapital,
-            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "D:/Crypto/data/Polymarket/backtesting")
+            @ConfigProperty(name = "polymarket.backtest.output-dir", defaultValue = "/data/polymarket/backtesting")
             String outputDir,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
             double latencyFactor) {

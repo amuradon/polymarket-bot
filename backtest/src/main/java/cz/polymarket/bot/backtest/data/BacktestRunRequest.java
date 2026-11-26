@@ -30,7 +30,7 @@ public record BacktestRunRequest(
         @Schema(description = "Optional initial capital in USD", examples = "10000.0")
         Double initialCapital,
 
-        @Schema(description = "Optional directory to store exported JSON results", examples = "D:/Crypto/data/Polymarket/backtesting")
+        @Schema(description = "Optional directory to store exported JSON results", examples = "/data/polymarket/backtesting")
         String outputDirectory,
 
         @Schema(description = "Optional latency scaling factor (default 1.0)", examples = "1.0")

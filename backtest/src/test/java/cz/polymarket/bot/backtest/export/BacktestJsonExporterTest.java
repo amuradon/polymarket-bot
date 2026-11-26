@@ -24,7 +24,7 @@ class BacktestJsonExporterTest {
 
     @BeforeEach
     void setUp() {
-        exporter = new BacktestJsonExporter(new ObjectMapper(), "D:/Crypto/data/Polymarket/backtesting");
+        exporter = new BacktestJsonExporter(new ObjectMapper(), "/data/polymarket/backtesting");
     }
 
     @Test
