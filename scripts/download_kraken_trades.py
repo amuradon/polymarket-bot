@@ -7,7 +7,7 @@ trade schema and the Polymarket Bot collector conventions.
 Target path layout:
   <dir>/<SYMBOL>/trades/<SYMBOL>-trades-<YYYY-MM-DD>.parquet
 Default dir:
-  D:\\Crypto\\data\\Polymarket\\collector\\kraken\\spot
+  /run/media/amuradon/T7/Crypto/data/Polymarket/collector/kraken/spot
 
 Parquet schema (aligned with Kraken WebSocket v2 `trade` channel):
   - trade_timestamp: uint64 (exchange trade time in epoch milliseconds)
@@ -35,7 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-DEFAULT_ROOT_DIR = r"D:\Crypto\data\Polymarket\collector\kraken\spot"
+DEFAULT_ROOT_DIR = "/run/media/amuradon/T7/Crypto/data/Polymarket/collector/kraken/spot"
 KRAKEN_TRADES_URL = "https://api.kraken.com/0/public/Trades"
 
 KRAKEN_TRADES_PARQUET_SCHEMA = pa.schema(

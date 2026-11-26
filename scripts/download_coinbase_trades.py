@@ -7,7 +7,7 @@ daily ZSTD-compressed Apache Parquet files matching the Polymarket Bot collector
 Target path layout:
   <dir>/<SYMBOL>/trades/<SYMBOL>-trades-<YYYY-MM-DD>.parquet
 Default dir:
-  D:\\Crypto\\data\\Polymarket\\collector\\coinbase\\spot
+  /run/media/amuradon/T7/Crypto/data/Polymarket/collector/coinbase/spot
 
 Parquet schema:
   - trade_timestamp: uint64 (exchange trade time in epoch milliseconds)
@@ -33,7 +33,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-DEFAULT_ROOT_DIR = r"D:\Crypto\data\Polymarket\collector\coinbase\spot"
+DEFAULT_ROOT_DIR = "/run/media/amuradon/T7/Crypto/data/Polymarket/collector/coinbase/spot"
 COINBASE_API_BASE_URL = "https://api.exchange.coinbase.com"
 
 COINBASE_TRADES_PARQUET_SCHEMA = pa.schema(
