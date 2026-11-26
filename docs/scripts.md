@@ -167,3 +167,7 @@ python download_coinbase_trades.py --symbol USDTUSD --from 2026-11-04 --to 2026-
 python download_binance_spot_aggtrades.py -Symbol BTCUSDT -From 2026-11-15 -To 2026-11-16
 python download_binance_futures_aggtrades.py -Symbol BTCUSDT -From 2026-11-15 -To 2026-11-16
 ```
+
+```
+java -Xms2g -Xmx4g -XX:+UseZGC -jar backtest/target/quarkus-app/quarkus-run.jar
+```
