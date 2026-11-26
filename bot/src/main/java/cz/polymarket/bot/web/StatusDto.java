@@ -20,6 +20,8 @@ import java.util.List;
  * @param noTokenId        Down (NO) conditional token ID for the active market
  * @param twapOpenPrice    captured 60-second Chainlink TWAP target price for the active candle
  * @param currentSpotPrice latest observed spot price in USD
+ * @param depth1cUp        current effective 1-cent L2 ask depth for UP token in shares
+ * @param depth1cDown      current effective 1-cent L2 ask depth for DOWN token in shares
  * @param initialCapital   initial bankroll in USD (CLOB collateral in {@code LIVE}, virtual capital in {@code PAPER})
  * @param currentBalance   current balance in USD
  * @param activePosition   most recent open position, or {@code null}
@@ -39,6 +41,8 @@ public record StatusDto(
         String noTokenId,
         double twapOpenPrice,
         double currentSpotPrice,
+        double depth1cUp,
+        double depth1cDown,
         double initialCapital,
         double currentBalance,
         Position activePosition,

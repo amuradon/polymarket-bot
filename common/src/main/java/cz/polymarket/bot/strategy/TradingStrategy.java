@@ -120,4 +120,14 @@ public interface TradingStrategy {
      * @param actualOutcome the final outcome direction
      */
     default void onCandleResolution(TradeDirection actualOutcome) {}
+
+    /**
+     * Returns the strategy's latest estimated probability for the {@link TradeDirection#UP} outcome in {@code (0.0, 1.0)},
+     * or {@link Double#NaN} when no directional probability estimate is available yet.
+     *
+     * @return latest {@code UP} model probability, or {@link Double#NaN}
+     */
+    default double getLastModelProbabilityUp() {
+        return Double.NaN;
+    }
 }

@@ -152,8 +152,7 @@ class PricingModelStrategyTest {
         strategy.onSpotTwap(staticTs - 3_000L, "btcusd", basePrice + 40.0, basePrice + 10.0);
         strategy.onSpotTwap(staticTs, "btcusd", basePrice + 40.0, basePrice + 15.0);
         strategy.onPolymarketCryptoPrice(staticTs + 100L, "btcusd", "chainlink", basePrice + 40.0, staticTs - 1_000L);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.52, 0.51, 0.49, 0.48, 200.0, 200.0, 0.52, 0.49, staticTs + 150L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.52, 0.51, 0.49, 0.48, 200.0, 200.0, staticTs + 150L));
         assertThat(submittedOrders).isEmpty();
 
         // 2. Clip #1 on active impulse at ask = 0.52
@@ -170,16 +169,14 @@ class PricingModelStrategyTest {
         long avgDownTs = jump1Ts + 4_000L;
         strategy.onPolymarketCryptoPrice(avgDownTs - 200L, "btcusd", "chainlink", basePrice + 10.0, avgDownTs - 1_400L);
         strategy.onSpotTwap(avgDownTs - 1_500L, "btcusd", basePrice + 10.0, basePrice + 10.0);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.44, 0.43, 0.57, 0.56, 200.0, 200.0, 0.44, 0.57, avgDownTs - 50L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.44, 0.43, 0.57, 0.56, 200.0, 200.0, avgDownTs - 50L));
         strategy.onSpotTwap(avgDownTs, "btcusd", basePrice + 52.0, basePrice + 15.0);
         assertThat(submittedOrders).hasSize(1);
 
         // 4. Continuation Clip #2 at higher ask = 0.58 (>= 0.52 - 0.01) is ACCEPTED
         long jump2Ts = avgDownTs + 4_000L;
         strategy.onPolymarketCryptoPrice(jump2Ts - 200L, "btcusd", "chainlink", basePrice + 52.0, jump2Ts - 1_400L);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.58, 0.57, 0.43, 0.42, 200.0, 200.0, 0.58, 0.43, jump2Ts - 50L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.57, 0.43, 0.42, 200.0, 200.0, jump2Ts - 50L));
         strategy.onSpotTwap(jump2Ts, "btcusd", basePrice + 105.0, basePrice + 25.0);
         assertThat(submittedOrders).hasSize(2);
         OrderCommand c2 = submittedOrders.get(1);
@@ -189,8 +186,7 @@ class PricingModelStrategyTest {
         // 5. Clip #3 must be BLOCKED by maxOrdersPerMarket = 2 even when inventory remains
         long jump3Ts = jump2Ts + 4_000L;
         strategy.onPolymarketCryptoPrice(jump3Ts - 200L, "btcusd", "chainlink", basePrice + 105.0, jump3Ts - 1_400L);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.62, 0.61, 0.39, 0.38, 200.0, 200.0, 0.62, 0.39, jump3Ts - 50L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.61, 0.39, 0.38, 200.0, 200.0, jump3Ts - 50L));
         strategy.onSpotTwap(jump3Ts, "btcusd", basePrice + 160.0, basePrice + 35.0);
         assertThat(submittedOrders).hasSize(2);
     }
@@ -216,8 +212,7 @@ class PricingModelStrategyTest {
         }
 
         long breakoutTs = t0 + 34_500L; // sub-second burst at tau = 380.5s, clean +70 bps trend
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.76, 0.75, 0.25, 0.24, 300.0, 300.0, 0.76, 0.25, breakoutTs - 50L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.76, 0.75, 0.25, 0.24, 300.0, 300.0, breakoutTs - 50L));
         strategy.onSpotTwap(breakoutTs, "btcusd", strike + 560.0, strike + 300.0);
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
@@ -240,8 +235,7 @@ class PricingModelStrategyTest {
         strategy.onPolymarketCryptoPrice(whipStartTs + 3_500L, "btcusd", "chainlink", strike + 15.0, whipStartTs + 2_300L);
 
         long whipEvalTs = whipStartTs + 4_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.50, 0.49, 0.51, 0.50, 300.0, 300.0, 0.50, 0.51, whipEvalTs - 50L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.50, 0.49, 0.51, 0.50, 300.0, 300.0, whipEvalTs - 50L));
         strategy.onSpotTwap(whipEvalTs, "btcusd", strike + 60.0, strike);
         assertThat(submittedOrders).isEmpty();
     }
@@ -262,8 +256,7 @@ class PricingModelStrategyTest {
             strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
         }
         long atmTs = t0 + 26_500L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.50, 0.49, 0.51, 0.50, 400.0, 400.0, 0.50, 0.51, atmTs - 40L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.50, 0.49, 0.51, 0.50, 400.0, 400.0, atmTs - 40L));
         strategy.onSpotTwap(atmTs, "btcusd", strike + venueBias + 23.0, strike + venueBias + 5.0);
         assertThat(submittedOrders).hasSize(1);
         int atmShares = submittedOrders.getFirst().size().intValue();
@@ -280,8 +273,7 @@ class PricingModelStrategyTest {
             strategy.onPolymarketCryptoPrice(ts + 1_200L, "btcusd", "chainlink", clPrice, ts);
         }
         long lateTs = CANDLE_END_MS - 30_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.15, 0.14, 0.86, 0.85, 400.0, 400.0, 0.15, 0.86, lateTs - 40L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.15, 0.14, 0.86, 0.85, 400.0, 400.0, lateTs - 40L));
         strategy.onSpotTwap(lateTs, "btcusd", strike + venueBias - 62.0, strike + venueBias - 32.0);
         assertThat(submittedOrders).hasSize(1);
         int kellyLowVarShares = submittedOrders.getFirst().size().intValue();
@@ -311,14 +303,12 @@ class PricingModelStrategyTest {
         long evalTs = preTs + 500L;
 
         // 1. Overpriced ask = 0.76 (cost ~773 mc) has +44 mc raw edge, but only +20 mc Bayesian edge (< 40 mc) -> REJECTED
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.76, 0.75, 0.25, 0.24, 300.0, 300.0, 0.76, 0.25, evalTs - 40L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.76, 0.75, 0.25, 0.24, 300.0, 300.0, evalTs - 40L));
         strategy.onSpotTwap(evalTs, "btcusd", strike + 148.0, strike + 65.0);
         assertThat(submittedOrders).isEmpty();
 
         // 2. Fair ask = 0.72 (cost ~735 mc, Bayesian edge +58 mc) passes because unshrunk jump is +26 mc (>= 25 mc)
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.72, 0.71, 0.29, 0.28, 300.0, 300.0, 0.72, 0.29, evalTs + 20L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.72, 0.71, 0.29, 0.28, 300.0, 300.0, evalTs + 20L));
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().token()).isEqualTo("BTC-UP");
     }

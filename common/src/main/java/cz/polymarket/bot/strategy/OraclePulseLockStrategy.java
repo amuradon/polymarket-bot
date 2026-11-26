@@ -130,8 +130,7 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
     private double lastBestBidDown = 0.0;
     private double lastDepth1cUp = 0.0;
     private double lastDepth1cDown = 0.0;
-    private double lastEstFillUp = 0.0;
-    private double lastEstFillDown = 0.0;
+    private double lastModelProbUp = Double.NaN;
 
     // Per-market one-side execution & inventory state
     private TradeDirection primaryDirection = TradeDirection.NO_TRADE;
@@ -266,8 +265,7 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
         lastBestBidDown = 0.0;
         lastDepth1cUp = 0.0;
         lastDepth1cDown = 0.0;
-        lastEstFillUp = 0.0;
-        lastEstFillDown = 0.0;
+        lastModelProbUp = Double.NaN;
         primaryDirection = TradeDirection.NO_TRADE;
         clipsFilledInMarket = 0;
         riskUsdCommitted = 0.0;
@@ -443,10 +441,13 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
         lastBestBidDown = quote.bestBidDown();
         lastDepth1cUp = quote.depth1cUp();
         lastDepth1cDown = quote.depth1cDown();
-        lastEstFillUp = quote.estimatedFillPriceUp();
-        lastEstFillDown = quote.estimatedFillPriceDown();
 
         stepModelAndEvaluate(nowMs);
+    }
+
+    @Override
+    public double getLastModelProbabilityUp() {
+        return lastModelProbUp;
     }
 
     @Override
@@ -659,6 +660,7 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
                 + config.ofiLogitWeight() * lastSignedOfi1s
                 + config.syncLogitWeight() * syncNorm;
         double pFinalUp = Math.clamp(1.0 / (1.0 + Math.exp(-logitUp)), 0.004, 0.996);
+        this.lastModelProbUp = pFinalUp;
 
         pushHistorySample(nowMs, pFinalUp, lastBestAskUp, lastBestAskDown);
 
@@ -780,14 +782,6 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
             if (effCost >= 0.965 || (pSide - effCost) < 0.025) {
                 continue;
             }
-            double estFillP = buyUp ? lastEstFillUp : lastEstFillDown;
-            if (estFillP > askP) {
-                double sweepFillP = Math.min(estFillP, askP + 0.010);
-                double sweepFee = config.takerFeeRate() * sweepFillP * (1.0 - sweepFillP);
-                if ((pSide - sweepFillP - sweepFee) < 0.015) {
-                    continue;
-                }
-            }
 
             double logitEdge = Math.log(pSide / (1.0 - pSide)) - Math.log(effCost / (1.0 - effCost));
             double reqLogit;
@@ -833,6 +827,26 @@ public class OraclePulseLockStrategy implements TradingStrategy, FastSpotMicroLi
             int limitMc = Math.clamp(Math.min(askCeilMc + TICK_STEP_MC, maxEdgeMc), TICK_STEP_MC, MAX_MC - TICK_STEP_MC);
             if (limitMc < (int) Math.round(askP * 1_000.0)) {
                 continue;
+            }
+
+            double limitPrice = limitMc * 1e-3;
+            double fillableSh = context.estimateBuyFillableShares(dir, limitPrice);
+            if (Double.isFinite(fillableSh)) {
+                reqShares = Math.min(reqShares, (int) Math.floor(fillableSh));
+                if (reqShares < config.minOrderShares()) {
+                    continue;
+                }
+            }
+            double estVwap = context.estimateBuyFillVwap(dir, reqShares, limitPrice);
+            if (Double.isNaN(estVwap)) {
+                continue;
+            }
+            double effFillP = estVwap > 0.0 ? estVwap : askP;
+            if (effFillP > askP) {
+                double sweepFee = config.takerFeeRate() * effFillP * (1.0 - effFillP);
+                if ((pSide - effFillP - sweepFee) < 0.015) {
+                    continue;
+                }
             }
 
             submitBuyOrder(nowMs, dir, askP, limitMc, reqShares, pSide, logitEdge, isCushionLocked);

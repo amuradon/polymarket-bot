@@ -188,23 +188,23 @@ class RoundMainstreamStrategyTest {
         feedCalmUnderlying(CANDLE_START_MS + 1_000L, t0, 90_022.00, "btcusd");
 
         // 1. Same-tick HFT cancel/replace flicker: 2800 -> 800 -> 2800 -> 850 -> 2800
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, 0.54, 0.47, t0));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 800.0, 400.0, 0.54, 0.47, t0 + 80L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, 0.54, 0.47, t0 + 160L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 850.0, 400.0, 0.54, 0.47, t0 + 240L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, 0.54, 0.47, t0 + 320L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, t0));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 800.0, 400.0, t0 + 80L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, t0 + 160L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 850.0, 400.0, t0 + 240L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_800.0, 400.0, t0 + 320L));
         assertThat(submittedOrders).isEmpty();
 
         // 2. Routine MM quote shift (2,200 sh ask thinned to 400 sh, but bidWall = depthDown is only 500 < minBidWallShares)
         long t1 = t0 + 2_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(0.52, 0.51, 0.49, 0.48, 2_200.0, 500.0, 0.52, 0.49, t1));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.55, 0.54, 0.46, 0.45, 400.0, 500.0, 0.55, 0.46, t1 + 300L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.52, 0.51, 0.49, 0.48, 2_200.0, 500.0, t1));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.55, 0.54, 0.46, 0.45, 400.0, 500.0, t1 + 300L));
         assertThat(submittedOrders).isEmpty();
 
         // 3. One-sided MM ask pull vacuum (ask jumps 0.54 -> 0.64 while bid stays at 0.53 -> wide 110 mc spread)
         long t2 = t1 + 2_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_400.0, 2_500.0, 0.54, 0.47, t2));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.64, 0.53, 0.47, 0.36, 200.0, 2_500.0, 0.64, 0.47, t2 + 300L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 2_400.0, 2_500.0, t2));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.64, 0.53, 0.47, 0.36, 200.0, 2_500.0, t2 + 300L));
         assertThat(submittedOrders).isEmpty();
     }
 
@@ -217,11 +217,11 @@ class RoundMainstreamStrategyTest {
         feedCalmUnderlying(CANDLE_START_MS + 540_000L, tSweep, 3_001.20, "ethusd");
 
         // Whale sweeps UP book from 0.51/0.50 (1,600 sh) -> 0.54/0.53 (900 sh) -> 0.56/0.55 (220 sh) with 2,400 sh mirrored bid wall
-        strategy.onOrderBookQuote(new OrderBookQuote(0.51, 0.50, 0.50, 0.49, 1_600.0, 700.0, 0.51, 0.50, tSweep - 800L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.51, 0.50, 0.50, 0.49, 1_600.0, 700.0, tSweep - 800L));
         assertThat(submittedOrders).isEmpty();
 
-        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 900.0, 1_900.0, 0.54, 0.47, tSweep - 300L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.56, 0.55, 0.45, 0.44, 220.0, 2_400.0, 0.56, 0.45, tSweep));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.53, 0.47, 0.46, 900.0, 1_900.0, tSweep - 300L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.56, 0.55, 0.45, 0.44, 220.0, 2_400.0, tSweep));
 
         // Immediate execution on signal tick (zero artificial blockchain reaction delay!)
         assertThat(submittedOrders).hasSize(1);
@@ -237,14 +237,14 @@ class RoundMainstreamStrategyTest {
                 firstOrder.clientOrderId(), "fill-1", "FILLED",
                 BigDecimal.valueOf(0.56), firstOrder.size(), tSweep + 20L, "Filled"
         ));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.57, 0.43, 0.42, 200.0, 2_500.0, 0.58, 0.43, tSweep + 400L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.57, 0.43, 0.42, 200.0, 2_500.0, tSweep + 400L));
         assertThat(submittedOrders).hasSize(1);
 
         // After sameSideCooldownMs elapses, continued sweep scales ADD_SAME_DIR
         long tScale = tSweep + config.sameSideCooldownMs() + 200L;
         strategy.onPolymarketCryptoPrice(tScale - 100L, "ethusd", "chainlink", 3_001.30, tScale - 100L);
-        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.57, 0.43, 0.42, 2_100.0, 1_500.0, 0.58, 0.43, tScale - 500L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.61, 0.39, 0.38, 220.0, 2_600.0, 0.62, 0.39, tScale));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.57, 0.43, 0.42, 2_100.0, 1_500.0, tScale - 500L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.61, 0.39, 0.38, 220.0, 2_600.0, tScale));
         assertThat(submittedOrders).hasSize(2);
         assertThat(submittedOrders.get(1).token()).isEqualTo("BTC-UP");
     }
@@ -268,10 +268,10 @@ class RoundMainstreamStrategyTest {
         long tWall = CANDLE_START_MS + 660_000L;
         feedCalmUnderlying(CANDLE_START_MS + 540_000L, tWall, 90_028.00, "btcusd");
 
-        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 8_000.0, 2_200.0, 0.60, 0.41, tWall - 1_800L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 5_800.0, 2_300.0, 0.60, 0.41, tWall - 1_200L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 3_700.0, 2_400.0, 0.60, 0.41, tWall - 600L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 1_800.0, 2_600.0, 0.60, 0.41, tWall));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 8_000.0, 2_200.0, tWall - 1_800L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 5_800.0, 2_300.0, tWall - 1_200L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 3_700.0, 2_400.0, tWall - 600L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.60, 0.59, 0.41, 0.40, 1_800.0, 2_600.0, tWall));
 
         assertThat(submittedOrders).isNotEmpty();
         int whaleWallShares = submittedOrders.getLast().size().intValue();
@@ -299,8 +299,8 @@ class RoundMainstreamStrategyTest {
         long tTp = CANDLE_END_MS - 180_000L;
         strategy.onPolymarketCryptoPrice(tTp - 1_000L, "btcusd", "chainlink", 90_035.00, tTp - 1_000L);
         strategy.onPolymarketCryptoPrice(tTp, "btcusd", "chainlink", 90_034.80, tTp);
-        strategy.onOrderBookQuote(new OrderBookQuote(0.82, 0.81, 0.19, 0.18, 900.0, 900.0, 0.82, 0.19, tTp - 600L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.79, 0.78, 0.22, 0.21, 1_200.0, 200.0, 0.79, 0.22, tTp));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.82, 0.81, 0.19, 0.18, 900.0, 900.0, tTp - 600L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.79, 0.78, 0.22, 0.21, 1_200.0, 200.0, tTp));
 
         assertThat(submittedOrders).hasSize(2);
         OrderCommand tpCmd = submittedOrders.get(1);
@@ -330,9 +330,9 @@ class RoundMainstreamStrategyTest {
         strategy.onPolymarketCryptoPrice(tSl - 2_000L, "btcusd", "chainlink", 89_970.00, tSl - 2_000L);
         strategy.onPolymarketCryptoPrice(tSl - 1_000L, "btcusd", "chainlink", 89_969.80, tSl - 1_000L);
         strategy.onPolymarketCryptoPrice(tSl, "btcusd", "chainlink", 89_969.60, tSl);
-        strategy.onOrderBookQuote(new OrderBookQuote(0.55, 0.54, 0.46, 0.45, 900.0, 2_200.0, 0.55, 0.46, tSl - 900L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.46, 0.45, 0.55, 0.54, 1_900.0, 900.0, 0.46, 0.55, tSl - 400L));
-        strategy.onOrderBookQuote(new OrderBookQuote(0.42, 0.41, 0.59, 0.58, 2_500.0, 220.0, 0.42, 0.59, tSl));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.55, 0.54, 0.46, 0.45, 900.0, 2_200.0, tSl - 900L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.46, 0.45, 0.55, 0.54, 1_900.0, 900.0, tSl - 400L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.42, 0.41, 0.59, 0.58, 2_500.0, 220.0, tSl));
 
         assertThat(submittedOrders).hasSize(2);
         OrderCommand slCmd = submittedOrders.get(1);
@@ -382,17 +382,8 @@ class RoundMainstreamStrategyTest {
         double midBid = Math.round((midAsk - 0.01) * 100.0) / 100.0;
         double endBid = Math.round((endAsk - 0.01) * 100.0) / 100.0;
 
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                startAsk, startBid, 1.0 - startBid, 1.0 - startAsk,
-                startAskDepthShares, 600.0, startAsk, 1.0 - startBid, endTsMs - 800L
-        ));
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                midAsk, midBid, 1.0 - midBid, 1.0 - midAsk,
-                startAskDepthShares * 0.5, endMirroredBidWallShares * 0.8, midAsk, 1.0 - midBid, endTsMs - 350L
-        ));
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                endAsk, endBid, 1.0 - endBid, 1.0 - endAsk,
-                220.0, endMirroredBidWallShares, endAsk, 1.0 - endBid, endTsMs
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(startAsk, startBid, 1.0 - startBid, 1.0 - startAsk, startAskDepthShares, 600.0, endTsMs - 800L));
+        strategy.onOrderBookQuote(new OrderBookQuote(midAsk, midBid, 1.0 - midBid, 1.0 - midAsk, startAskDepthShares * 0.5, endMirroredBidWallShares * 0.8, endTsMs - 350L));
+        strategy.onOrderBookQuote(new OrderBookQuote(endAsk, endBid, 1.0 - endBid, 1.0 - endAsk, 220.0, endMirroredBidWallShares, endTsMs));
     }
 }

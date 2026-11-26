@@ -5,10 +5,7 @@ import cz.polymarket.bot.backtest.TypedClobParquetTestHelper;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.BacktestProgressListener;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
-import cz.polymarket.bot.backtest.data.ExchangeDelays;
 import cz.polymarket.bot.backtest.data.MarketEquityPoint;
-import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
-import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
 import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
@@ -16,14 +13,23 @@ import cz.polymarket.bot.backtest.service.StrategyParameterService;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
+import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.engine.CoreTradingEngine;
+import cz.polymarket.bot.engine.SimulatedClobExecutionEngine;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicator;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
+import cz.polymarket.bot.indicators.FastSpotMicroListener;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
+import cz.polymarket.bot.indicators.SpotTwapListener;
+import cz.polymarket.bot.orderbook.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.OrderCommand;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategy;
+import cz.polymarket.bot.strategy.OraclePulseLockStrategyConfig;
 import cz.polymarket.bot.strategy.StrategyContext;
 import cz.polymarket.bot.strategy.StrategyRegistry;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
-import cz.polymarket.bot.strategy.OraclePulseLockStrategy;
-import cz.polymarket.bot.strategy.OraclePulseLockStrategyConfig;
 import cz.polymarket.bot.strategy.UtterParameciumStrategy;
 import cz.polymarket.bot.strategy.UtterParameciumStrategyConfig;
 import org.junit.jupiter.api.AfterEach;
@@ -40,10 +46,12 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 class BacktestEngineTest {
 
@@ -83,7 +91,6 @@ class BacktestEngineTest {
         try (Connection conn = duckDbSessionManager.openSession();
              Statement stmt = conn.createStatement()) {
 
-            // 1. Polymarket price_crypto_twap_60s
             String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
@@ -92,7 +99,6 @@ class BacktestEngineTest {
                     "(" + ((c3Start + 900L) * 1000L) + "::UBIGINT, 4::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 59850.0::DOUBLE, '59850.0'::VARCHAR, 60::INT, " + ((c3Start + 900L) * 1000L) + "::UBIGINT)" +
                     ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
 
-            // 2. Polymarket price_crypto
             String normCrypto = cryptoPriceFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(" + ((c1Start + 60L) * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, " + ((c1Start + 60L) * 1000L - 5L) + "::UBIGINT), " +
@@ -100,7 +106,6 @@ class BacktestEngineTest {
                     "(" + ((c3Start + 60L) * 1000L) + "::UBIGINT, 3::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 59850.0::DOUBLE, '59850.0'::VARCHAR, " + ((c3Start + 60L) * 1000L - 5L) + "::UBIGINT)" +
                     ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
 
-            // 3. Binance Spot aggTrades (new schema without ts: event_time + trade_time)
             String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
             stmt.execute("COPY (SELECT * FROM (VALUES " +
                     "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
@@ -111,7 +116,6 @@ class BacktestEngineTest {
                     "(NULL::UBIGINT, 6::BIGINT, 'BTCUSDT'::VARCHAR, 59850.0::DOUBLE, 20.0::DOUBLE, 6::BIGINT, 6::BIGINT, " + ((c3Start + 60L) * 1000L) + "::UBIGINT, true::BOOLEAN, true::BOOLEAN)" +
                     ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
-            // 4. Polymarket 15m typed CLOB market files
             TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
                     ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
                     ClobRow.bookLevel((c1Start + 60L) * 1000L + 10L, (c1Start + 60L) * 1000L, 4, true, true, 4900, 300.0),
@@ -138,6 +142,7 @@ class BacktestEngineTest {
         class PolymarketOnlyBatchStrategy implements TradingStrategy {
             private StrategyContext ctx;
             private boolean orderedInCandle = false;
+            private int seq = 0;
 
             @Override
             public String getName() {
@@ -157,6 +162,7 @@ class BacktestEngineTest {
             @Override
             public void reset() {
                 this.orderedInCandle = false;
+                this.seq = 0;
             }
 
             @Override
@@ -174,11 +180,11 @@ class BacktestEngineTest {
                 if (!orderedInCandle && !Double.isNaN(quote.bestAskUp())) {
                     orderedInCandle = true;
                     ctx.getExecutionRouter().submitOrder(new OrderCommand(
-                            "pm-only-1", "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                            "pm-only-" + (++seq), "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
                             "BUY", BigDecimal.valueOf(quote.bestAskUp()), BigDecimal.valueOf(25.0)
                     ));
                     ctx.getExecutionRouter().submitOrder(new OrderCommand(
-                            "pm-only-2", "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                            "pm-only-" + (++seq), "mkt", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
                             "BUY", BigDecimal.valueOf(quote.bestAskUp()), BigDecimal.valueOf(25.0)
                     ));
                 }
@@ -193,6 +199,7 @@ class BacktestEngineTest {
             public void onExecutionReport(ExecutionReport report) {
             }
         }
+
         TradingStrategy polymarketOnlyStrategy = new PolymarketOnlyBatchStrategy();
         UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
         OraclePulseLockStrategy oraclePulseLockStrategy = new OraclePulseLockStrategy(OraclePulseLockStrategyConfig.defaults());
@@ -202,16 +209,9 @@ class BacktestEngineTest {
                 utterStrategy.getName(), utterStrategy,
                 oraclePulseLockStrategy.getName(), oraclePulseLockStrategy
         ));
-        IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
-                tempDir.resolve("cache"),
-                new ObjectMapper(),
-                List.of(new SpotTwapBacktestIndicator()),
-                100L, 50L, 50L
-        );
 
         backtestEngine = new BacktestEngine(
                 datasetService,
-                indicatorCacheService,
                 new StrategyParameterService(strategyRegistry),
                 metricsCalculator,
                 historyRepository,
@@ -219,7 +219,7 @@ class BacktestEngineTest {
                 "2026-08-01",
                 10000.0,
                 1.0,
-                2,
+                220L,
                 100L,
                 50L,
                 50L
@@ -228,9 +228,6 @@ class BacktestEngineTest {
 
     @AfterEach
     void tearDown() {
-        if (backtestEngine != null) {
-            backtestEngine.shutdown();
-        }
         if (historyRepository != null) {
             historyRepository.close();
         }
@@ -244,7 +241,7 @@ class BacktestEngineTest {
     void shouldRunBacktestOverCollectorParquetArchives() {
         BacktestRunRequest req = new BacktestRunRequest(
                 "PM Only 1.5x", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, null, null, null, null, false, false);
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, 220L, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -260,21 +257,21 @@ class BacktestEngineTest {
     }
 
     @Test
-    @DisplayName("Should execute Polymarket-only batch strategy across multiple markets")
+    @DisplayName("Should execute Polymarket-only strategy across multiple markets without inter-candle reset")
     void shouldExecutePolymarketOnlyBatchStrategy() {
         polymarketCryptoPriceCount.set(0);
         polymarketTwap60sCount.set(0);
 
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false);
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
         assertThat(result.totalMarkets()).isEqualTo(3);
         assertThat(result.trades()).hasSize(6);
         assertThat(polymarketCryptoPriceCount.get()).isEqualTo(3);
-        assertThat(polymarketTwap60sCount.get()).isGreaterThanOrEqualTo(3);
+        assertThat(polymarketTwap60sCount.get()).isEqualTo(3);
     }
 
     @Test
@@ -282,12 +279,12 @@ class BacktestEngineTest {
     void shouldExecuteUtterParameciumStrategyInFinalMinuteWindow(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
             Path collectorDir = tempDir.resolve("collector_utter");
-            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+            CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
             long c1Start = BASE_START;
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
-            Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
-            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
+            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path cryptoPriceFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
+            Path twap60sFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
             Files.createDirectories(pmDir);
             Files.createDirectories(cryptoPriceFile.getParent());
@@ -343,18 +340,11 @@ class BacktestEngineTest {
 
             UtterParameciumStrategy utterStrategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());
             StrategyRegistry localRegistry = new StrategyRegistry(Map.of(utterStrategy.getName(), utterStrategy));
-            IndicatorCacheService localCacheService = new IndicatorCacheService(
-                    tempDir.resolve("cache_utter"),
-                    new ObjectMapper(),
-                    List.of(new SpotTwapBacktestIndicator()),
-                    100L, 50L, 50L
-            );
             PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
             try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
                     tempDir.resolve("history_utter.duckdb"), new ObjectMapper(), localCalc)) {
                 BacktestEngine utterEngine = new BacktestEngine(
-                        datasetService,
-                        localCacheService,
+                        localDataset,
                         new StrategyParameterService(localRegistry),
                         localCalc,
                         localHistory,
@@ -362,48 +352,44 @@ class BacktestEngineTest {
                         "2026-08-01",
                         10000.0,
                         1.0,
-                        2,
+                        220L,
                         100L,
                         50L,
                         50L
                 );
 
-                try {
-                    BacktestResult result = utterEngine.runBacktest(
-                            null,
-                            new BacktestRunRequest(
-                                    null, "utter_paramecium", "BTCUSDT", "2026-08-01", "2026-08-01",
-                                    false, 10000.0, 1.0, null, null, null, null, false, false),
-                            BacktestProgressListener.NOOP
-                    );
+                BacktestResult result = utterEngine.runBacktest(
+                        null,
+                        new BacktestRunRequest(
+                                null, "utter_paramecium", "BTCUSDT", "2026-08-01", "2026-08-01",
+                                false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
+                        BacktestProgressListener.NOOP
+                );
 
-                    assertThat(result).isNotNull();
-                    assertThat(result.totalMarkets()).isEqualTo(2);
-                    assertThat(result.trades()).isNotEmpty();
-                    assertThat(result.trades()).allSatisfy(trade -> {
-                        assertThat(trade.intervalStartSec()).isEqualTo(c1Start);
-                        assertThat(trade.isWin()).isTrue();
-                        assertThat(trade.exitPrice()).isEqualTo(1.0);
-                        assertThat(trade.netPnl()).isGreaterThan(0.0);
-                    });
-                } finally {
-                    utterEngine.shutdown();
-                }
+                assertThat(result).isNotNull();
+                assertThat(result.totalMarkets()).isEqualTo(2);
+                assertThat(result.trades()).isNotEmpty();
+                assertThat(result.trades()).allSatisfy(trade -> {
+                    assertThat(trade.intervalStartSec()).isEqualTo(c1Start);
+                    assertThat(trade.isWin()).isTrue();
+                    assertThat(trade.exitPrice()).isEqualTo(1.0);
+                    assertThat(trade.netPnl()).isGreaterThan(0.0);
+                });
             }
         }
     }
 
     @Test
-    @DisplayName("Zero-Discrepancy: Bounded 76s CLOB lookback window must produce 100% identical trades, PnL, and Brier score as full 15m CLOB replay across multiple Parquet row groups")
+    @DisplayName("Zero-Discrepancy: Bounded 76s CLOB lookback window must produce 100% identical trades, PnL, and Brier score as full 15m CLOB replay")
     void shouldProduceZeroDiscrepancyBetweenBoundedClobWindowAndFullCandleReplay(@TempDir Path tempDir) throws Exception {
         try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
             Path collectorDir = tempDir.resolve("collector_equivalence");
-            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+            CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
             long c1Start = BASE_START;
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
-            Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
-            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
+            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path cryptoPriceFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
+            Path twap60sFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
             Files.createDirectories(pmDir);
             Files.createDirectories(cryptoPriceFile.getParent());
@@ -414,14 +400,12 @@ class BacktestEngineTest {
             try (Connection conn = localDuckDb.openSession();
                  Statement stmt = conn.createStatement()) {
 
-                // Boundary TWAP arrives 300ms BEFORE c1Start to also verify boundary target-price lock-in!
                 String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
                 stmt.execute("COPY (SELECT * FROM (VALUES " +
                         "(" + (c1Start * 1000L - 300L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L - 300L) + "::UBIGINT), " +
                         "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60060.0::DOUBLE, '60060.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
                         ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
 
-                // Full 15-minute Chainlink price_crypto stream (every 5s early, every 1s in final 120s)
                 String normCrypto = cryptoPriceFile.toAbsolutePath().toString().replace('\\', '/');
                 StringBuilder cryptoValues = new StringBuilder();
                 int seq = 0;
@@ -441,8 +425,6 @@ class BacktestEngineTest {
                 stmt.execute("COPY (SELECT * FROM (VALUES " + cryptoValues +
                         ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
 
-                // Dense 15m CLOB market spanning multiple Parquet row groups (rowGroupSize = 25):
-                // periodic book snapshots every 30s + deltas every 2s + pre-window snapshots at +816s/+818s + deltas at +821s..+880s
                 List<ClobRow> clobRows = new ArrayList<>();
                 clobRows.add(ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"));
                 int frameId = 4;
@@ -500,18 +482,11 @@ class BacktestEngineTest {
                     windowedStrategy.getName(), windowedStrategy,
                     fullReplayStrategy.getName(), fullReplayStrategy
             ));
-            IndicatorCacheService eqCacheService = new IndicatorCacheService(
-                    tempDir.resolve("cache_eq"),
-                    new ObjectMapper(),
-                    List.of(new SpotTwapBacktestIndicator()),
-                    100L, 50L, 50L
-            );
             PerformanceMetricsCalculator eqCalc = new PerformanceMetricsCalculator();
             try (BacktestHistoryRepository eqHistory = new BacktestHistoryRepository(
                     tempDir.resolve("history_eq.duckdb"), new ObjectMapper(), eqCalc)) {
                 BacktestEngine engine = new BacktestEngine(
-                        datasetService,
-                        eqCacheService,
+                        localDataset,
                         new StrategyParameterService(registry),
                         eqCalc,
                         eqHistory,
@@ -519,29 +494,487 @@ class BacktestEngineTest {
                         "2026-08-01",
                         10000.0,
                         1.0,
-                        2,
+                        220L,
                         100L,
                         50L,
                         50L
                 );
 
-                try {
-                    BacktestResult windowedRes = engine.runBacktest(null, new BacktestRunRequest(
-                            null, windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
-                    BacktestResult fullRes = engine.runBacktest(null, new BacktestRunRequest(
-                            null, fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                BacktestResult windowedRes = engine.runBacktest(null, new BacktestRunRequest(
+                        null, windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
+                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                BacktestResult fullRes = engine.runBacktest(null, new BacktestRunRequest(
+                        null, fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
+                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
 
-                    assertThat(windowedRes.trades()).isNotEmpty();
-                    assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
-                    for (int i = 0; i < windowedRes.trades().size(); i++) {
-                        assertThat(windowedRes.trades().get(i)).isEqualTo(fullRes.trades().get(i));
-                    }
-                    assertThat(windowedRes.metrics()).isEqualTo(fullRes.metrics());
-                } finally {
-                    engine.shutdown();
+                assertThat(windowedRes.trades()).isNotEmpty();
+                assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
+                for (int i = 0; i < windowedRes.trades().size(); i++) {
+                    assertThat(windowedRes.trades().get(i)).isEqualTo(fullRes.trades().get(i));
                 }
+                assertThat(windowedRes.metrics()).isEqualTo(fullRes.metrics());
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Should warm up SpotTwap & FastSpotMicro over 15m pre-run window and preserve cross-candle strategy state without reset()")
+    void shouldWarmUpSpotIndicatorsAndPreserveCrossCandleStrategyState(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector_warmup");
+            CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+
+            long c1Start = BASE_START;          // 2026-08-01 00:00:00 UTC
+            long c2Start = BASE_START + 900L;   // 2026-08-01 00:15:00 UTC
+            String prevDate = "2026-07-31";
+            String curDate = "2026-08-01";
+
+            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
+            Path prevCbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", prevDate);
+            Path curCbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", curDate);
+            Path curKrFile = localDataset.getKrakenSpotTradesFile("BTCUSDT", curDate);
+            Path curBnFile = localDataset.getBinanceSpotAggTradesFile("BTCUSDT", curDate);
+
+            Files.createDirectories(pmDir);
+            Files.createDirectories(twapFile.getParent());
+            Files.createDirectories(prevCbFile.getParent());
+            Files.createDirectories(curKrFile.getParent());
+            Files.createDirectories(curBnFile.getParent());
+
+            try (Connection conn = localDuckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                // Previous day (2026-07-31 23:55:00 UTC) warm-up trade within the 15-minute pre-run window
+                String normPrevCb = prevCbFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L - 300_000L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'sell'::VARCHAR, 59980.0::DOUBLE, 1.5::DOUBLE, '2026-07-31T23:55:00Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normPrevCb + "' (FORMAT PARQUET)");
+
+                String normCurCb = curCbFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 2::BIGINT, 'sell'::VARCHAR, 60050.0::DOUBLE, 2.0::DOUBLE, '2026-08-01T00:00:00.500Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCurCb + "' (FORMAT PARQUET)");
+
+                String normCurKr = curKrFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'market'::VARCHAR, 60060.0::DOUBLE, 1.5::DOUBLE, '2026-08-01T00:00:00.500Z'::VARCHAR)" +
+                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normCurKr + "' (FORMAT PARQUET)");
+
+                String normCurBn = curBnFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60040.0::DOUBLE, 2.5::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 450L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normCurBn + "' (FORMAT PARQUET)");
+
+                String normTwap = twapFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
+                        "(" + (c2Start * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60100.0::DOUBLE, '60100.0'::VARCHAR, 60::INT, " + (c2Start * 1000L) + "::UBIGINT), " +
+                        "(" + ((c2Start + 900L) * 1000L) + "::UBIGINT, 3::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60200.0::DOUBLE, '60200.0'::VARCHAR, 60::INT, " + ((c2Start + 900L) * 1000L) + "::UBIGINT)" +
+                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), List.of(
+                        ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
+                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
+                ));
+                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet"), List.of(
+                        ClobRow.discovered(c2Start * 1000L - 5000L, "201", "202"),
+                        ClobRow.bookLevel(c2Start * 1000L + 2000L, c2Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
+                        ClobRow.bookLevel(c2Start * 1000L + 2000L, c2Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
+                ));
+            }
+
+            AtomicInteger resetCount = new AtomicInteger(0);
+            List<Integer> observedCrossCandleMemory = new ArrayList<>();
+            List<double[]> observedFastTicks = new ArrayList<>();
+
+            class StatefulCrossCandleStrategy implements TradingStrategy, SpotTwapListener, FastSpotMicroListener {
+                private int rollingMemoryCounter = 0;
+
+                @Override
+                public String getName() {
+                    return "StatefulCrossCandleStrategy";
+                }
+
+                @Override
+                public void init(StrategyContext context) {}
+
+                @Override
+                public void reset() {
+                    resetCount.incrementAndGet();
+                    rollingMemoryCounter = 0;
+                }
+
+                @Override
+                public void onSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
+                    rollingMemoryCounter++;
+                }
+
+                @Override
+                public void onFastSpotMicro(long timestampMs, String symbol, double fastDirectUsd, double signedOfi1s, double syncMove500Usd) {
+                    observedFastTicks.add(new double[]{timestampMs, fastDirectUsd, signedOfi1s});
+                }
+
+                @Override
+                public void onOrderBookQuote(OrderBookQuote quote) {
+                    observedCrossCandleMemory.add(rollingMemoryCounter);
+                }
+
+                @Override
+                public void onExecutionReport(ExecutionReport report) {}
+            }
+
+            StatefulCrossCandleStrategy stateful = new StatefulCrossCandleStrategy();
+            StrategyRegistry localRegistry = new StrategyRegistry(Map.of(stateful.getName(), stateful));
+            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
+
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_warmup.duckdb"), new ObjectMapper(), localCalc)) {
+                BacktestEngine localEngine = new BacktestEngine(
+                        localDataset,
+                        new StrategyParameterService(localRegistry),
+                        localCalc,
+                        localHistory,
+                        stateful.getName(),
+                        curDate,
+                        10000.0,
+                        1.0,
+                        220L,
+                        100L,
+                        50L,
+                        50L
+                );
+
+                localEngine.runBacktest(null, new BacktestRunRequest(
+                        null, stateful.getName(), "BTCUSDT", curDate, curDate,
+                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+
+                // reset() was called strictly ONCE at backtest start, NEVER between candle 1 and candle 2!
+                assertThat(resetCount.get()).isEqualTo(1);
+                // 1 warm-up tick from 2026-07-31 + 3 ticks in candle 1 = 4, preserved across candle 2!
+                assertThat(observedCrossCandleMemory).containsExactly(4, 4);
+                assertThat(observedFastTicks).hasSize(4);
+                double[] latestFast = observedFastTicks.getLast();
+                assertThat(latestFast[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, within(1e-4));
+                assertThat(latestFast[2]).isBetween(0.95, 1.0);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Should reject FAK order during simulated ~196ms Polymarket speed bump when maker cancels best ask before matching")
+    void shouldRejectFakOrderWhenMakerCancelsLiquidityDuringSpeedBump(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector_speedbump");
+            CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+
+            long c1Start = BASE_START;
+            long baseMs = c1Start * 1000L;
+            String curDate = "2026-08-01";
+
+            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
+            Files.createDirectories(pmDir);
+            Files.createDirectories(twapFile.getParent());
+
+            try (Connection conn = localDuckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                String normTwap = twapFile.toAbsolutePath().toString().replace('\\', '/');
+                stmt.execute("COPY (SELECT * FROM (VALUES " +
+                        "(" + baseMs + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + baseMs + "::UBIGINT), " +
+                        "(" + (baseMs + 900_000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60100.0::DOUBLE, '60100.0'::VARCHAR, 60::INT, " + (baseMs + 900_000L) + "::UBIGINT)" +
+                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+                // At +1000ms ask is 0.50 (50 shares). Strategy submits FAK BUY @ 0.50.
+                // At +1080ms (< +1196ms speed-bump match time!), maker cancels 0.50 ask and reprices to 0.56!
+                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), List.of(
+                        ClobRow.discovered(baseMs - 5000L, "101", "102"),
+                        ClobRow.bookLevel(baseMs + 1000L, baseMs + 990L, 4, true, true, 4800, 100.0),
+                        ClobRow.bookLevel(baseMs + 1000L, baseMs + 990L, 4, true, false, 5000, 50.0),
+                        ClobRow.priceChange(baseMs + 1080L, baseMs + 1070L, 8, true, false, 5000, 0.0),
+                        ClobRow.priceChange(baseMs + 1080L, baseMs + 1070L, 8, true, false, 5600, 100.0)
+                ));
+            }
+
+            List<ExecutionReport> reports = new ArrayList<>();
+            TradingStrategy sniper = new TradingStrategy() {
+                private StrategyContext ctx;
+                private boolean sent = false;
+
+                @Override
+                public String getName() {
+                    return "SpeedBumpTestStrategy";
+                }
+
+                @Override
+                public void init(StrategyContext context) {
+                    this.ctx = context;
+                }
+
+                @Override
+                public void onOrderBookQuote(OrderBookQuote quote) {
+                    if (!sent && quote.bestAskUp() <= 0.50) {
+                        sent = true;
+                        ctx.getExecutionRouter().submitOrder(new OrderCommand(
+                                "fak-1", "mkt", "101", Timeframe.FIFTEEN_MINUTES,
+                                "BUY", BigDecimal.valueOf(0.50), BigDecimal.valueOf(20.0)
+                        ));
+                    }
+                }
+
+                @Override
+                public void onExecutionReport(ExecutionReport report) {
+                    reports.add(report);
+                }
+            };
+
+            PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_sb.duckdb"), new ObjectMapper(), calc)) {
+                BacktestEngine engine = new BacktestEngine(
+                        localDataset,
+                        new StrategyParameterService(new StrategyRegistry(Map.of(sniper.getName(), sniper))),
+                        calc,
+                        localHistory,
+                        sniper.getName(),
+                        curDate,
+                        10000.0,
+                        1.0,
+                        220L,
+                        100L,
+                        50L,
+                        50L
+                );
+
+                BacktestResult res = engine.runBacktest(null, new BacktestRunRequest(
+                        null, sniper.getName(), "BTCUSDT", curDate, curDate,
+                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+
+                assertThat(res.trades()).isEmpty();
+                assertThat(reports).hasSize(1);
+                assertThat(reports.getFirst().status()).isEqualTo("REJECTED");
+                assertThat(reports.getFirst().message()).contains("no orders found to match with FAK order");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Exact PAPER == BACKTEST Parity: OraclePulseLockStrategy produces 100% bit-for-bit identical trades, fees, and equity in PAPER and BACKTEST")
+    void shouldProduceExactBitForBitParityBetweenPaperEngineAndBacktestEngine(@TempDir Path tempDir) throws Exception {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+            Path collectorDir = tempDir.resolve("collector_parity");
+            CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
+
+            long c1Start = BASE_START;
+            long c2Start = BASE_START + 900L;
+            long c1Ms = c1Start * 1000L;
+            long c2Ms = c2Start * 1000L;
+            long c2EndMs = (c2Start + 900L) * 1000L;
+            String curDate = "2026-08-01";
+
+            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path cryptoFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", curDate);
+            Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
+            Path cbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", curDate);
+
+            Files.createDirectories(pmDir);
+            Files.createDirectories(cryptoFile.getParent());
+            Files.createDirectories(twapFile.getParent());
+            Files.createDirectories(cbFile.getParent());
+
+            record TimedAction(long ts, int priority, long seq, Runnable task) implements Comparable<TimedAction> {
+                @Override
+                public int compareTo(TimedAction o) {
+                    int c = Long.compare(ts, o.ts);
+                    if (c != 0) return c;
+                    int p = Integer.compare(priority, o.priority);
+                    return p != 0 ? p : Long.compare(seq, o.seq);
+                }
+            }
+
+            // Build an identical 2-candle realistic scenario (OraclePulseLockStrategy) for both Parquet BACKTEST and direct PAPER
+            OraclePulseLockStrategyConfig cfg = OraclePulseLockStrategyConfig.defaults();
+            OraclePulseLockStrategy paperStrategy = new OraclePulseLockStrategy(cfg);
+            PolymarketOrderBook paperBook = new PolymarketOrderBook();
+            CoreTradingEngine paperEngine = new CoreTradingEngine(
+                    paperBook,
+                    new SpotTwapIndicator(),
+                    new FastSpotMicroIndicator(FastSpotMicroIndicatorConfig.defaults()),
+                    paperStrategy,
+                    "BTCUSDT",
+                    10_000.0
+            );
+            SimulatedClobExecutionEngine paperSim = new SimulatedClobExecutionEngine(paperBook, 220L, 1.0);
+            paperEngine.setExecutionGateway(paperSim);
+
+            PriorityQueue<TimedAction> paperQueue = new PriorityQueue<>();
+            AtomicInteger actionSeq = new AtomicInteger();
+            paperSim.bind(
+                    (targetTs, action) -> paperQueue.add(new TimedAction(targetTs, 1, actionSeq.incrementAndGet(), action)),
+                    paperEngine::onExecutionReport
+            );
+
+            List<String> twapValuesSql = new ArrayList<>();
+            List<String> cryptoValuesSql = new ArrayList<>();
+            List<String> cbValuesSql = new ArrayList<>();
+            List<ClobRow> c1ClobRows = new ArrayList<>();
+            List<ClobRow> c2ClobRows = new ArrayList<>();
+
+            c1ClobRows.add(ClobRow.discovered(c1Ms - 5000L, "101", "102"));
+            c2ClobRows.add(ClobRow.discovered(c2Ms - 5000L, "201", "202"));
+
+            // Candle 1: opens at 60,000, quiet volatility around 60,002 for 870s, then strong +$180 spot + oracle impulse at +875s while ask is still 0.54!
+            twapValuesSql.add("(" + c1Ms + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + c1Ms + "::UBIGINT)");
+            twapValuesSql.add("(" + c2Ms + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60180.0::DOUBLE, '60180.0'::VARCHAR, 60::INT, " + c2Ms + "::UBIGINT)");
+            twapValuesSql.add("(" + c2EndMs + "::UBIGINT, 3::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60040.0::DOUBLE, '60040.0'::VARCHAR, 60::INT, " + c2EndMs + "::UBIGINT)");
+
+            paperQueue.add(new TimedAction(c1Ms, 0, actionSeq.incrementAndGet(),
+                    () -> paperEngine.beginCandleCycle(c1Start, c2Start, 60000.0, "101", "102", true)));
+            paperQueue.add(new TimedAction(c1Ms, 9, actionSeq.incrementAndGet(),
+                    () -> paperEngine.onPolyBoltCryptoTwap60s(c1Ms, "btcusd", "chainlink", 60000.0, 60, c1Ms)));
+
+            int seq = 0;
+            for (int sec = 800; sec <= 885; sec++) {
+                long ts = c1Ms + sec * 1000L;
+                double p = sec < 872 ? (60002.0 + (sec % 2)) : 60180.0;
+                seq++;
+                cryptoValuesSql.add("(" + ts + "::UBIGINT, " + seq + "::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, "
+                        + p + "::DOUBLE, '" + p + "'::VARCHAR, " + ts + "::UBIGINT)");
+                paperQueue.add(new TimedAction(ts, 8, seq,
+                        () -> paperEngine.onPolyBoltCryptoPrice(ts, "btcusd", "chainlink", p, ts)));
+
+                long cbSrvTs = ts - 50L; // +50ms coinbase delay => arrives at ts
+                int cbId = seq;
+                cbValuesSql.add("(" + cbSrvTs + "::UBIGINT, 'BTC-USD'::VARCHAR, " + cbId + "::BIGINT, 'sell'::VARCHAR, "
+                        + p + "::DOUBLE, 2.5::DOUBLE, '2026-08-01T00:14:00Z'::VARCHAR)");
+                paperQueue.add(new TimedAction(ts, 7, cbId,
+                        () -> paperEngine.onCoinbaseUsdTrade(ts, p, 2.5, true)));
+            }
+
+            long c1Book1Ts = c1Ms + 870_000L;
+            long c1Book2Ts = c1Ms + 875_050L;
+            c1ClobRows.add(ClobRow.bookLevel(c1Book1Ts, c1Book1Ts - 12L, 4, true, true, 5200, 400.0));
+            c1ClobRows.add(ClobRow.bookLevel(c1Book1Ts, c1Book1Ts - 12L, 4, true, false, 5400, 400.0));
+            c1ClobRows.add(ClobRow.priceChange(c1Book2Ts, c1Book2Ts - 12L, 8, true, false, 5500, 400.0));
+            c1ClobRows.add(ClobRow.bboHint(c1Book2Ts, c1Book2Ts - 12L, 8, true, false, 5500));
+
+            paperQueue.add(new TimedAction(c1Book1Ts, 5, actionSeq.incrementAndGet(), () -> {
+                paperBook.updateObservedLatency(c1Book1Ts, c1Book1Ts - 12L);
+                paperBook.tryAcceptServerTimestamp(true, c1Book1Ts - 12L);
+                paperBook.clearSideForSnapshot(true);
+                paperBook.setSnapshotLevel(true, true, 5200, 400.0);
+                paperBook.setSnapshotLevel(true, false, 5400, 400.0);
+                paperBook.finishBookSnapshot(true, c1Book1Ts);
+                paperEngine.onOrderBookUpdated(c1Book1Ts);
+            }));
+            paperQueue.add(new TimedAction(c1Book2Ts, 5, actionSeq.incrementAndGet(), () -> {
+                paperBook.updateObservedLatency(c1Book2Ts, c1Book2Ts - 12L);
+                paperBook.tryAcceptServerTimestamp(true, c1Book2Ts - 12L);
+                paperBook.applyTickDelta(true, false, 5500, 400.0, c1Book2Ts);
+                paperBook.applyBboHint(true, -1, 5500, c1Book2Ts);
+                paperEngine.onOrderBookUpdated(c1Book2Ts);
+            }));
+            paperQueue.add(new TimedAction(c2Ms, 99, actionSeq.incrementAndGet(),
+                    () -> paperEngine.resolveCandle(TradeDirection.UP, 60180.0, c2Ms)));
+
+            // Candle 2: opens at 60,180, drops sharply to 60,040 (-$140 DOWN impulse) at +875s while DOWN ask is 0.54!
+            paperQueue.add(new TimedAction(c2Ms + 1L, 0, actionSeq.incrementAndGet(), () -> {})); // ordering anchor
+            // Note: in BacktestEngine, c2 CANDLE_START runs right after c1 CANDLE_CLOSE at timestamp c2Ms:
+            List<TimedAction> candle2PaperActions = new ArrayList<>();
+            candle2PaperActions.add(new TimedAction(c2Ms, 0, actionSeq.incrementAndGet(),
+                    () -> paperEngine.beginCandleCycle(c2Start, c2Start + 900L, 60180.0, "201", "202", true)));
+            candle2PaperActions.add(new TimedAction(c2Ms, 9, actionSeq.incrementAndGet(),
+                    () -> paperEngine.onPolyBoltCryptoTwap60s(c2Ms, "btcusd", "chainlink", 60180.0, 60, c2Ms)));
+
+            for (int sec = 800; sec <= 885; sec++) {
+                long ts = c2Ms + sec * 1000L;
+                double p = sec < 872 ? (60178.0 - (sec % 2)) : 60040.0;
+                seq++;
+                cryptoValuesSql.add("(" + ts + "::UBIGINT, " + seq + "::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, "
+                        + p + "::DOUBLE, '" + p + "'::VARCHAR, " + ts + "::UBIGINT)");
+                int s = seq;
+                candle2PaperActions.add(new TimedAction(ts, 8, s,
+                        () -> paperEngine.onPolyBoltCryptoPrice(ts, "btcusd", "chainlink", p, ts)));
+
+                long cbSrvTs = ts - 50L;
+                cbValuesSql.add("(" + cbSrvTs + "::UBIGINT, 'BTC-USD'::VARCHAR, " + s + "::BIGINT, 'buy'::VARCHAR, "
+                        + p + "::DOUBLE, 2.5::DOUBLE, '2026-08-01T00:29:00Z'::VARCHAR)");
+                candle2PaperActions.add(new TimedAction(ts, 7, s,
+                        () -> paperEngine.onCoinbaseUsdTrade(ts, p, 2.5, false)));
+            }
+
+            long c2BookTs = c2Ms + 875_050L;
+            c2ClobRows.add(ClobRow.bookLevel(c2BookTs, c2BookTs - 12L, 4, false, true, 5200, 400.0));
+            c2ClobRows.add(ClobRow.bookLevel(c2BookTs, c2BookTs - 12L, 4, false, false, 5400, 400.0));
+            candle2PaperActions.add(new TimedAction(c2BookTs, 5, actionSeq.incrementAndGet(), () -> {
+                paperBook.updateObservedLatency(c2BookTs, c2BookTs - 12L);
+                paperBook.tryAcceptServerTimestamp(false, c2BookTs - 12L);
+                paperBook.clearSideForSnapshot(false);
+                paperBook.setSnapshotLevel(false, true, 5200, 400.0);
+                paperBook.setSnapshotLevel(false, false, 5400, 400.0);
+                paperBook.finishBookSnapshot(false, c2BookTs);
+                paperEngine.onOrderBookUpdated(c2BookTs);
+            }));
+            candle2PaperActions.add(new TimedAction(c2EndMs, 99, actionSeq.incrementAndGet(),
+                    () -> paperEngine.resolveCandle(TradeDirection.DOWN, 60040.0, c2EndMs)));
+
+            // Execute Candle 1 on PAPER engine, then Candle 2 on PAPER engine
+            while (!paperQueue.isEmpty()) {
+                TimedAction act = paperQueue.poll();
+                paperEngine.setCurrentClockMs(act.ts());
+                act.task().run();
+            }
+            paperQueue.addAll(candle2PaperActions);
+            while (!paperQueue.isEmpty()) {
+                TimedAction act = paperQueue.poll();
+                paperEngine.setCurrentClockMs(act.ts());
+                act.task().run();
+            }
+
+            // Persist identical Parquet archives and run BacktestEngine
+            try (Connection conn = localDuckDb.openSession();
+                 Statement stmt = conn.createStatement()) {
+                stmt.execute("COPY (SELECT * FROM (VALUES " + String.join(", ", twapValuesSql)
+                        + ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '"
+                        + twapFile.toAbsolutePath().toString().replace('\\', '/') + "' (FORMAT PARQUET)");
+                stmt.execute("COPY (SELECT * FROM (VALUES " + String.join(", ", cryptoValuesSql)
+                        + ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '"
+                        + cryptoFile.toAbsolutePath().toString().replace('\\', '/') + "' (FORMAT PARQUET)");
+                stmt.execute("COPY (SELECT * FROM (VALUES " + String.join(", ", cbValuesSql)
+                        + ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '"
+                        + cbFile.toAbsolutePath().toString().replace('\\', '/') + "' (FORMAT PARQUET)");
+
+                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), c1ClobRows);
+                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet"), c2ClobRows);
+            }
+
+            OraclePulseLockStrategy btStrategy = new OraclePulseLockStrategy(cfg);
+            PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
+            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
+                    tempDir.resolve("history_parity.duckdb"), new ObjectMapper(), calc)) {
+                BacktestEngine btEngine = new BacktestEngine(
+                        localDataset,
+                        new StrategyParameterService(new StrategyRegistry(Map.of(btStrategy.getName(), btStrategy))),
+                        calc,
+                        localHistory,
+                        btStrategy.getName(),
+                        curDate,
+                        10_000.0,
+                        1.0,
+                        220L,
+                        100L,
+                        50L,
+                        50L
+                );
+
+                BacktestResult btResult = btEngine.runBacktest(null, new BacktestRunRequest(
+                        null, btStrategy.getName(), "BTCUSDT", curDate, curDate,
+                        false, 10_000.0, 1.0, 220L, 100L, 50L, 50L, null, false, false), BacktestProgressListener.NOOP);
+
+                List<TradeRecord> paperTrades = paperEngine.getCompletedTradesHistory();
+                assertThat(btResult.trades()).isNotEmpty();
+                assertThat(btResult.trades()).isEqualTo(paperTrades);
+                assertThat(btResult.metrics().finalBalance()).isCloseTo(paperEngine.getRealizedEquityUsd(), within(1e-9));
             }
         }
     }
@@ -550,7 +983,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when unknown strategy requested")
     void shouldThrowWhenUnknownStrategy() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null, false, false);
+                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown strategy");
@@ -560,7 +993,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when no market rows available")
     void shouldThrowWhenNoMarketRowsAvailable() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null, false, false);
+                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
@@ -570,7 +1003,7 @@ class BacktestEngineTest {
     @DisplayName("Should resolve default strategy, default startDate, current UTC endDate, default capital, and support fullRange & strategyParams")
     void shouldResolveDefaultParametersWhenOmitted() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, null, "BTCUSDT", null, null, true, null, null, null, null, null,
+                null, null, "BTCUSDT", null, null, true, null, null, null, null, null, null,
                 Map.of("minTauMs", 3000L), false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
@@ -578,6 +1011,7 @@ class BacktestEngineTest {
         assertThat(result.strategyName()).isEqualTo("OraclePulseLockStrategy");
         assertThat(result.totalMarkets()).isEqualTo(3);
         assertThat(result.metrics().initialCapital()).isEqualTo(10000.0);
+        assertThat(result.config().orderGatewayDelayMs()).isEqualTo(220L);
         assertThat(result.config().strategyOverrides()).containsEntry("minTauMs", 3000L);
         assertThat(result.marketPoints()).hasSize(3);
     }
@@ -587,7 +1021,7 @@ class BacktestEngineTest {
     void shouldThrowWhenStartDateIsAfterEndDate() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null, false, false);
+                false, 10000.0, 1.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("startDate must not be after endDate");
@@ -598,7 +1032,7 @@ class BacktestEngineTest {
     void shouldCancelBacktestCooperatively() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null, false, false);
+                false, 10000.0, 1.0, null, null, null, null, null, false, false);
         BacktestProgressListener cancelledListener = new BacktestProgressListener() {
             @Override
             public boolean isCancelled() {
@@ -611,290 +1045,56 @@ class BacktestEngineTest {
     }
 
     @Test
-    @DisplayName("Should throw IllegalArgumentException when any configured exchange delay is negative")
-    void shouldThrowWhenExchangeDelayIsNegative(@TempDir Path tempDir) {
-        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDbSessionManager);
-        IndicatorCacheService cacheService = new IndicatorCacheService(
-                tempDir.resolve("cache"), new ObjectMapper(), List.of(new SpotTwapBacktestIndicator()), 100L, 50L, 50L);
+    @DisplayName("Should throw IllegalArgumentException when any configured gateway or exchange delay is negative")
+    void shouldThrowWhenDelayIsNegative(@TempDir Path tempDir) {
+        CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(tempDir.toString(), duckDbSessionManager);
         StrategyParameterService paramService = new StrategyParameterService(new StrategyRegistry(Map.of()));
         PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
+                localDataset, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, -1L,
+                100L, 50L, 50L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("defaultOrderGatewayDelayMs");
+
+        assertThatThrownBy(() -> new BacktestEngine(
+                localDataset, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
                 -1L, 50L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("binanceDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
+                localDataset, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
                 100L, -1L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("krakenDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
-                datasetService, cacheService, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 2,
+                localDataset, paramService, calc, historyRepository,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
                 100L, 50L, -1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("coinbaseDelayMs");
     }
 
     @Test
-    @DisplayName("Should populate indicator Parquet cache and config.json on first backtest run and reuse cached indicator values after raw exchange files are deleted")
-    void shouldPopulateAndReuseIndicatorCacheAcrossBacktestRuns(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
-            Path collectorDir = tempDir.resolve("collector_cache_e2e");
-            Path cacheDir = tempDir.resolve("cache_e2e");
-            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
-
-            long c1Start = BASE_START;
-            String dateStr = "2026-08-01";
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
-            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
-            Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
-
-            Files.createDirectories(pmDir);
-            Files.createDirectories(twap60sFile.getParent());
-            Files.createDirectories(spotFile.getParent());
-
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-
-            try (Connection conn = localDuckDb.openSession();
-                 Statement stmt = conn.createStatement()) {
-                String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
-                        "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60100.0::DOUBLE, '60100.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
-                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
-
-                String normSpot = spotFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60010.0::DOUBLE, 2.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 500L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN), " +
-                        "(NULL::UBIGINT, 2::BIGINT, 'BTCUSDT'::VARCHAR, 60040.0::DOUBLE, 3.0::DOUBLE, 2::BIGINT, 2::BIGINT, " + (c1Start * 1000L + 1500L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
-                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
-
-                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
-                        ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
-                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
-                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
-                ));
-            }
-
-            List<String> observedSpotTwapTicks = new ArrayList<>();
-            class SpotTwapRecordingStrategy implements TradingStrategy, cz.polymarket.bot.indicators.SpotTwapListener {
-                @Override
-                public String getName() {
-                    return "SpotTwapRecordingStrategy";
-                }
-
-                @Override
-                public void init(StrategyContext context) {}
-
-                @Override
-                public void onSpotTwap(long timestampMs, String symbol, double spotPrice, double twap60sPrice) {
-                    observedSpotTwapTicks.add(timestampMs + ":" + symbol + ":" + Math.round(spotPrice) + ":" + Math.round(twap60sPrice));
-                }
-
-                @Override
-                public void onExecutionReport(ExecutionReport report) {}
-            }
-
-            SpotTwapRecordingStrategy recordingStrategy = new SpotTwapRecordingStrategy();
-            SpotTwapBacktestIndicator spotTwapIndicator = new SpotTwapBacktestIndicator();
-            IndicatorCacheService cacheService = new IndicatorCacheService(
-                    cacheDir, new ObjectMapper(), List.of(spotTwapIndicator), 100L, 50L, 50L);
-            StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
-            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
-
-            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
-                    tempDir.resolve("history_cache_e2e.duckdb"), new ObjectMapper(), localCalc)) {
-                BacktestEngine localEngine = new BacktestEngine(
-                        datasetService,
-                        cacheService,
-                        new StrategyParameterService(localRegistry),
-                        localCalc,
-                        localHistory,
-                        recordingStrategy.getName(),
-                        dateStr,
-                        10000.0,
-                        1.0,
-                        1,
-                        100L,
-                        50L,
-                        50L
-                );
-
-                try {
-                    BacktestRunRequest req = new BacktestRunRequest(
-                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
-                            false, 10000.0, 1.0, null, null, null, null, false, false);
-                    // First run: Cache Miss -> computes and caches indicator values
-                    localEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
-                    List<String> firstRunTicks = new ArrayList<>(observedSpotTwapTicks);
-                    assertThat(firstRunTicks).hasSize(2);
-
-                    Path cachedParquet = cacheService.resolveDailyCacheFile(spotTwapIndicator, "BTCUSDT", dateStr, null);
-                    Path configJson = cacheService.resolveConfigJsonFile(spotTwapIndicator, null);
-                    assertThat(Files.isRegularFile(cachedParquet)).isTrue();
-                    assertThat(Files.isRegularFile(configJson)).isTrue();
-
-                    // Per-run exchange delay override creates isolated hash directory
-                    Path customDelayParquet = cacheService.resolveDailyCacheFile(
-                            spotTwapIndicator, "BTCUSDT", dateStr, new ExchangeDelays(150L, 50L, 50L));
-                    assertThat(customDelayParquet).isNotEqualTo(cachedParquet);
-
-                    // Delete raw exchange Parquet file and re-run with forceNewRun=true -> must read purely from cache
-                    Files.delete(spotFile);
-                    observedSpotTwapTicks.clear();
-
-                    BacktestRunRequest forceReq = new BacktestRunRequest(
-                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
-                            false, 10000.0, 1.0, null, null, null, null, true, false);
-                    localEngine.runBacktest(null, forceReq, BacktestProgressListener.NOOP);
-
-                    assertThat(observedSpotTwapTicks).isEqualTo(firstRunTicks);
-                } finally {
-                    localEngine.shutdown();
-                }
-            }
-        }
-    }
-
-    @Test
-    @DisplayName("BacktestEngine caches FastSpotMicroBacktestIndicator and dispatches FastSpotMicroListener events")
-    void testFastSpotMicroCacheAndDispatch(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
-            Path collectorDir = tempDir.resolve("collector_fast_micro");
-            Path cacheDir = tempDir.resolve("cache_fast_micro");
-            CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
-
-            long c1Start = BASE_START;
-            String dateStr = "2026-08-01";
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
-            Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
-            Path cbFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", dateStr);
-            Path krFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", dateStr);
-            Path bnFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
-
-            Files.createDirectories(pmDir);
-            Files.createDirectories(twap60sFile.getParent());
-            Files.createDirectories(cbFile.getParent());
-            Files.createDirectories(krFile.getParent());
-            Files.createDirectories(bnFile.getParent());
-
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-
-            try (Connection conn = localDuckDb.openSession();
-                 Statement stmt = conn.createStatement()) {
-                String normTwap = twap60sFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (c1Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (c1Start * 1000L) + "::UBIGINT), " +
-                        "(" + ((c1Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60120.0::DOUBLE, '60120.0'::VARCHAR, 60::INT, " + ((c1Start + 900L) * 1000L) + "::UBIGINT)" +
-                        ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
-
-                String normCb = cbFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC-USD'::VARCHAR, 1::BIGINT, 'sell'::VARCHAR, 60050.0::DOUBLE, 2.0::DOUBLE, '2026-08-01T00:00:00.500000Z'::VARCHAR)" +
-                        ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '" + normCb + "' (FORMAT PARQUET)");
-
-                String normKr = krFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(" + (c1Start * 1000L + 500L) + "::UBIGINT, 'BTC/USD'::VARCHAR, 1::BIGINT, 'buy'::VARCHAR, 'market'::VARCHAR, 60060.0::DOUBLE, 1.5::DOUBLE, '2026-08-01T00:00:00.500000Z'::VARCHAR)" +
-                        ") AS t(trade_timestamp, symbol, trade_id, side, ord_type, price, qty, timestamp)) TO '" + normKr + "' (FORMAT PARQUET)");
-
-                String normBn = bnFile.toAbsolutePath().toString().replace('\\', '/');
-                stmt.execute("COPY (SELECT * FROM (VALUES " +
-                        "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60040.0::DOUBLE, 2.5::DOUBLE, 1::BIGINT, 1::BIGINT, " + (c1Start * 1000L + 450L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
-                        ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normBn + "' (FORMAT PARQUET)");
-
-                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
-                        ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
-                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
-                        ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
-                ));
-            }
-
-            List<double[]> observedFastTicks = new ArrayList<>();
-            class FastMicroRecordingStrategy implements TradingStrategy, cz.polymarket.bot.indicators.FastSpotMicroListener {
-                @Override
-                public String getName() {
-                    return "FastMicroRecordingStrategy";
-                }
-
-                @Override
-                public void init(StrategyContext context) {}
-
-                @Override
-                public void onFastSpotMicro(long timestampMs, String symbol, double fastDirectUsd, double signedOfi1s, double syncMove500Usd) {
-                    observedFastTicks.add(new double[]{timestampMs, fastDirectUsd, signedOfi1s, syncMove500Usd});
-                }
-
-                @Override
-                public void onExecutionReport(ExecutionReport report) {}
-            }
-
-            FastMicroRecordingStrategy recordingStrategy = new FastMicroRecordingStrategy();
-            SpotTwapBacktestIndicator spotTwapIndicator = new SpotTwapBacktestIndicator();
-            cz.polymarket.bot.backtest.indicator.FastSpotMicroBacktestIndicator fastIndicator =
-                    new cz.polymarket.bot.backtest.indicator.FastSpotMicroBacktestIndicator(
-                            cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig.defaults());
-            IndicatorCacheService cacheService = new IndicatorCacheService(
-                    cacheDir, new ObjectMapper(), List.of(spotTwapIndicator, fastIndicator), 100L, 50L, 50L);
-            StrategyRegistry localRegistry = new StrategyRegistry(Map.of(recordingStrategy.getName(), recordingStrategy));
-            PerformanceMetricsCalculator localCalc = new PerformanceMetricsCalculator();
-
-            try (BacktestHistoryRepository localHistory = new BacktestHistoryRepository(
-                    tempDir.resolve("history_fast_e2e.duckdb"), new ObjectMapper(), localCalc)) {
-                BacktestEngine localEngine = new BacktestEngine(
-                        datasetService,
-                        cacheService,
-                        new StrategyParameterService(localRegistry),
-                        localCalc,
-                        localHistory,
-                        recordingStrategy.getName(),
-                        dateStr,
-                        10000.0,
-                        1.0,
-                        1,
-                        100L,
-                        50L,
-                        50L
-                );
-
-                try {
-                    localEngine.runBacktest(null, new BacktestRunRequest(
-                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
-                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
-                    assertThat(observedFastTicks).isNotEmpty();
-                    double[] tick = observedFastTicks.getLast();
-                    assertThat(tick[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, org.assertj.core.api.Assertions.within(1e-4));
-                    assertThat(tick[2]).isBetween(0.95, 1.0);
-                } finally {
-                    localEngine.shutdown();
-                }
-            }
-        }
-    }
-
-    @Test
     @DisplayName("Should auto-merge new days, skip stored days by default, overwrite on flag, and create distinct run when forceNewRun=true")
     void shouldAutoMergeNewDaysSkipExistingOverwriteAndForceNewRun() throws Exception {
-        // 1. Initial 1-day run on 2026-08-01
         BacktestResult run1 = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 "Incremental Test", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(run1.mergedIntoExisting()).isFalse();
         assertThat(run1.skippedDays()).isZero();
         assertThat(run1.totalMarkets()).isEqualTo(3);
         int initialTrades = run1.trades().size();
 
-        // 2. Re-running identical date with default flags skips all days and returns existing run
         BacktestResult allSkipped = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(allSkipped.runId()).isEqualTo(run1.runId());
         assertThat(allSkipped.label()).isEqualTo("Incremental Test");
@@ -902,7 +1102,6 @@ class BacktestEngineTest {
         assertThat(allSkipped.skippedDays()).isEqualTo(1);
         assertThat(allSkipped.totalMarkets()).isEqualTo(3);
 
-        // 3. Add Parquet fixtures for 2026-08-02 (1 market)
         long day2Start = BASE_START + 86_400L;
         Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
         Path cryptoPriceDay2 = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-02");
@@ -937,10 +1136,9 @@ class BacktestEngineTest {
             ));
         }
 
-        // 4. Full range 2026-08-01..2026-08-02 skips day 1, executes day 2, merges into run1
         BacktestResult merged = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(merged.runId()).isEqualTo(run1.runId());
         assertThat(merged.label()).isEqualTo("Incremental Test");
@@ -951,10 +1149,9 @@ class BacktestEngineTest {
         assertThat(merged.config().endDate()).isEqualTo("2026-08-02");
         assertThat(merged.trades().size()).isGreaterThan(initialTrades);
 
-        // 5. Overwrite day 2 explicitly (replaces without duplicating day 2 points/trades)
         BacktestResult overwritten = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, false, true),
+                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, false, true),
                 BacktestProgressListener.NOOP);
         assertThat(overwritten.runId()).isEqualTo(run1.runId());
         assertThat(overwritten.mergedIntoExisting()).isTrue();
@@ -962,10 +1159,9 @@ class BacktestEngineTest {
         assertThat(overwritten.totalMarkets()).isEqualTo(4);
         assertThat(overwritten.trades()).hasSameSizeAs(merged.trades());
 
-        // 6. Explicit forceNewRun=true creates a distinct dataset for day 2 only
         BacktestResult forced = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 "Forced Run", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, true, false),
+                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, true, false),
                 BacktestProgressListener.NOOP);
         assertThat(forced.runId()).isNotEqualTo(run1.runId());
         assertThat(forced.label()).isEqualTo("Forced Run");

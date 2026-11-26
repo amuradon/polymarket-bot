@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -18,17 +19,18 @@ import java.util.TreeMap;
  * Fully resolved immutable configuration snapshot of an executed backtest run,
  * capturing both engine parameters and effective strategy parameters/overrides.
  *
- * @param strategyName evaluated trading strategy name
- * @param symbol evaluated cryptocurrency symbol
- * @param startDate inclusive UTC start date ({@code yyyy-MM-dd})
- * @param endDate inclusive UTC end date ({@code yyyy-MM-dd})
- * @param initialCapital initial account capital in USD
- * @param latencyFactor simulated order latency scaling factor
- * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
- * @param krakenDelayMs simulated Kraken one-way feed delay in milliseconds
- * @param coinbaseDelayMs simulated Coinbase one-way feed delay in milliseconds
- * @param strategyParams complete effective strategy parameters map
- * @param strategyOverrides subset of strategy parameters overridden relative to defaults
+ * @param strategyName        evaluated trading strategy name
+ * @param symbol              evaluated cryptocurrency symbol
+ * @param startDate           inclusive UTC start date ({@code yyyy-MM-dd})
+ * @param endDate             inclusive UTC end date ({@code yyyy-MM-dd})
+ * @param initialCapital      initial account capital in USD
+ * @param latencyFactor       simulated order latency scaling factor
+ * @param orderGatewayDelayMs simulated Polymarket CLOB {@code POST /order} gateway round-trip delay in milliseconds
+ * @param binanceDelayMs      simulated Binance one-way feed delay in milliseconds
+ * @param krakenDelayMs       simulated Kraken one-way feed delay in milliseconds
+ * @param coinbaseDelayMs     simulated Coinbase one-way feed delay in milliseconds
+ * @param strategyParams      complete effective strategy parameters map
+ * @param strategyOverrides   subset of strategy parameters overridden relative to defaults
  */
 public record BacktestRunConfig(
         String strategyName,
@@ -37,6 +39,7 @@ public record BacktestRunConfig(
         String endDate,
         double initialCapital,
         double latencyFactor,
+        long orderGatewayDelayMs,
         long binanceDelayMs,
         long krakenDelayMs,
         long coinbaseDelayMs,
@@ -61,6 +64,7 @@ public record BacktestRunConfig(
                 symbol,
                 initialCapital,
                 latencyFactor,
+                orderGatewayDelayMs,
                 binanceDelayMs,
                 krakenDelayMs,
                 coinbaseDelayMs,
@@ -70,18 +74,19 @@ public record BacktestRunConfig(
 
     /**
      * Computes a deterministic 64-character lowercase SHA-256 hash over strategy name, symbol,
-     * initial capital, latency factor, exchange feed delays, and normalized strategy parameters.
-     * Date bounds and human-readable labels are intentionally excluded so incremental runs over new
-     * dates automatically resolve to the same configuration hash.
+     * initial capital, latency factor, CLOB order gateway delay, exchange feed delays, and normalized
+     * strategy parameters. Date bounds and human-readable labels are intentionally excluded so incremental
+     * runs over new dates automatically resolve to the same configuration hash.
      *
-     * @param strategyName evaluated trading strategy name
-     * @param symbol evaluated cryptocurrency symbol
-     * @param initialCapital initial account capital in USD
-     * @param latencyFactor simulated order latency scaling factor
-     * @param binanceDelayMs simulated Binance one-way feed delay in milliseconds
-     * @param krakenDelayMs simulated Kraken one-way feed delay in milliseconds
-     * @param coinbaseDelayMs simulated Coinbase one-way feed delay in milliseconds
-     * @param strategyParams complete effective strategy parameters map
+     * @param strategyName        evaluated trading strategy name
+     * @param symbol              evaluated cryptocurrency symbol
+     * @param initialCapital      initial account capital in USD
+     * @param latencyFactor       simulated order latency scaling factor
+     * @param orderGatewayDelayMs simulated CLOB order gateway delay in milliseconds
+     * @param binanceDelayMs      simulated Binance one-way feed delay in milliseconds
+     * @param krakenDelayMs       simulated Kraken one-way feed delay in milliseconds
+     * @param coinbaseDelayMs     simulated Coinbase one-way feed delay in milliseconds
+     * @param strategyParams      complete effective strategy parameters map
      * @return 64-character lowercase hex SHA-256 digest
      */
     public static String computeConfigHash(
@@ -89,6 +94,7 @@ public record BacktestRunConfig(
             String symbol,
             double initialCapital,
             double latencyFactor,
+            long orderGatewayDelayMs,
             long binanceDelayMs,
             long krakenDelayMs,
             long coinbaseDelayMs,
@@ -104,9 +110,10 @@ public record BacktestRunConfig(
 
         Map<String, Object> canonicalPayload = new LinkedHashMap<>();
         canonicalPayload.put("strategyName", strategyName != null ? strategyName.trim() : "");
-        canonicalPayload.put("symbol", symbol != null ? symbol.trim().toUpperCase(java.util.Locale.ROOT) : "");
+        canonicalPayload.put("symbol", symbol != null ? symbol.trim().toUpperCase(Locale.ROOT) : "");
         canonicalPayload.put("initialCapital", canonicalDouble(initialCapital));
         canonicalPayload.put("latencyFactor", canonicalDouble(latencyFactor));
+        canonicalPayload.put("orderGatewayDelayMs", orderGatewayDelayMs);
         canonicalPayload.put("binanceDelayMs", binanceDelayMs);
         canonicalPayload.put("krakenDelayMs", krakenDelayMs);
         canonicalPayload.put("coinbaseDelayMs", coinbaseDelayMs);

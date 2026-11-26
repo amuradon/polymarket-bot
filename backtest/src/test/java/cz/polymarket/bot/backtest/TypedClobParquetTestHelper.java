@@ -78,6 +78,13 @@ public final class TypedClobParquetTestHelper {
         public static ClobRow lastTrade(long ts, long serverTs, int frameId) {
             return new ClobRow(ts, serverTs, frameId, 3, null, null, null, null, null, null);
         }
+
+        /**
+         * Creates a {@code bbo_hint} ({@code event_code = 4}) non-fabricating top-of-book hint row.
+         */
+        public static ClobRow bboHint(long ts, long serverTs, int frameId, boolean isUp, boolean isBid, int tick) {
+            return new ClobRow(ts, serverTs, frameId, 4, isUp, isBid, tick, 0.0, null, null);
+        }
     }
 
     /**
@@ -103,7 +110,9 @@ public final class TypedClobParquetTestHelper {
      */
     public static void writeParquet(Statement stmt, Path destFile, List<ClobRow> rows, int rowGroupSize) throws SQLException {
         List<ClobRow> sorted = new ArrayList<>(rows);
-        sorted.sort(Comparator.comparingLong(ClobRow::ts).thenComparingInt(ClobRow::frameId));
+        sorted.sort(Comparator.comparingLong(ClobRow::ts)
+                .thenComparingInt(ClobRow::frameId)
+                .thenComparingInt(ClobRow::eventCode));
 
         String normPath = destFile.toAbsolutePath().toString().replace('\\', '/');
         if (sorted.isEmpty()) {

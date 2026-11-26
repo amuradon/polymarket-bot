@@ -85,7 +85,7 @@ class BacktestApplicationTest {
                 100L,
                 42,
                 new BacktestRunConfig("UtterParameciumStrategy", "BTCUSDT", "2026-10-12", todayUtc,
-                        10000.0, 1.0, 100L, 50L, 50L, Map.of(), Map.of()),
+                        10000.0, 1.0, 220L, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(10000.0),
                 List.of(),
                 List.of(),
@@ -103,7 +103,8 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.empty(),
                 10000.0,
-                1.0
+                1.0,
+                220L
         );
 
         int exitCode = batchApp.run();
@@ -118,6 +119,7 @@ class BacktestApplicationTest {
         assertThat(req.endDate()).isEqualTo(todayUtc);
         assertThat(req.initialCapital()).isEqualTo(10000.0);
         assertThat(req.latencyFactor()).isEqualTo(1.0);
+        assertThat(req.orderGatewayDelayMs()).isEqualTo(220L);
     }
 
     @Test
@@ -133,7 +135,7 @@ class BacktestApplicationTest {
                 80L,
                 10,
                 new BacktestRunConfig("UtterParameciumStrategy", "BTCUSDT", "2026-10-15", "2026-10-20",
-                        25000.0, 1.25, 100L, 50L, 50L, Map.of(), Map.of()),
+                        25000.0, 1.25, 250L, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(25000.0),
                 List.of(),
                 List.of(),
@@ -151,7 +153,8 @@ class BacktestApplicationTest {
                 "2026-10-15",
                 Optional.of("2026-10-20"),
                 25000.0,
-                1.25
+                1.25,
+                250L
         );
 
         int exitCode = batchApp.run();
@@ -164,6 +167,7 @@ class BacktestApplicationTest {
         assertThat(req.endDate()).isEqualTo("2026-10-20");
         assertThat(req.initialCapital()).isEqualTo(25000.0);
         assertThat(req.latencyFactor()).isEqualTo(1.25);
+        assertThat(req.orderGatewayDelayMs()).isEqualTo(250L);
     }
 
     @Test
@@ -181,7 +185,8 @@ class BacktestApplicationTest {
                 "2026-10-12",
                 Optional.of("2026-10-15"),
                 10000.0,
-                1.0
+                1.0,
+                220L
         );
 
         int exitCode = batchApp.run();

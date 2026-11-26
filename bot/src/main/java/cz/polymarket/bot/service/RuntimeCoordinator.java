@@ -168,6 +168,8 @@ public class RuntimeCoordinator {
                 market != null ? market.noTokenId() : "",
                 tradingEngine.getTwapOpenPrice(),
                 tradingEngine.getCurrentSpotPrice(),
+                tradingEngine.getDepth1cUp(),
+                tradingEngine.getDepth1cDown(),
                 tradingEngine.getInitialCapital(),
                 tradingEngine.getCurrentBalance(),
                 tradingEngine.getActivePosition(),

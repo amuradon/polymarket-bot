@@ -68,7 +68,7 @@ class OraclePulseLockStrategyTest {
             strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", px, ts - 1_000L);
             strategy.onPolymarketCryptoTwap60s(ts, "btcusd", "chainlink", px, 60, ts - 500L);
             strategy.onFastSpotMicro(ts, "btcusd", px, 0.05, 0.0);
-            strategy.onOrderBookQuote(new OrderBookQuote(0.50, 0.49, 0.51, 0.50, 200.0, 200.0, 0.50, 0.51, ts));
+            strategy.onOrderBookQuote(new OrderBookQuote(0.50, 0.49, 0.51, 0.50, 200.0, 200.0, ts));
         }
 
         // Static quote with zero fresh spot impulse must be rejected (Glosten-Milgrom protection)
@@ -96,7 +96,7 @@ class OraclePulseLockStrategyTest {
                 new BigDecimal("0.50"), buyCmd.size(), surgeTs + 15L, "Filled"));
 
         long reverseTs = surgeTs + 2_500L;
-        strategy.onOrderBookQuote(new OrderBookQuote(0.65, 0.64, 0.48, 0.47, 200.0, 200.0, 0.65, 0.48, reverseTs));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.65, 0.64, 0.48, 0.47, 200.0, 200.0, reverseTs));
         strategy.onFastSpotMicro(reverseTs + 100L, "btcusd", 69_940.0, -0.90, -25.0);
         assertThat(submittedOrders).hasSize(1);
     }
@@ -120,7 +120,7 @@ class OraclePulseLockStrategyTest {
         // At tau = 19s, spot pulls back mildly to 70,031 (negative 1.5s impulse, zero fresh surge!),
         // and spot-watching traders offer UP at 0.78 while banked TWAP cushion is already locked!
         long tau19 = CANDLE_END_MS - 19_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(0.78, 0.77, 0.23, 0.22, 180.0, 180.0, 0.78, 0.23, tau19 - 500L));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.78, 0.77, 0.23, 0.22, 180.0, 180.0, tau19 - 500L));
         strategy.onFastSpotMicro(tau19, "btcusd", 70_031.0, 0.05, 0.0);
 
         assertThat(submittedOrders).hasSize(1);

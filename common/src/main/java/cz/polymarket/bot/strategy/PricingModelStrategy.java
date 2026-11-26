@@ -130,8 +130,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
     private int lastBidDownMc = 0;
     private int lastDepthUpSh = 0;
     private int lastDepthDownSh = 0;
-    private int lastEstFillUpMc = 0;
-    private int lastEstFillDownMc = 0;
 
     // Per-market execution & inventory state
     private TradeDirection marketDirection = TradeDirection.NO_TRADE;
@@ -276,8 +274,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         lastBidDownMc = 0;
         lastDepthUpSh = 0;
         lastDepthDownSh = 0;
-        lastEstFillUpMc = 0;
-        lastEstFillDownMc = 0;
         marketDirection = TradeDirection.NO_TRADE;
         ordersFilledInMarket = 0;
         firstFilledAskMc = 0;
@@ -454,14 +450,17 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         lastBidDownMc = bidDownMc;
         lastDepthUpSh = sanitizeDepthShares(quote.depth1cUp());
         lastDepthDownSh = sanitizeDepthShares(quote.depth1cDown());
-        lastEstFillUpMc = sanitizeMillicents(quote.estimatedFillPriceUp(), askUpMc);
-        lastEstFillDownMc = sanitizeMillicents(quote.estimatedFillPriceDown(), askDownMc);
 
         double sHat = currentAnchoredSpotUsd();
         if (!Double.isNaN(sHat) && sHat > 0.0) {
             updateModelProbability(nowMs, sHat);
             evaluateSignal(nowMs, sHat);
         }
+    }
+
+    @Override
+    public double getLastModelProbabilityUp() {
+        return latestModelProbUpMc * 1e-3;
     }
 
     @Override
@@ -785,27 +784,30 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         long rawLeadCentiBps = Math.round(((sHatUsd - lastPbSpotUsd) / lastPbSpotUsd) * CENTI_BPS_SCALE);
 
         int upScoreMc = scoreCandidate(
-                TradeDirection.UP, lastAskUpMc, lastBidUpMc, lastDepthUpSh, lastEstFillUpMc,
+                TradeDirection.UP, lastAskUpMc, lastBidUpMc, lastDepthUpSh,
                 maxAskMc, pUpMc, jumpUpMc, rawLeadCentiBps);
         int downScoreMc = scoreCandidate(
-                TradeDirection.DOWN, lastAskDownMc, lastBidDownMc, lastDepthDownSh, lastEstFillDownMc,
+                TradeDirection.DOWN, lastAskDownMc, lastBidDownMc, lastDepthDownSh,
                 maxAskMc, pDownMc, jumpDownMc, -rawLeadCentiBps);
 
         TradeDirection chosenDir = TradeDirection.NO_TRADE;
         int chosenEdgeMc = 0;
         int chosenAskMc = 0;
         int chosenDepthSh = 0;
+        int chosenModelProbMc = 0;
 
         if (upScoreMc >= 0 && upScoreMc >= downScoreMc) {
             chosenDir = TradeDirection.UP;
             chosenEdgeMc = upScoreMc;
             chosenAskMc = lastAskUpMc;
             chosenDepthSh = lastDepthUpSh;
+            chosenModelProbMc = pUpMc;
         } else if (downScoreMc >= 0) {
             chosenDir = TradeDirection.DOWN;
             chosenEdgeMc = downScoreMc;
             chosenAskMc = lastAskDownMc;
             chosenDepthSh = lastDepthDownSh;
+            chosenModelProbMc = pDownMc;
         }
 
         if (chosenDir == TradeDirection.NO_TRADE) {
@@ -823,6 +825,26 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return;
         }
 
+        double limitPrice = snappedLimitMc * 1e-3;
+        double fillableSh = context.estimateBuyFillableShares(chosenDir, limitPrice);
+        if (Double.isFinite(fillableSh)) {
+            shares = Math.min(shares, (int) Math.floor(fillableSh));
+            if (shares < config.minOrderShares()) {
+                return;
+            }
+        }
+        double estVwap = context.estimateBuyFillVwap(chosenDir, shares, limitPrice);
+        if (Double.isNaN(estVwap)) {
+            return;
+        }
+        int effFillMc = estVwap > 0.0
+                ? Math.clamp((int) Math.round(estVwap * 1_000.0), chosenAskMc, MAX_MC - 1)
+                : chosenAskMc;
+        int feeFillMc = takerFeeMc(effFillMc, takerFeeRate);
+        if ((chosenModelProbMc - effFillMc - feeFillMc) < config.minFillNetEdgeMc()) {
+            return;
+        }
+
         submitOrder(nowMs, chosenDir, chosenAskMc, snappedLimitMc, shares);
     }
 
@@ -831,7 +853,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             int askMc,
             int bidMc,
             int depthSh,
-            int estFillMc,
             int maxAllowedAskMc,
             int modelProbMc,
             int modelJumpMc,
@@ -855,13 +876,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
         int feeAskMc = takerFeeMc(askMc, takerFeeRate);
         int netEdgeMc = modelProbMc - askMc - feeAskMc;
         if (netEdgeMc < config.minNetEdgeMc()) {
-            return -1;
-        }
-
-        int effFillMc = Math.max(askMc, estFillMc);
-        int feeFillMc = takerFeeMc(effFillMc, takerFeeRate);
-        int fillNetEdgeMc = modelProbMc - effFillMc - feeFillMc;
-        if (fillNetEdgeMc < config.minFillNetEdgeMc()) {
             return -1;
         }
         return netEdgeMc;
@@ -914,13 +928,6 @@ public class PricingModelStrategy implements TradingStrategy, SpotTwapListener {
             return 0;
         }
         return depth1c >= 100_000.0 ? 100_000 : (int) Math.round(depth1c);
-    }
-
-    private static int sanitizeMillicents(double price, int fallbackMc) {
-        if (Double.isNaN(price) || price <= 0.0 || price >= 1.0) {
-            return fallbackMc;
-        }
-        return Math.clamp((int) Math.round(price * 1_000.0), 1, MAX_MC - 1);
     }
 
     private static int extractFloorTickMc(double price) {

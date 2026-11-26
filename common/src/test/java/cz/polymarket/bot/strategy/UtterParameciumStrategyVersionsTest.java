@@ -145,7 +145,7 @@ class UtterParameciumStrategyVersionsTest {
                 strategy.onPolymarketCryptoPrice(ts, "btcusd", "chainlink", 90_025.00, ts);
             }
             long evalTs = CANDLE_END_MS - 30_000L;
-            strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.60, 0.40, 0.38, 500.0, 500.0, 0.62, 0.40, evalTs));
+            strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.60, 0.40, 0.38, 500.0, 500.0, evalTs));
 
             assertThat(orders)
                     .as("Expected BUY BTC-UP signal from %s", strategy.getName())
@@ -228,7 +228,7 @@ class UtterParameciumStrategyVersionsTest {
         long evalTs = windowStartMs + 15_000L;
         strategy.onPolymarketCryptoPrice(evalTs, "btcusd", "chainlink", chainlinkSpot, evalTs);
         strategy.onOrderBookQuote(new OrderBookQuote(
-                askUp, bidUp, 1.0 - bidUp, 1.0 - askUp, 500.0, 500.0, askUp, 1.0 - bidUp, evalTs
+                askUp, bidUp, 1.0 - bidUp, 1.0 - askUp, 500.0, 500.0, evalTs
         ));
         for (OrderCommand cmd : orders) {
             strategy.onExecutionReport(new ExecutionReport(

@@ -621,9 +621,9 @@
             <span class="subtitle">Max Age: {status.telemetry.maxQuoteAgeMsObserved} ms | Stale Skipped: {status.telemetry.staleQuotesSkipped}</span>
         </div>
         <div class="metric-card">
-            <span class="title">Quote Conflation</span>
+            <span class="title">Quote Conflation &amp; 1c Depth</span>
             <span class="value text-blue">{status.telemetry.conflatedQuotesCount}</span>
-            <span class="subtitle">Superseded BBO snapshots coalesced in vCPU #2 L1 loop</span>
+            <span class="subtitle">1c Ask Depth UP: {status.depth1cUp} sh | DOWN: {status.depth1cDown} sh</span>
         </div>
         <div class="metric-card">
             <span class="title">Orders</span>

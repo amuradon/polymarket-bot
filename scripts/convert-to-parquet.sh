@@ -207,20 +207,41 @@ discovered_rows AS (
     CROSS JOIN tokens t
     WHERE r.ts IS NOT NULL
 ),
-book_objects AS (
-    SELECT r.ts, r.frame_id, 0 AS sub_idx, r.payload AS obj
+unwrapped_objects AS (
+    SELECT
+        r.ts,
+        r.frame_id,
+        0 AS sub_idx,
+        COALESCE(r.payload->>'event_type', r.event_type) AS obj_event_type,
+        r.payload AS obj
     FROM raw_numbered r
-    WHERE r.event_type = 'book'
+    WHERE r.event_type != 'market_discovered'
+      AND json_type(r.payload) = 'OBJECT'
     UNION ALL
-    SELECT r.ts, r.frame_id, u.ord::INTEGER AS sub_idx, u.obj
+    SELECT
+        r.ts,
+        r.frame_id,
+        u.ord::INTEGER AS sub_idx,
+        COALESCE(
+            u.obj->>'event_type',
+            CASE WHEN (u.obj->'bids') IS NOT NULL OR (u.obj->'asks') IS NOT NULL THEN 'book' ELSE '' END
+        ) AS obj_event_type,
+        u.obj AS obj
     FROM raw_numbered r, UNNEST(CAST(r.payload AS JSON[])) WITH ORDINALITY AS u(obj, ord)
-    WHERE r.event_type = 'clob' AND json_type(r.payload) = 'ARRAY' AND json_array_length(r.payload) > 0
+    WHERE r.event_type != 'market_discovered'
+      AND json_type(r.payload) = 'ARRAY'
+      AND json_array_length(r.payload) > 0
+),
+book_objects AS (
+    SELECT ts, frame_id, sub_idx, obj
+    FROM unwrapped_objects
+    WHERE obj_event_type = 'book'
 ),
 book_rows AS (
     SELECT
         b.ts,
         COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
-        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        (b.frame_id * 8 + b.sub_idx * 2)::UINTEGER AS frame_id,
         1::UTINYINT AS event_code,
         (b.obj->>'asset_id' = t.up_tok) AS is_up,
         true AS is_bid,
@@ -234,7 +255,7 @@ book_rows AS (
     SELECT
         b.ts,
         COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
-        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        (b.frame_id * 8 + b.sub_idx * 2)::UINTEGER AS frame_id,
         1::UTINYINT AS event_code,
         (b.obj->>'asset_id' = t.up_tok) AS is_up,
         false AS is_bid,
@@ -248,7 +269,7 @@ book_rows AS (
     SELECT
         b.ts,
         COALESCE(TRY_CAST(b.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
-        (b.frame_id * 4 + b.sub_idx)::UINTEGER AS frame_id,
+        (b.frame_id * 8 + b.sub_idx * 2)::UINTEGER AS frame_id,
         1::UTINYINT AS event_code,
         (b.obj->>'asset_id' = t.up_tok) AS is_up,
         NULL::BOOLEAN AS is_bid,
@@ -260,26 +281,90 @@ book_rows AS (
     WHERE COALESCE(json_array_length(b.obj->'bids'), 0) = 0
       AND COALESCE(json_array_length(b.obj->'asks'), 0) = 0
 ),
+pc_objects AS (
+    SELECT ts, frame_id, sub_idx, obj
+    FROM unwrapped_objects
+    WHERE obj_event_type = 'price_change'
+),
 price_change_rows AS (
     SELECT
-        r.ts,
-        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
-        (r.frame_id * 4)::UINTEGER AS frame_id,
+        pco.ts,
+        COALESCE(TRY_CAST(pco.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (pco.frame_id * 8 + pco.sub_idx * 2)::UINTEGER AS frame_id,
         2::UTINYINT AS event_code,
-        (pc->>'asset_id' = t.up_tok) AS is_up,
-        (pc->>'side' IN ('BUY', 'buy')) AS is_bid,
+        (COALESCE(pc->>'asset_id', pco.obj->>'asset_id') = t.up_tok) AS is_up,
+        (pc->>'side' IN ('BUY', 'buy', 'BID', 'bid')) AS is_bid,
         CAST(LEAST(10000, GREATEST(0, ROUND(CAST(pc->>'price' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
         CAST(pc->>'size' AS DOUBLE) AS size,
         NULL::VARCHAR AS up_token_id,
         NULL::VARCHAR AS down_token_id
-    FROM raw_numbered r CROSS JOIN tokens t, UNNEST(CAST(r.payload->'price_changes' AS JSON[])) AS p(pc)
-    WHERE r.event_type = 'price_change'
+    FROM pc_objects pco CROSS JOIN tokens t, UNNEST(CAST(pco.obj->'price_changes' AS JSON[])) AS p(pc)
+    WHERE TRY_CAST(pc->>'price' AS DOUBLE) > 0.0
+),
+bbo_hint_rows AS (
+    SELECT DISTINCT
+        pco.ts,
+        COALESCE(TRY_CAST(pco.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (pco.frame_id * 8 + pco.sub_idx * 2 + 1)::UINTEGER AS frame_id,
+        4::UTINYINT AS event_code,
+        (COALESCE(pc->>'asset_id', pco.obj->>'asset_id') = t.up_tok) AS is_up,
+        true AS is_bid,
+        CAST(LEAST(10000, GREATEST(1, ROUND(CAST(pc->>'best_bid' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM pc_objects pco CROSS JOIN tokens t, UNNEST(CAST(pco.obj->'price_changes' AS JSON[])) AS p(pc)
+    WHERE TRY_CAST(pc->>'best_bid' AS DOUBLE) > 0.0 AND TRY_CAST(pc->>'best_bid' AS DOUBLE) <= 1.0
+    UNION ALL
+    SELECT DISTINCT
+        pco.ts,
+        COALESCE(TRY_CAST(pco.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (pco.frame_id * 8 + pco.sub_idx * 2 + 1)::UINTEGER AS frame_id,
+        4::UTINYINT AS event_code,
+        (COALESCE(pc->>'asset_id', pco.obj->>'asset_id') = t.up_tok) AS is_up,
+        false AS is_bid,
+        CAST(LEAST(10000, GREATEST(1, ROUND(CAST(pc->>'best_ask' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM pc_objects pco CROSS JOIN tokens t, UNNEST(CAST(pco.obj->'price_changes' AS JSON[])) AS p(pc)
+    WHERE TRY_CAST(pc->>'best_ask' AS DOUBLE) > 0.0 AND TRY_CAST(pc->>'best_ask' AS DOUBLE) <= 1.0
+    UNION ALL
+    SELECT
+        bba.ts,
+        COALESCE(TRY_CAST(bba.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (bba.frame_id * 8 + bba.sub_idx * 2)::UINTEGER AS frame_id,
+        4::UTINYINT AS event_code,
+        (bba.obj->>'asset_id' = t.up_tok) AS is_up,
+        true AS is_bid,
+        CAST(LEAST(10000, GREATEST(1, ROUND(CAST(bba.obj->>'best_bid' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM unwrapped_objects bba CROSS JOIN tokens t
+    WHERE bba.obj_event_type = 'best_bid_ask'
+      AND TRY_CAST(bba.obj->>'best_bid' AS DOUBLE) > 0.0 AND TRY_CAST(bba.obj->>'best_bid' AS DOUBLE) <= 1.0
+    UNION ALL
+    SELECT
+        bba.ts,
+        COALESCE(TRY_CAST(bba.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (bba.frame_id * 8 + bba.sub_idx * 2)::UINTEGER AS frame_id,
+        4::UTINYINT AS event_code,
+        (bba.obj->>'asset_id' = t.up_tok) AS is_up,
+        false AS is_bid,
+        CAST(LEAST(10000, GREATEST(1, ROUND(CAST(bba.obj->>'best_ask' AS DOUBLE) * 10000.0))) AS USMALLINT) AS tick,
+        0.0::DOUBLE AS size,
+        NULL::VARCHAR AS up_token_id,
+        NULL::VARCHAR AS down_token_id
+    FROM unwrapped_objects bba CROSS JOIN tokens t
+    WHERE bba.obj_event_type = 'best_bid_ask'
+      AND TRY_CAST(bba.obj->>'best_ask' AS DOUBLE) > 0.0 AND TRY_CAST(bba.obj->>'best_ask' AS DOUBLE) <= 1.0
 ),
 trade_rows AS (
     SELECT
-        r.ts,
-        COALESCE(TRY_CAST(r.payload->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
-        (r.frame_id * 4)::UINTEGER AS frame_id,
+        u.ts,
+        COALESCE(TRY_CAST(u.obj->>'timestamp' AS UBIGINT), 0::UBIGINT) AS server_ts,
+        (u.frame_id * 8 + u.sub_idx * 2)::UINTEGER AS frame_id,
         3::UTINYINT AS event_code,
         NULL::BOOLEAN AS is_up,
         NULL::BOOLEAN AS is_bid,
@@ -287,13 +372,14 @@ trade_rows AS (
         NULL::DOUBLE AS size,
         NULL::VARCHAR AS up_token_id,
         NULL::VARCHAR AS down_token_id
-    FROM raw_numbered r
-    WHERE r.event_type = 'last_trade_price'
+    FROM unwrapped_objects u
+    WHERE u.obj_event_type = 'last_trade_price'
 )
 SELECT * FROM (
     SELECT * FROM discovered_rows
     UNION ALL SELECT * FROM book_rows
     UNION ALL SELECT * FROM price_change_rows
+    UNION ALL SELECT * FROM bbo_hint_rows
     UNION ALL SELECT * FROM trade_rows
 )
 ORDER BY ts ASC, frame_id ASC

@@ -40,18 +40,20 @@ public class BacktestApplication implements QuarkusApplication {
     private final Optional<String> endDate;
     private final double initialCapital;
     private final double latencyFactor;
+    private final long orderGatewayDelayMs;
 
     /**
      * Constructs a new {@link BacktestApplication} with injected engine and native Quarkus configuration properties.
      *
-     * @param backtestEngine simulation engine executing the backtest
-     * @param batchMode {@code true} to execute backtest on startup and exit; {@code false} for REST/UI server mode
-     * @param strategyName trading strategy name (default {@code OraclePulseLockStrategy})
-     * @param symbol trading symbol (default {@code BTCUSDT})
-     * @param startDate inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
-     * @param endDate optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
-     * @param initialCapital initial account balance in USD (default {@code 10000.0})
-     * @param latencyFactor simulated order execution latency factor (default {@code 1.0})
+     * @param backtestEngine      simulation engine executing the backtest
+     * @param batchMode           {@code true} to execute backtest on startup and exit; {@code false} for REST/UI server mode
+     * @param strategyName        trading strategy name (default {@code OraclePulseLockStrategy})
+     * @param symbol              trading symbol (default {@code BTCUSDT})
+     * @param startDate           inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
+     * @param endDate             optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
+     * @param initialCapital      initial account balance in USD (default {@code 10000.0})
+     * @param latencyFactor       simulated order execution latency factor (default {@code 1.0})
+     * @param orderGatewayDelayMs simulated Polymarket CLOB order gateway round-trip delay in milliseconds (default {@code 220})
      */
     @Inject
     public BacktestApplication(
@@ -69,7 +71,9 @@ public class BacktestApplication implements QuarkusApplication {
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double initialCapital,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double latencyFactor) {
+            double latencyFactor,
+            @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
+            long orderGatewayDelayMs) {
         if (backtestEngine == null) {
             Log.fatal("Fatal initialization error in BacktestApplication: backtestEngine must not be null");
             throw new IllegalArgumentException("backtestEngine must not be null");
@@ -82,6 +86,7 @@ public class BacktestApplication implements QuarkusApplication {
         this.endDate = endDate != null ? endDate : Optional.empty();
         this.initialCapital = initialCapital;
         this.latencyFactor = latencyFactor;
+        this.orderGatewayDelayMs = orderGatewayDelayMs;
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -126,6 +131,7 @@ public class BacktestApplication implements QuarkusApplication {
                     false,
                     initialCapital,
                     latencyFactor,
+                    orderGatewayDelayMs,
                     null,
                     null,
                     null,

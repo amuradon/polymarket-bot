@@ -7,17 +7,15 @@ import cz.polymarket.bot.backtest.data.BacktestJobStatus;
 import cz.polymarket.bot.backtest.data.BacktestProgressListener;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.engine.BacktestEngine;
-import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
-import cz.polymarket.bot.backtest.indicator.SpotTwapBacktestIndicator;
 import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.DuckDbSessionManager;
 import cz.polymarket.bot.backtest.service.StrategyParameterService;
-import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
 import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
+import cz.polymarket.bot.orderbook.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.ExecutionReport;
 import cz.polymarket.bot.strategy.OrderCommand;
 import cz.polymarket.bot.strategy.StrategyContext;
@@ -74,27 +72,27 @@ class BacktestLoggingTest {
     }
 
     private Logger backtestLogger;
+    private Logger orderBookLogger;
     private java.util.logging.Level originalLevel;
+    private java.util.logging.Level originalOrderBookLevel;
     private CapturingLogHandler logHandler;
     private DuckDbSessionManager activeDuckDb;
-    private BacktestEngine activeEngine;
     private BacktestHistoryRepository activeHistoryRepo;
 
     @BeforeEach
     void setUpLogger() {
         backtestLogger = Logger.getLogger("cz.polymarket.bot.backtest");
+        orderBookLogger = Logger.getLogger("cz.polymarket.bot.orderbook");
         originalLevel = backtestLogger.getLevel();
+        originalOrderBookLevel = orderBookLogger.getLevel();
         logHandler = new CapturingLogHandler();
         logHandler.setLevel(Level.ALL);
         backtestLogger.addHandler(logHandler);
+        orderBookLogger.addHandler(logHandler);
     }
 
     @AfterEach
     void tearDownLogger() {
-        if (activeEngine != null) {
-            activeEngine.shutdown();
-            activeEngine = null;
-        }
         if (activeHistoryRepo != null) {
             activeHistoryRepo.close();
             activeHistoryRepo = null;
@@ -106,6 +104,10 @@ class BacktestLoggingTest {
         if (backtestLogger != null && logHandler != null) {
             backtestLogger.removeHandler(logHandler);
             backtestLogger.setLevel(originalLevel != null ? originalLevel : Level.INFO);
+        }
+        if (orderBookLogger != null && logHandler != null) {
+            orderBookLogger.removeHandler(logHandler);
+            orderBookLogger.setLevel(originalOrderBookLevel != null ? originalOrderBookLevel : Level.INFO);
         }
     }
 
@@ -249,9 +251,9 @@ class BacktestLoggingTest {
     }
 
     @Test
-    @DisplayName("Should log ERROR on out-of-bounds tick level in PolymarketOrderBook")
+    @DisplayName("Should log ERROR on out-of-bounds tick level in shared PolymarketOrderBook")
     void shouldLogErrorOnInvalidOrderBookTickLevel() {
-        backtestLogger.setLevel(Level.INFO);
+        orderBookLogger.setLevel(Level.INFO);
         PolymarketOrderBook book = new PolymarketOrderBook();
 
         book.applyTickDelta(true, false, 15_000, 100.0, 1000L);
@@ -376,15 +378,8 @@ class BacktestLoggingTest {
         PerformanceMetricsCalculator calc = new PerformanceMetricsCalculator();
         activeHistoryRepo = new BacktestHistoryRepository(
                 tempDir.resolve("history_log_test.duckdb"), new ObjectMapper(), calc);
-        IndicatorCacheService indicatorCacheService = new IndicatorCacheService(
-                tempDir.resolve("cache_log_test"),
-                new ObjectMapper(),
-                List.of(new SpotTwapBacktestIndicator()),
-                100L, 50L, 50L
-        );
-        activeEngine = new BacktestEngine(
+        return new BacktestEngine(
                 datasetService,
-                indicatorCacheService,
                 paramService,
                 calc,
                 activeHistoryRepo,
@@ -392,18 +387,17 @@ class BacktestLoggingTest {
                 "2026-08-01",
                 10000.0,
                 1.0,
-                2,
+                220L,
                 100L,
                 50L,
                 50L
         );
-        return activeEngine;
     }
 
     private static BacktestRunRequest runRequest(String strategyName, String symbol) {
         return new BacktestRunRequest(
                 null, strategyName, symbol, "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null, false, false
+                false, 10000.0, 1.0, 220L, null, null, null, null, false, false
         );
     }
 

@@ -3,23 +3,23 @@ package cz.polymarket.bot.engine;
 import cz.polymarket.bot.strategy.TradeDirection;
 
 /**
- * Immutable representation of an open trading position (shared across {@link StrategyMode#LIVE}
- * and {@link StrategyMode#PAPER}).
+ * Immutable representation of an open conditional-token trading position, shared identically across
+ * {@code LIVE}, {@code PAPER}, and {@code BACKTEST} execution runtimes.
  *
  * @param clientOrderId     internal strategy client order ID
- * @param clobOrderId       Polymarket CLOB order ID ({@code 0x...} in {@code LIVE}, or virtual ID in {@code PAPER})
+ * @param clobOrderId       Polymarket CLOB order ID ({@code 0x...} in {@code LIVE}, or virtual ID in simulation)
  * @param side              directional outcome ({@link TradeDirection#UP} or {@link TradeDirection#DOWN})
- * @param entryPrice        execution fill price in {@code (0.0, 1.0)}
- * @param shares            filled conditional token share quantity
- * @param sizeUsd           total USDC notional cost ({@code entryPrice * shares})
- * @param entryFee          estimated taker fee in USD
- * @param entryTimestampMs  fill timestamp in epoch milliseconds
- * @param intervalStartSec  market cycle start timestamp in epoch seconds
+ * @param entryPrice        execution fill price in {@code (0.0, 1.0]}
+ * @param shares            remaining open conditional token share quantity
+ * @param sizeUsd           remaining USDC notional cost ({@code entryPrice * shares})
+ * @param entryFee          remaining allocated taker entry fee in USD
+ * @param entryTimestampMs  fill timestamp in epoch milliseconds UTC
+ * @param intervalStartSec  market cycle start timestamp in epoch seconds UTC
  * @param token             strategy token label (e.g. {@code "BTC-UP"} or {@code "BTC-DOWN"})
- * @param clobTokenId       256-bit decimal Polymarket conditional token ID (or {@code ""} in synthetic paper tests)
- * @param modelProbability  strategy model probability at entry
- * @param marketPrice       market ask price at entry
- * @param edge              estimated edge at entry
+ * @param clobTokenId       256-bit decimal Polymarket conditional token ID (or {@code ""} in simulation)
+ * @param modelProbability  strategy directional model probability at entry
+ * @param marketPrice       market best ask price at order submission
+ * @param edge              estimated probability edge over entry price
  * @param maxObservedPrice  highest observed bid price since entry
  * @param trailingStopArmed whether trailing stop has been armed
  */
@@ -52,8 +52,10 @@ public record Position(
         if (side == null || side == TradeDirection.NO_TRADE) {
             throw new IllegalArgumentException("side must be UP or DOWN");
         }
-        if (entryPrice <= 0.0 || shares <= 0.0 || sizeUsd <= 0.0) {
-            throw new IllegalArgumentException("entryPrice, shares, and sizeUsd must be positive");
+        if (!Double.isFinite(entryPrice) || entryPrice <= 0.0
+                || !Double.isFinite(shares) || shares <= 0.0
+                || !Double.isFinite(sizeUsd) || sizeUsd <= 0.0) {
+            throw new IllegalArgumentException("entryPrice, shares, and sizeUsd must be finite and positive");
         }
         clobOrderId = clobOrderId != null ? clobOrderId : "";
         token = token != null ? token : "";
@@ -86,6 +88,34 @@ public record Position(
                 edge,
                 newMax,
                 armed || trailingStopArmed
+        );
+    }
+
+    /**
+     * Returns a reduced position copy after a partial FIFO {@code SELL} exit.
+     *
+     * @param remainingShares remaining open share count ({@code > 0})
+     * @param remainingFee    remaining unallocated entry fee in USD
+     * @return reduced {@link Position}
+     */
+    public Position withRemainingShares(double remainingShares, double remainingFee) {
+        return new Position(
+                clientOrderId,
+                clobOrderId,
+                side,
+                entryPrice,
+                remainingShares,
+                remainingShares * entryPrice,
+                Math.max(0.0, remainingFee),
+                entryTimestampMs,
+                intervalStartSec,
+                token,
+                clobTokenId,
+                modelProbability,
+                marketPrice,
+                edge,
+                maxObservedPrice,
+                trailingStopArmed
         );
     }
 }

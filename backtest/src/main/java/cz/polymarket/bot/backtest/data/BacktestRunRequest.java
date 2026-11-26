@@ -7,19 +7,20 @@ import java.util.Map;
 /**
  * Request payload containing parameters for launching a backtest simulation run.
  *
- * @param label optional human-readable label identifying the run in history and comparison views
- * @param strategyName optional name of the registered trading strategy to evaluate (defaults to configured strategy)
- * @param symbol optional cryptocurrency symbol (defaults to BTCUSDT if omitted)
- * @param startDate optional start date filter in ISO format (yyyy-MM-dd)
- * @param endDate optional end date filter in ISO format (yyyy-MM-dd)
- * @param fullRange when true, evaluates the full available dataset date range for the requested symbol
- * @param initialCapital optional initial starting capital in USD (defaults to configured initial capital)
- * @param latencyFactor optional multiplier for simulated order execution latency (defaults to configured latency factor)
- * @param binanceDelayMs optional simulated Binance one-way feed delay in ms
- * @param krakenDelayMs optional simulated Kraken one-way feed delay in ms
- * @param coinbaseDelayMs optional simulated Coinbase one-way feed delay in ms
- * @param strategyParams optional strategy parameter overrides keyed by parameter name
- * @param forceNewRun when true, creates a new separate run even if an identical configuration already exists
+ * @param label                 optional human-readable label identifying the run in history and comparison views
+ * @param strategyName          optional name of the registered trading strategy to evaluate (defaults to configured strategy)
+ * @param symbol                optional cryptocurrency symbol (defaults to BTCUSDT if omitted)
+ * @param startDate             optional start date filter in ISO format (yyyy-MM-dd)
+ * @param endDate               optional end date filter in ISO format (yyyy-MM-dd)
+ * @param fullRange             when true, evaluates the full available dataset date range for the requested symbol
+ * @param initialCapital        optional initial starting capital in USD (defaults to configured initial capital)
+ * @param latencyFactor         optional multiplier for simulated order execution latency (defaults to configured latency factor)
+ * @param orderGatewayDelayMs   optional base Polymarket CLOB {@code POST /order} gateway round-trip delay in ms (default {@code 220})
+ * @param binanceDelayMs        optional simulated Binance one-way feed delay in ms
+ * @param krakenDelayMs         optional simulated Kraken one-way feed delay in ms
+ * @param coinbaseDelayMs       optional simulated Coinbase one-way feed delay in ms
+ * @param strategyParams        optional strategy parameter overrides keyed by parameter name
+ * @param forceNewRun           when true, creates a new separate run even if an identical configuration already exists
  * @param overwriteExistingDays when true, re-simulates and overwrites UTC days already stored in a matching run
  */
 @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
@@ -47,6 +48,9 @@ public record BacktestRunRequest(
 
         @Schema(description = "Optional latency scaling factor (default 1.0)", examples = "1.0")
         Double latencyFactor,
+
+        @Schema(description = "Optional Polymarket CLOB order gateway round-trip delay in milliseconds (default 220)", examples = "220")
+        Long orderGatewayDelayMs,
 
         @Schema(description = "Optional Binance one-way feed delay in milliseconds", examples = "100")
         Long binanceDelayMs,

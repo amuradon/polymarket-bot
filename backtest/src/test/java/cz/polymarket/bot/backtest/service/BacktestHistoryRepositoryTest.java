@@ -51,7 +51,7 @@ class BacktestHistoryRepositoryTest {
         );
         BacktestRunConfig cfg1 = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
-                10000.0, 1.0, 100L, 50L, 50L,
+                10000.0, 1.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000L, "maxSpread", 0.026),
                 Map.of()
         );
@@ -71,7 +71,7 @@ class BacktestHistoryRepositoryTest {
         );
         BacktestRunConfig cfg2 = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
-                10000.0, 1.5, 100L, 50L, 50L,
+                10000.0, 1.5, 250L, 100L, 50L, 50L,
                 Map.of("minTauMs", 5000L, "maxSpread", 0.026),
                 Map.of("minTauMs", 5000L)
         );
@@ -95,6 +95,7 @@ class BacktestHistoryRepositoryTest {
             assertThat(runs.get(1).runId()).isEqualTo("run-1");
 
             RunDetailDto detail = reopened.getRun("run-2").orElseThrow();
+            assertThat(detail.config().orderGatewayDelayMs()).isEqualTo(250L);
             assertThat(detail.config().strategyOverrides()).containsEntry("minTauMs", 5000);
 
             // MARKET granularity across full range includes 0-trade markets (4 points)
@@ -109,6 +110,10 @@ class BacktestHistoryRepositoryTest {
             assertThat(fullMarket.parameterDiffs())
                     .anySatisfy(row -> {
                         assertThat(row.parameter()).isEqualTo("latencyFactor");
+                        assertThat(row.differs()).isTrue();
+                    })
+                    .anySatisfy(row -> {
+                        assertThat(row.parameter()).isEqualTo("orderGatewayDelayMs");
                         assertThat(row.differs()).isTrue();
                     })
                     .anySatisfy(row -> {
@@ -151,10 +156,10 @@ class BacktestHistoryRepositoryTest {
     @DisplayName("Should match configHash across Integer/Long param types and merge appended/backfilled/overwritten days chronologically")
     void shouldMatchConfigHashAndMergeDaysChronologically(@TempDir Path tempDir) {
         String hashWithInt = BacktestRunConfig.computeConfigHash(
-                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 100L, 50L, 50L,
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000, "maxSpread", 0.026));
         String hashWithLong = BacktestRunConfig.computeConfigHash(
-                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 100L, 50L, 50L,
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 220L, 100L, 50L, 50L,
                 Map.of("maxSpread", 0.026, "minTauMs", 2000L));
         assertThat(hashWithInt).isEqualTo(hashWithLong);
 
@@ -166,7 +171,7 @@ class BacktestHistoryRepositoryTest {
         TradeRecord day2Trade = new TradeRecord("2026-08-02T00:10:00Z", day2T1, TradeDirection.UP, 0.50, 1.00, 100.0, 200.0, 2.0, 100.0, "Resolution", 0.70, 0.50, 0.20, true, 10100.0);
         BacktestRunConfig initialCfg = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-02", "2026-08-02",
-                10000.0, 1.0, 100L, 50L, 50L,
+                10000.0, 1.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000, "maxSpread", 0.026), Map.of()
         );
         BacktestResult initialRes = new BacktestResult(

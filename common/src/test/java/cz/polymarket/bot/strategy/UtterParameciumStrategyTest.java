@@ -104,9 +104,7 @@ class UtterParameciumStrategyTest {
 
         long tau30Ms = CANDLE_END_MS - 30_000L;
         strategy.onPolymarketCryptoPrice(tau30Ms, "btcusd", "chainlink", 90_050.00, tau30Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, tau30Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.65, 0.63, 0.37, 0.35, 500.0, 500.0, tau30Ms));
 
         assertThat(strategy.isMissingTargetPriceWarned()).isTrue();
         assertThat(submittedOrders).isEmpty();
@@ -154,9 +152,7 @@ class UtterParameciumStrategyTest {
 
         long tau46Ms = CANDLE_END_MS - 46_000L;
         // Resting CLOB quote prices UP cheaply at $0.46 while DOWN is fairly priced at $0.72 (no trade before breakout)
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, 0.46, 0.72, tau46Ms + 100L
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.46, 0.44, 0.72, 0.70, 100.0, 100.0, tau46Ms + 100L));
         assertThat(submittedOrders).isEmpty();
 
         // At tau = 45.6s (400ms after Chainlink tick), direct multi-exchange spot surges +$20.00 ($89,995.75 -> $90,015.75)!
@@ -186,9 +182,7 @@ class UtterParameciumStrategyTest {
 
         long tau20Ms = CANDLE_END_MS - 20_000L;
         strategy.onPolymarketCryptoPrice(tau20Ms, "btcusd", "chainlink", 89_995.00, tau20Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.65, 0.37, tau20Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.65, 0.63, 0.37, 0.35, 500.0, 500.0, tau20Ms));
 
         assertThat(submittedOrders).hasSize(1);
         OrderCommand order = submittedOrders.getFirst();
@@ -213,9 +207,7 @@ class UtterParameciumStrategyTest {
 
         // CLOB makers widen spread (bid=0.14, ask=0.32 -> spread=180 mc) offering cheap $0.32 UP ask
         long tau45Ms = CANDLE_END_MS - 45_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.32, 0.14, 0.86, 0.68, 200.0, 200.0, 0.32, 0.86, tau45Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.32, 0.14, 0.86, 0.68, 200.0, 200.0, tau45Ms));
 
         assertThat(submittedOrders).hasSize(1);
         OrderCommand order = submittedOrders.getFirst();
@@ -238,9 +230,7 @@ class UtterParameciumStrategyTest {
         // At 720 mc: fee = 14 mc, edge = 12 mc < 22 mc -> must cap limit price at $0.710, NOT $0.720!
         long tau55Ms = CANDLE_END_MS - 55_000L;
         strategy.onPolymarketCryptoPrice(tau55Ms, "btcusd", "chainlink", 90_004.35, tau55Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.69, 0.67, 0.33, 0.31, 500.0, 500.0, 0.69, 0.33, tau55Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.69, 0.67, 0.33, 0.31, 500.0, 500.0, tau55Ms));
 
         assertThat(submittedOrders).hasSize(1);
         assertThat(submittedOrders.getFirst().price()).isEqualByComparingTo("0.710");
@@ -266,9 +256,7 @@ class UtterParameciumStrategyTest {
                 ));
                 before = submittedOrders.size();
             }
-            strategy.onOrderBookQuote(new OrderBookQuote(
-                    0.92, 0.90, 0.10, 0.08, 300.0, 300.0, 0.92, 0.10, ts + 10L
-            ));
+            strategy.onOrderBookQuote(new OrderBookQuote(0.92, 0.90, 0.10, 0.08, 300.0, 300.0, ts + 10L));
             if (submittedOrders.size() > before) {
                 OrderCommand cmd = submittedOrders.getLast();
                 strategy.onExecutionReport(new ExecutionReport(
@@ -295,9 +283,7 @@ class UtterParameciumStrategyTest {
                 ));
                 before = submittedOrders.size();
             }
-            strategy.onOrderBookQuote(new OrderBookQuote(
-                    0.28, 0.25, 0.75, 0.72, 500.0, 500.0, 0.28, 0.75, ts + 10L
-            ));
+            strategy.onOrderBookQuote(new OrderBookQuote(0.28, 0.25, 0.75, 0.72, 500.0, 500.0, ts + 10L));
             if (submittedOrders.size() > before) {
                 OrderCommand cmd = submittedOrders.getLast();
                 strategy.onExecutionReport(new ExecutionReport(
@@ -320,9 +306,7 @@ class UtterParameciumStrategyTest {
         // 1. Enter UP @ $0.54 at tau = 56s
         long t1 = CANDLE_END_MS - 56_000L;
         strategy.onPolymarketCryptoPrice(t1, "btcusd", "chainlink", 90_020.00, t1);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.54, 0.52, 0.48, 0.46, 100.0, 100.0, 0.54, 0.48, t1
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.54, 0.52, 0.48, 0.46, 100.0, 100.0, t1));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand upCmd = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
@@ -333,17 +317,13 @@ class UtterParameciumStrategyTest {
         // 2. Transient dip where BTC is still above target (+$1.00): must NOT hedge against winning UP leg at $0.40 DOWN!
         long t2 = CANDLE_END_MS - 50_000L;
         strategy.onPolymarketCryptoPrice(t2, "btcusd", "chainlink", 90_001.00, t2);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.62, 0.60, 0.40, 0.38, 100.0, 100.0, 0.62, 0.40, t2
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.60, 0.40, 0.38, 100.0, 100.0, t2));
         assertThat(submittedOrders).hasSize(1);
 
         // 3. Genuine reversal: BTC drops decisively below strike (-$35.00) at tau = 30s -> flips directionally to DOWN!
         long t3 = CANDLE_END_MS - 30_000L;
         strategy.onPolymarketCryptoPrice(t3, "btcusd", "chainlink", 89_965.00, t3);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.35, 0.25, 0.72, 0.62, 100.0, 100.0, 0.35, 0.72, t3
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.35, 0.25, 0.72, 0.62, 100.0, 100.0, t3));
         assertThat(submittedOrders).hasSize(2);
         assertThat(submittedOrders.get(1).token()).isEqualTo("BTC-DOWN");
     }
@@ -376,9 +356,7 @@ class UtterParameciumStrategyTest {
             }
             for (int q = 0; q < 3; q++) {
                 long qTs = ts + 200L + q * 250L;
-                strategy.onOrderBookQuote(new OrderBookQuote(
-                        0.38, 0.36, 0.64, 0.62, 500.0, 500.0, 0.38, 0.64, qTs
-                ));
+                strategy.onOrderBookQuote(new OrderBookQuote(0.38, 0.36, 0.64, 0.62, 500.0, 500.0, qTs));
                 if (submittedOrders.size() > before) {
                     OrderCommand cmd = submittedOrders.getLast();
                     strategy.onExecutionReport(new ExecutionReport(
@@ -396,9 +374,7 @@ class UtterParameciumStrategyTest {
         long tau6Ms = CANDLE_END_MS - 6_000L;
         strategy.onPolymarketCryptoPrice(tau6Ms, "btcusd", "chainlink", 89_985.00, tau6Ms);
         strategy.onPolymarketCryptoTwap60s(tau6Ms + 40L, "btcusd", "chainlink", 90_018.00, 60, tau6Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.35, 0.33, 0.67, 0.65, 500.0, 500.0, 0.35, 0.67, tau6Ms + 100L
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.35, 0.33, 0.67, 0.65, 500.0, 500.0, tau6Ms + 100L));
         assertThat(submittedOrders.stream().skip(ordersBeforeLate).filter(o -> "BTC-DOWN".equals(o.token())).count())
                 .isZero();
     }
@@ -411,9 +387,7 @@ class UtterParameciumStrategyTest {
         // 1. Small initial UP fill at tau = 58s (+$18 above target)
         long t1 = CANDLE_END_MS - 58_000L;
         strategy.onPolymarketCryptoPrice(t1, "btcusd", "chainlink", 90_018.00, t1);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.62, 0.60, 0.40, 0.38, 100.0, 100.0, 0.62, 0.40, t1
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.60, 0.40, 0.38, 100.0, 100.0, t1));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand firstCmd = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
@@ -428,9 +402,7 @@ class UtterParameciumStrategyTest {
 
         // Stale CLOB offers cheap DOWN ask at $0.34 (< $0.48): high-conviction flip with banked TWAP must execute!
         long tau30Ms = CANDLE_END_MS - 30_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.68, 0.66, 0.34, 0.32, 200.0, 200.0, 0.68, 0.34, tau30Ms + 100L
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.68, 0.66, 0.34, 0.32, 200.0, 200.0, tau30Ms + 100L));
         assertThat(submittedOrders).hasSize(2);
         assertThat(submittedOrders.get(1).token()).isEqualTo("BTC-DOWN");
     }
@@ -443,9 +415,7 @@ class UtterParameciumStrategyTest {
         // Decided market (bestAsk = $0.990 > maxEntryPriceMc) must be skipped
         long tau30Ms = CANDLE_END_MS - 30_000L;
         strategy.onPolymarketCryptoPrice(tau30Ms, "btcusd", "chainlink", 90_120.00, tau30Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.990, 0.980, 0.020, 0.010, 1000.0, 1000.0, 0.990, 0.020, tau30Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.990, 0.980, 0.020, 0.010, 1000.0, 1000.0, tau30Ms));
         assertThat(submittedOrders).isEmpty();
 
         // Outside maxTauMs (tau = 65s) must be skipped
@@ -453,17 +423,13 @@ class UtterParameciumStrategyTest {
         strategy.reset();
         strategy.onPolymarketCryptoTwap60s(CANDLE_START_MS, "btcusd", "chainlink", 90_000.00, 60, CANDLE_START_MS);
         strategy.onPolymarketCryptoPrice(tau65Ms, "btcusd", "chainlink", 90_050.00, tau65Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.70, 0.68, 0.32, 0.30, 500.0, 500.0, 0.70, 0.32, tau65Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.70, 0.68, 0.32, 0.30, 500.0, 500.0, tau65Ms));
         assertThat(submittedOrders).isEmpty();
 
         // Late terminal lock-in at tau = 2.5s (>= minTauMs = 1000ms) MUST be allowed!
         long tau2500Ms = CANDLE_END_MS - 2_500L;
         strategy.onPolymarketCryptoPrice(tau2500Ms, "btcusd", "chainlink", 90_020.00, tau2500Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.85, 0.83, 0.17, 0.15, 500.0, 500.0, 0.85, 0.17, tau2500Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.85, 0.83, 0.17, 0.15, 500.0, 500.0, tau2500Ms));
         assertThat(submittedOrders).hasSize(1);
 
         // Below minTauMs (tau = 500ms < 1000ms) must be skipped
@@ -472,9 +438,7 @@ class UtterParameciumStrategyTest {
                 cmd.clientOrderId(), "f-late", "FILLED", cmd.price(), cmd.size(), tau2500Ms + 20L, "Filled"
         ));
         long tau500Ms = CANDLE_END_MS - 500L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.85, 0.83, 0.17, 0.15, 500.0, 500.0, 0.85, 0.17, tau500Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.85, 0.83, 0.17, 0.15, 500.0, 500.0, tau500Ms));
         assertThat(submittedOrders).hasSize(1);
     }
 
@@ -493,9 +457,7 @@ class UtterParameciumStrategyTest {
         // UP has negative projected TWAP, and DOWN has adverse spot > projected cushion at normal price ($0.47).
         long tau48Ms = CANDLE_END_MS - 48_000L;
         strategy.onPolymarketCryptoPrice(tau48Ms, "btcusd", "chainlink", 90_004.00, tau48Ms);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.55, 0.53, 0.47, 0.45, 500.0, 500.0, 0.55, 0.47, tau48Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.55, 0.53, 0.47, 0.45, 500.0, 500.0, tau48Ms));
 
         assertThat(submittedOrders).isEmpty();
     }
@@ -523,9 +485,7 @@ class UtterParameciumStrategyTest {
 
         long tau20Ms = CANDLE_END_MS - 20_000L;
         long tau50Ms = CANDLE_END_MS - 50_000L;
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.52, 0.50, 0.52, 0.50, 500.0, 500.0, 0.51, 0.51, tau20Ms
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.52, 0.50, 0.52, 0.50, 500.0, 500.0, tau20Ms));
         strategy.onPolymarketCryptoPrice(tau50Ms, "btcusd", "chainlink", 90_080.00, tau50Ms);
         assertThat(strategy.getLastChainlinkPriceCents()).isEqualTo(9_008_000L);
         assertThat(submittedOrders).isEmpty();
@@ -547,9 +507,7 @@ class UtterParameciumStrategyTest {
 
         long t1 = CANDLE_END_MS - 50_000L;
         strategy.onPolymarketCryptoPrice(t1, "btcusd", "chainlink", 90_018.00, t1);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.62, 0.60, 0.40, 0.38, 200.0, 200.0, 0.62, 0.40, t1
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.62, 0.60, 0.40, 0.38, 200.0, 200.0, t1));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand firstCmd = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
@@ -559,17 +517,13 @@ class UtterParameciumStrategyTest {
         // Weak noise wiggle across target (-$1.50 -> z < 1.35 sigma) at DOWN ask = $0.58: must NOT whipsaw flip!
         long t2 = CANDLE_END_MS - 40_000L;
         strategy.onPolymarketCryptoPrice(t2, "btcusd", "chainlink", 89_998.50, t2);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.44, 0.42, 0.58, 0.56, 200.0, 200.0, 0.44, 0.58, t2
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.44, 0.42, 0.58, 0.56, 200.0, 200.0, t2));
         assertThat(submittedOrders).hasSize(1);
 
         // Decisive reversal (DOWN ask = $0.68 >= $0.44, BTC -$35.00 -> > 2.0 sigma with favorable momentum): MUST flip!
         long t3 = CANDLE_END_MS - 28_000L;
         strategy.onPolymarketCryptoPrice(t3, "btcusd", "chainlink", 89_965.00, t3);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.34, 0.32, 0.68, 0.66, 200.0, 200.0, 0.34, 0.68, t3
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.34, 0.32, 0.68, 0.66, 200.0, 200.0, t3));
         assertThat(submittedOrders).hasSize(2);
         assertThat(submittedOrders.get(1).token()).isEqualTo("BTC-DOWN");
     }
@@ -581,9 +535,7 @@ class UtterParameciumStrategyTest {
 
         long t1 = CANDLE_END_MS - 52_000L;
         strategy.onPolymarketCryptoPrice(t1, "btcusd", "chainlink", 90_030.00, t1);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.88, 0.86, 0.14, 0.12, 200.0, 200.0, 0.88, 0.14, t1
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.88, 0.86, 0.14, 0.12, 200.0, 200.0, t1));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand firstCmd = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
@@ -594,9 +546,7 @@ class UtterParameciumStrategyTest {
         // Despite naive model probability still > $0.58, toxic averaging-down guard must block buying the falling knife!
         long t2 = t1 + 4_000L;
         strategy.onPolymarketCryptoPrice(t2, "btcusd", "chainlink", 90_014.00, t2);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.58, 0.55, 0.45, 0.42, 200.0, 200.0, 0.58, 0.45, t2
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.58, 0.55, 0.45, 0.42, 200.0, 200.0, t2));
         assertThat(submittedOrders).hasSize(1);
     }
 
@@ -614,9 +564,7 @@ class UtterParameciumStrategyTest {
         }
         long tUp = CANDLE_END_MS - 58_000L;
         strategy.onPolymarketCryptoPrice(tUp, "btcusd", "chainlink", 90_008.00, tUp);
-        strategy.onOrderBookQuote(new OrderBookQuote(
-                0.56, 0.54, 0.46, 0.44, 300.0, 300.0, 0.56, 0.46, tUp + 10L
-        ));
+        strategy.onOrderBookQuote(new OrderBookQuote(0.56, 0.54, 0.46, 0.44, 300.0, 300.0, tUp + 10L));
         assertThat(submittedOrders).hasSize(1);
         OrderCommand firstUp = submittedOrders.getFirst();
         strategy.onExecutionReport(new ExecutionReport(
@@ -641,9 +589,7 @@ class UtterParameciumStrategyTest {
             if (tauSec <= 40) {
                 for (int q = 0; q < 2; q++) {
                     long qTs = ts + 200L + q * 300L;
-                    strategy.onOrderBookQuote(new OrderBookQuote(
-                            0.36, 0.34, 0.66, 0.64, 400.0, 400.0, 0.36, 0.66, qTs
-                    ));
+                    strategy.onOrderBookQuote(new OrderBookQuote(0.36, 0.34, 0.66, 0.64, 400.0, 400.0, qTs));
                     if (submittedOrders.size() > before) {
                         OrderCommand cmd = submittedOrders.getLast();
                         strategy.onExecutionReport(new ExecutionReport(

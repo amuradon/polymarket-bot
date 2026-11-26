@@ -163,7 +163,7 @@ class SpotTwapProcessorTest {
 
         long tau46Ms = candleEndMs - 46_000L;
         strategy.onOrderBookQuote(new OrderBookQuote(
-                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, 0.46, 0.72, tau46Ms + 100L
+                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, tau46Ms + 100L
         ));
         assertThat(submittedOrders).isEmpty();
 

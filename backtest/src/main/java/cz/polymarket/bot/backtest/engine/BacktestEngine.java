@@ -6,8 +6,6 @@ import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.data.CollectorMarketMetadata;
 import cz.polymarket.bot.backtest.data.ExchangeDelays;
 import cz.polymarket.bot.backtest.data.MarketEquityPoint;
-import cz.polymarket.bot.backtest.indicator.DailyIndicatorTrack;
-import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.service.BacktestHistoryRepository;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService.DateBounds;
@@ -15,19 +13,20 @@ import cz.polymarket.bot.backtest.service.StrategyParameterService;
 import cz.polymarket.bot.backtest.service.StrategyParameterService.ConfiguredStrategy;
 import cz.polymarket.bot.backtest.stream.BacktestEvent;
 import cz.polymarket.bot.backtest.stream.ChronologicalEventStreamer;
-import cz.polymarket.bot.backtest.stream.PolymarketOrderBook;
-import cz.polymarket.bot.backtest.stream.SimulatedMatchingEngine;
 import cz.polymarket.bot.calculator.PerformanceMetrics;
 import cz.polymarket.bot.calculator.PerformanceMetricsCalculator;
-import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.TradeRecord;
+import cz.polymarket.bot.engine.CoreTradingEngine;
+import cz.polymarket.bot.engine.SimulatedClobExecutionEngine;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicator;
+import cz.polymarket.bot.indicators.FastSpotMicroIndicatorConfig;
 import cz.polymarket.bot.indicators.FastSpotMicroListener;
+import cz.polymarket.bot.indicators.SpotTwapIndicator;
 import cz.polymarket.bot.indicators.SpotTwapListener;
-import cz.polymarket.bot.strategy.ExecutionReport;
+import cz.polymarket.bot.orderbook.PolymarketOrderBook;
 import cz.polymarket.bot.strategy.TradeDirection;
 import cz.polymarket.bot.strategy.TradingStrategy;
 import io.quarkus.logging.Log;
-import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -39,6 +38,7 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -48,28 +48,32 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * High-performance event-driven backtesting engine streaming historical market data directly from
- * converted collector Parquet archives ({@code /data/polymarket/collector}) and cached
- * indicator Parquet archives ({@code /data/polymarket/cache/<indicator>/<hash>}), and persisting
- * completed simulation runs into DuckDB history ({@link BacktestHistoryRepository}).
+ * Continuous chronological event-driven backtesting engine powered by the shared {@link CoreTradingEngine},
+ * {@link PolymarketOrderBook}, and {@link SimulatedClobExecutionEngine} in {@code common}.
  * <p>
- * Orders all events strictly by the local EC2 receipt timestamp ({@code ts}), simulates
- * time-varying execution latency derived from Polymarket CLOB server-vs-receipt timestamps
- * scaled by {@code latencyFactor}, supports optional pre-seeded CLOB lookback windows while
- * preserving full-candle 60s TWAP / crypto price streams, and executes parallel market workers
- * on a bounded physical-core thread pool backed by a single shared DuckDB buffer manager.
+ * Eliminates cross-candle state resets, parallel candle isolation, and indicator bucket caching so
+ * historical simulations execute identical bytecode to live and paper trading:
+ * <ul>
+ *   <li>Replays a 15-minute ({@code 900_000 ms}) pre-run warm-up window in {@code warmupMode} before the
+ *       first evaluated candle so rolling spot TWAP, OFI, volatility, and strategy buffers start warm,</li>
+ *   <li>Streams raw multi-exchange spot trades, full-accuracy PolyBolt oracle feeds, and typed Polymarket
+ *       CLOB L2 frames + BBO hints continuously without resetting strategy state between candles,</li>
+ *   <li>Simulates two-phase Polymarket CLOB {@code POST /order} speed-bump matching and L2 liquidity
+ *       depletion via {@link SimulatedClobExecutionEngine}, and</li>
+ *   <li>Persists completed and incrementally appended runs into {@link BacktestHistoryRepository}.</li>
+ * </ul>
  */
 @ApplicationScoped
 public class BacktestEngine {
 
+    /** Pre-run warm-up duration in milliseconds (15 minutes) replayed before the first evaluated market. */
+    public static final long PRE_RUN_WARMUP_MS = 900_000L;
+
+    private static final long BOUNDARY_MARGIN_MS = 30_000L;
+
     private final CollectorParquetDatasetService datasetService;
-    private final IndicatorCacheService indicatorCacheService;
     private final StrategyParameterService strategyParameterService;
     private final PerformanceMetricsCalculator metricsCalculator;
     private final BacktestHistoryRepository historyRepository;
@@ -77,32 +81,28 @@ public class BacktestEngine {
     private final String defaultStartDate;
     private final double defaultCapital;
     private final double defaultLatencyFactor;
-    private final int workerCount;
+    private final long defaultOrderGatewayDelayMs;
     private final ExchangeDelays defaultExchangeDelays;
-    private final ExecutorService workerPool;
 
     /**
-     * Primary constructor injecting all backtest engine dependencies, strategy parameter resolver,
-     * DuckDB history repository, worker pool sizing, and default exchange feed delays.
+     * Primary constructor injecting all backtest engine dependencies and default simulation configuration.
      *
-     * @param datasetService collector Parquet dataset discovery and path resolution service
-     * @param indicatorCacheService deterministic indicator Parquet cache and single-pass computation service
-     * @param strategyParameterService service resolving and instantiating configured strategies
-     * @param metricsCalculator performance metrics calculation service
-     * @param historyRepository persistent DuckDB history repository
-     * @param defaultStrategy default trading strategy name configured in application properties
-     * @param defaultStartDate default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
-     * @param defaultCapital default initial trading balance in USD
-     * @param defaultLatencyFactor default multiplier for simulated order execution latency (default {@code 1.0})
-     * @param configuredWorkers number of parallel simulation workers (default {@code 4} physical cores)
-     * @param binanceDelayMs default simulated one-way feed delay for Binance in milliseconds (default {@code 100})
-     * @param krakenDelayMs default simulated one-way feed delay for Kraken in milliseconds (default {@code 50})
-     * @param coinbaseDelayMs default simulated one-way feed delay for Coinbase in milliseconds (default {@code 50})
+     * @param datasetService             collector Parquet dataset discovery and path resolution service
+     * @param strategyParameterService   service resolving and instantiating configured strategies
+     * @param metricsCalculator          performance metrics calculation service
+     * @param historyRepository          persistent DuckDB history repository
+     * @param defaultStrategy            default trading strategy name configured in application properties
+     * @param defaultStartDate           default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
+     * @param defaultCapital             default initial trading balance in USD
+     * @param defaultLatencyFactor       default multiplier for simulated order execution latency (default {@code 1.0})
+     * @param defaultOrderGatewayDelayMs default Polymarket CLOB order gateway round-trip delay in ms (default {@code 220})
+     * @param binanceDelayMs             default simulated one-way feed delay for Binance in ms (default {@code 100})
+     * @param krakenDelayMs              default simulated one-way feed delay for Kraken in ms (default {@code 50})
+     * @param coinbaseDelayMs            default simulated one-way feed delay for Coinbase in ms (default {@code 50})
      */
     @Inject
     public BacktestEngine(
             CollectorParquetDatasetService datasetService,
-            IndicatorCacheService indicatorCacheService,
             StrategyParameterService strategyParameterService,
             PerformanceMetricsCalculator metricsCalculator,
             BacktestHistoryRepository historyRepository,
@@ -114,8 +114,8 @@ public class BacktestEngine {
             double defaultCapital,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
             double defaultLatencyFactor,
-            @ConfigProperty(name = "polymarket.backtest.workers", defaultValue = "4")
-            int configuredWorkers,
+            @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
+            long defaultOrderGatewayDelayMs,
             @ConfigProperty(name = "backtest.binance.delay-ms", defaultValue = "100")
             long binanceDelayMs,
             @ConfigProperty(name = "backtest.kraken.delay-ms", defaultValue = "50")
@@ -125,10 +125,6 @@ public class BacktestEngine {
         if (datasetService == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: datasetService cannot be null");
             throw new IllegalArgumentException("datasetService cannot be null");
-        }
-        if (indicatorCacheService == null) {
-            Log.fatal("Fatal initialization error in BacktestEngine: indicatorCacheService cannot be null");
-            throw new IllegalArgumentException("indicatorCacheService cannot be null");
         }
         if (strategyParameterService == null) {
             Log.fatal("Fatal initialization error in BacktestEngine: strategyParameterService cannot be null");
@@ -142,9 +138,12 @@ public class BacktestEngine {
             Log.fatal("Fatal initialization error in BacktestEngine: historyRepository cannot be null");
             throw new IllegalArgumentException("historyRepository cannot be null");
         }
+        if (defaultOrderGatewayDelayMs < 0L) {
+            Log.fatal("Fatal initialization error in BacktestEngine: defaultOrderGatewayDelayMs must be non-negative");
+            throw new IllegalArgumentException("defaultOrderGatewayDelayMs must be non-negative");
+        }
         this.defaultExchangeDelays = new ExchangeDelays(binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
         this.datasetService = datasetService;
-        this.indicatorCacheService = indicatorCacheService;
         this.strategyParameterService = strategyParameterService;
         this.metricsCalculator = metricsCalculator;
         this.historyRepository = historyRepository;
@@ -156,31 +155,34 @@ public class BacktestEngine {
                 : "2026-10-12";
         this.defaultCapital = defaultCapital;
         this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
-        this.workerCount = configuredWorkers > 0 ? configuredWorkers : 4;
-
-        AtomicInteger threadSeq = new AtomicInteger(0);
-        this.workerPool = Executors.newFixedThreadPool(this.workerCount, runnable -> {
-            Thread t = new Thread(runnable, "backtest-worker-" + threadSeq.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-        });
+        this.defaultOrderGatewayDelayMs = defaultOrderGatewayDelayMs;
     }
 
     /**
-     * Shuts down the dedicated parallel market worker pool upon application teardown.
-     */
-    @PreDestroy
-    public void shutdown() {
-        workerPool.shutdownNow();
-    }
-
-    /**
-     * Executes an event-driven backtest simulation using the provided run request, reporting live
-     * progress and honoring cooperative cancellation via {@code progressListener}, and persists
-     * the completed run to DuckDB history.
+     * Returns the configured default Polymarket CLOB order gateway round-trip delay in milliseconds.
      *
-     * @param runId optional pre-assigned persistent run ID (random UUID generated when null or blank)
-     * @param request validated or raw {@link BacktestRunRequest} specifying strategy, overrides, dates, and engine settings
+     * @return default order gateway delay in milliseconds
+     */
+    public long getDefaultOrderGatewayDelayMs() {
+        return defaultOrderGatewayDelayMs;
+    }
+
+    /**
+     * Returns the configured default per-exchange one-way WebSocket feed delays.
+     *
+     * @return default {@link ExchangeDelays}
+     */
+    public ExchangeDelays getDefaultExchangeDelays() {
+        return defaultExchangeDelays;
+    }
+
+    /**
+     * Executes a continuous chronological backtest simulation using the provided run request, reporting live
+     * progress and honoring cooperative cancellation via {@code progressListener}, and persists the completed
+     * run to DuckDB history.
+     *
+     * @param runId            optional pre-assigned persistent run ID (random UUID generated when null or blank)
+     * @param request          {@link BacktestRunRequest} specifying strategy, overrides, dates, and engine settings
      * @param progressListener optional progress &amp; cancellation listener (defaults to {@link BacktestProgressListener#NOOP})
      * @return completed {@link BacktestResult}
      */
@@ -207,8 +209,9 @@ public class BacktestEngine {
             Log.errorf("Cannot start backtest: %s", e.getMessage());
             throw e;
         }
-        TradingStrategy strategy = configuredStrategy.strategy();
-        strategy.reset();
+        TradingStrategy baseStrategy = configuredStrategy.strategy();
+        TradingStrategy activeStrategy = resolveFreshStrategyInstance(baseStrategy);
+        activeStrategy.reset();
 
         String sym = (request.symbol() != null && !request.symbol().isBlank())
                 ? request.symbol().trim().toUpperCase(Locale.ROOT)
@@ -224,6 +227,15 @@ public class BacktestEngine {
         if (Double.isNaN(resolvedLatencyFactor) || Double.isInfinite(resolvedLatencyFactor) || resolvedLatencyFactor < 0.0) {
             Log.errorf("Cannot start backtest: latencyFactor must be non-negative (received %s)", resolvedLatencyFactor);
             throw new IllegalArgumentException("latencyFactor must be non-negative");
+        }
+
+        long resolvedOrderGatewayDelayMs = (request.orderGatewayDelayMs() != null)
+                ? request.orderGatewayDelayMs()
+                : defaultOrderGatewayDelayMs;
+        if (resolvedOrderGatewayDelayMs < 0L) {
+            Log.errorf("Cannot start backtest: orderGatewayDelayMs must be non-negative (received %d)",
+                    resolvedOrderGatewayDelayMs);
+            throw new IllegalArgumentException("orderGatewayDelayMs must be non-negative");
         }
 
         ExchangeDelays effectiveDelays = new ExchangeDelays(
@@ -278,10 +290,11 @@ public class BacktestEngine {
                 ? request.label().trim()
                 : null;
         String configHash = BacktestRunConfig.computeConfigHash(
-                strategy.getName(),
+                activeStrategy.getName(),
                 sym,
                 capital,
                 resolvedLatencyFactor,
+                resolvedOrderGatewayDelayMs,
                 effectiveDelays.binanceDelayMs(),
                 effectiveDelays.krakenDelayMs(),
                 effectiveDelays.coinbaseDelayMs(),
@@ -298,12 +311,12 @@ public class BacktestEngine {
         String targetRunId = merging ? existingMatch.get().runId() : resolvedRunId;
         String resolvedLabel = explicitLabel != null
                 ? explicitLabel
-                : (merging ? existingMatch.get().label() : strategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")");
+                : (merging ? existingMatch.get().label() : activeStrategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")");
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting backtest: runId=%s, merging=%s, overwriteExisting=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
-                    targetRunId, merging, overwriteExisting, resolvedLabel, strategy.getName(), sym,
-                    resolvedStartDate, resolvedEndDate, capital, resolvedLatencyFactor, workerCount,
+            Log.infof("Starting continuous backtest: runId=%s, merging=%s, overwriteExisting=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, orderGatewayDelayMs=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
+                    targetRunId, merging, overwriteExisting, resolvedLabel, activeStrategy.getName(), sym,
+                    resolvedStartDate, resolvedEndDate, capital, resolvedLatencyFactor, resolvedOrderGatewayDelayMs,
                     effectiveDelays.binanceDelayMs(), effectiveDelays.krakenDelayMs(), effectiveDelays.coinbaseDelayMs());
         }
 
@@ -314,16 +327,10 @@ public class BacktestEngine {
             throw new IllegalArgumentException(msg);
         }
 
-        // Group markets by UTC day so shared daily Polymarket streams and cached indicators are loaded strictly once per day
-        Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
-        for (CollectorMarketMetadata market : markets) {
-            String dayKey = market.dateStr() != null ? market.dateStr() : "";
-            marketsByDay.computeIfAbsent(dayKey, k -> new ArrayList<>()).add(market);
-        }
-
+        Map<String, List<CollectorMarketMetadata>> marketsByDay = groupMarketsByDay(markets);
         int skippedDays = 0;
         Set<String> overwrittenDates = new LinkedHashSet<>();
-        int remainingMarketCount = markets.size();
+        double startingBalance = capital;
 
         if (merging) {
             Set<String> storedDates = historyRepository.getStoredDatesForRun(targetRunId);
@@ -333,16 +340,41 @@ public class BacktestEngine {
                     Map.Entry<String, List<CollectorMarketMetadata>> entry = it.next();
                     if (storedDates.contains(entry.getKey())) {
                         skippedDays++;
-                        remainingMarketCount -= entry.getValue().size();
                         it.remove();
                     }
                 }
-            } else {
-                for (String dayKey : marketsByDay.keySet()) {
-                    if (storedDates.contains(dayKey)) {
-                        overwrittenDates.add(dayKey);
+                if (!marketsByDay.isEmpty() && !storedDates.isEmpty()) {
+                    String maxStoredDate = Collections.max(storedDates);
+                    String minRemainingDate = marketsByDay.keySet().iterator().next();
+                    if (minRemainingDate.compareTo(maxStoredDate) > 0) {
+                        // Pure chronological tail append: continue compounding from existing run's final balance
+                        startingBalance = existingMatch.get().metrics().finalBalance();
+                    } else {
+                        // Non-tail backfill: re-simulate union date span continuously from initial capital
+                        String minUnion = minDate(resolvedStartDate, Collections.min(storedDates));
+                        String maxUnion = maxDate(resolvedEndDate, maxStoredDate);
+                        resolvedStartDate = minUnion;
+                        resolvedEndDate = maxUnion;
+                        parsedStart = LocalDate.parse(minUnion);
+                        parsedEnd = LocalDate.parse(maxUnion);
+                        markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
+                        marketsByDay = groupMarketsByDay(markets);
+                        overwrittenDates.addAll(storedDates);
+                        skippedDays = 0;
                     }
                 }
+            } else if (!storedDates.isEmpty()) {
+                // Overwrite requested: re-simulate full union date span continuously from initial capital
+                String minUnion = minDate(resolvedStartDate, Collections.min(storedDates));
+                String maxUnion = maxDate(resolvedEndDate, Collections.max(storedDates));
+                resolvedStartDate = minUnion;
+                resolvedEndDate = maxUnion;
+                parsedStart = LocalDate.parse(minUnion);
+                parsedEnd = LocalDate.parse(maxUnion);
+                markets = datasetService.discoverMarkets(sym, resolvedStartDate, resolvedEndDate);
+                marketsByDay = groupMarketsByDay(markets);
+                overwrittenDates.addAll(storedDates);
+                skippedDays = 0;
             }
         }
 
@@ -360,171 +392,280 @@ public class BacktestEngine {
                     .orElseThrow(() -> new IllegalStateException("Existing run disappeared during skip: " + targetRunId));
         }
 
+        int remainingMarketCount = 0;
+        for (List<CollectorMarketMetadata> dayList : marketsByDay.values()) {
+            remainingMarketCount += dayList.size();
+        }
         listener.onDiscovered(marketsByDay.size(), remainingMarketCount);
 
-        TradingStrategy probeInstance = strategy.createInstance();
-        boolean parallelCapable = (probeInstance != null && probeInstance != strategy);
+        boolean needsSpot = (activeStrategy instanceof SpotTwapListener)
+                || (activeStrategy instanceof FastSpotMicroListener);
+        long clobLookbackMs = activeStrategy.getRequiredClobLookbackMs();
+
+        PolymarketOrderBook orderBook = new PolymarketOrderBook();
+        SpotTwapIndicator spotTwapIndicator = new SpotTwapIndicator();
+        FastSpotMicroIndicator fastSpotMicroIndicator = new FastSpotMicroIndicator(
+                FastSpotMicroIndicatorConfig.defaults());
+        CoreTradingEngine coreEngine = new CoreTradingEngine(
+                orderBook,
+                spotTwapIndicator,
+                fastSpotMicroIndicator,
+                activeStrategy,
+                sym,
+                startingBalance
+        );
+        SimulatedClobExecutionEngine executionEngine = new SimulatedClobExecutionEngine(
+                orderBook,
+                resolvedOrderGatewayDelayMs,
+                resolvedLatencyFactor
+        );
+        coreEngine.setExecutionGateway(executionEngine);
+
+        List<TradeRecord> currentMarketTrades = new ArrayList<>(8);
+        coreEngine.setTradeLifecycleListener(new CoreTradingEngine.TradeLifecycleListener() {
+            @Override
+            public void onTradeClosed(TradeRecord tradeRecord) {
+                currentMarketTrades.add(tradeRecord);
+            }
+        });
 
         List<TradeRecord> trades = new ArrayList<>();
-        List<MarketEquityPoint> marketPoints = new ArrayList<>(markets.size());
-        double currentBalance = capital;
+        List<MarketEquityPoint> marketPoints = new ArrayList<>(remainingMarketCount);
         double brierSum = 0.0;
         int evaluatedCount = 0;
         int completedDays = 0;
         int completedMarkets = 0;
 
-        for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
-            if (listener.isCancelled()) {
-                throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
-            }
-            String dateStr = dayEntry.getKey();
-            List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
-            int dayMarketCount = dayMarkets.size();
+        Map<String, BacktestEvent[]> polyBoltDayCache = new HashMap<>(4);
+        long simulatedUpToMs = -1L;
 
-            listener.onDayStarted(dateStr);
+        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(datasetService.getDuckDbSessionManager())) {
+            executionEngine.bind(streamer::scheduleActionAt, coreEngine::onExecutionReport);
 
-            if (Log.isInfoEnabled()) {
-                Log.infof("Processing UTC day %s (%d markets) for symbol %s",
-                        !dateStr.isBlank() ? dateStr : "UNKNOWN", dayMarketCount, sym);
-            }
-
-            // 1. Load shared daily Polymarket streams strictly ONCE for this UTC day
-            BacktestEvent[] sharedDailyEvents = !dateStr.isBlank()
-                    ? ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, sym, dateStr)
-                    : new BacktestEvent[0];
-
-            // 2. Load cached daily indicator tracks consumed by this strategy (computing missing ones in a single raw pass)
-            List<DailyIndicatorTrack> dailyIndicatorTracks = !dateStr.isBlank()
-                    ? indicatorCacheService.loadOrComputeDailyIndicators(
-                            datasetService, sym, dateStr, strategy, effectiveDelays)
-                    : List.of();
-
-            // 3. Process the day's 15-minute Polymarket markets across the dedicated worker pool
-            MarketSimulationOutcome[] dayOutcomes = new MarketSimulationOutcome[dayMarketCount];
-            int numWorkers = parallelCapable ? Math.min(dayMarketCount, workerCount) : 1;
-
-            if (numWorkers <= 1) {
-                executeWorkerLoop(
-                        new AtomicInteger(0),
-                        dayMarkets,
-                        sharedDailyEvents,
-                        dailyIndicatorTracks,
-                        dayOutcomes,
-                        strategy,
-                        parallelCapable,
-                        resolvedLatencyFactor,
-                        listener
-                );
-            } else {
-                AtomicInteger cursor = new AtomicInteger(0);
-                CompletableFuture<?>[] workers = new CompletableFuture<?>[numWorkers];
-                for (int w = 0; w < numWorkers; w++) {
-                    workers[w] = CompletableFuture.runAsync(() -> executeWorkerLoop(
-                            cursor,
-                            dayMarkets,
-                            sharedDailyEvents,
-                            dailyIndicatorTracks,
-                            dayOutcomes,
-                            strategy,
-                            true,
-                            resolvedLatencyFactor,
-                            listener
-                    ), workerPool);
+            for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
+                if (listener.isCancelled()) {
+                    throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
                 }
-                CompletableFuture.allOf(workers).join();
-            }
+                String dateStr = dayEntry.getKey();
+                List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
+                int dayMarketCount = dayMarkets.size();
 
-            if (listener.isCancelled()) {
-                throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
-            }
+                listener.onDayStarted(dateStr);
 
-            // 4. Deterministic chronological reduction of trades, per-market equity points, balance, and Brier score
-            boolean traceEnabled = Log.isTraceEnabled();
-            for (int i = 0; i < dayMarketCount; i++) {
-                CollectorMarketMetadata discoveredMarket = dayMarkets.get(i);
-                MarketSimulationOutcome outcome = dayOutcomes[i];
-                if (outcome == null) {
-                    continue;
+                if (Log.isInfoEnabled()) {
+                    Log.infof("Processing UTC day %s (%d markets) for symbol %s",
+                            !dateStr.isBlank() ? dateStr : "UNKNOWN", dayMarketCount, sym);
                 }
-                double marketNetPnl = 0.0;
-                double marketFees = 0.0;
-                int marketTradesCount = 0;
-                int marketWinningTrades = 0;
 
-                for (TradeRecord rawTrade : outcome.rawTrades()) {
-                    currentBalance += rawTrade.netPnl();
-                    marketNetPnl += rawTrade.netPnl();
-                    marketFees += rawTrade.feeUsd();
-                    marketTradesCount++;
-                    if (rawTrade.isWin()) {
-                        marketWinningTrades++;
-                    }
-                    TradeRecord finalizedTrade = new TradeRecord(
-                            rawTrade.entryTimeUtc(),
-                            rawTrade.intervalStartSec(),
-                            rawTrade.side(),
-                            rawTrade.entryPrice(),
-                            rawTrade.exitPrice(),
-                            rawTrade.sizeUsd(),
-                            rawTrade.shares(),
-                            rawTrade.feeUsd(),
-                            rawTrade.netPnl(),
-                            rawTrade.exitReason(),
-                            rawTrade.modelProbability(),
-                            rawTrade.marketPrice(),
-                            rawTrade.edge(),
-                            rawTrade.isWin(),
-                            currentBalance
-                    );
-                    trades.add(finalizedTrade);
+                long firstDayMarketStartMs = dayMarkets.getFirst().tStart() * 1_000L;
+                long lastDayMarketEndMs = dayMarkets.getLast().tEnd() * 1_000L;
+                boolean isFirstSimulatedDay = (simulatedUpToMs < 0L);
+                long dayStreamStartMs = isFirstSimulatedDay
+                        ? (firstDayMarketStartMs - PRE_RUN_WARMUP_MS)
+                        : Math.min(simulatedUpToMs, firstDayMarketStartMs);
 
-                    if (traceEnabled) {
-                        Log.tracef("Trade executed: marketStart=%d (%s), side=%s, entryPrice=%.4f, exitPrice=%.4f, shares=%.2f, sizeUsd=%.2f, feeUsd=%.4f, netPnl=%.2f, win=%s, reason=%s, balanceAfter=%.2f",
-                                finalizedTrade.intervalStartSec(),
-                                finalizedTrade.entryTimeUtc(),
-                                finalizedTrade.side(),
-                                finalizedTrade.entryPrice(),
-                                finalizedTrade.exitPrice(),
-                                finalizedTrade.shares(),
-                                finalizedTrade.sizeUsd(),
-                                finalizedTrade.feeUsd(),
-                                finalizedTrade.netPnl(),
-                                finalizedTrade.isWin(),
-                                finalizedTrade.exitReason(),
-                                finalizedTrade.balanceAfterTrade());
-                    }
-                }
-                if (outcome.evaluated()) {
-                    brierSum += outcome.brierDiffSq();
-                    evaluatedCount++;
-                    marketPoints.add(new MarketEquityPoint(
-                            discoveredMarket.tStart(),
+                BacktestEvent[] polyBoltWindowEvents = loadPolyBoltWindowWithCache(
+                        polyBoltDayCache, sym, dateStr, dayStreamStartMs - BOUNDARY_MARGIN_MS, lastDayMarketEndMs + BOUNDARY_MARGIN_MS);
+
+                if (needsSpot && !dateStr.isBlank()) {
+                    streamer.openDailySpotStream(
+                            datasetService,
+                            sym,
                             dateStr,
-                            marketTradesCount,
-                            marketWinningTrades,
-                            marketNetPnl,
-                            marketFees,
-                            outcome.brierDiffSq(),
-                            true,
-                            currentBalance
-                    ));
+                            effectiveDelays,
+                            dayStreamStartMs,
+                            lastDayMarketEndMs,
+                            isFirstSimulatedDay
+                    );
+                } else {
+                    streamer.closeDailySpotStream();
                 }
-            }
 
-            completedDays++;
-            completedMarkets += dayMarketCount;
-            listener.onDayCompleted(completedDays, completedMarkets, dateStr);
+                boolean traceEnabled = Log.isTraceEnabled();
+
+                for (int i = 0; i < dayMarketCount; i++) {
+                    if (listener.isCancelled()) {
+                        throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
+                    }
+
+                    CollectorMarketMetadata discoveredMarket = dayMarkets.get(i);
+                    CollectorMarketMetadata market = datasetService.loadMarketMetadata(discoveredMarket, polyBoltWindowEvents)
+                            .orElse(null);
+                    if (market == null) {
+                        continue;
+                    }
+
+                    long tStart = market.tStart();
+                    long tEnd = market.tEnd();
+                    long tStartMs = tStart * 1_000L;
+                    long tEndMs = tEnd * 1_000L;
+                    TradeDirection actualOutcome = market.actualOutcome() != null
+                            ? market.actualOutcome()
+                            : TradeDirection.UP;
+
+                    if (simulatedUpToMs < 0L) {
+                        simulatedUpToMs = tStartMs - PRE_RUN_WARMUP_MS;
+                    }
+                    if (simulatedUpToMs < tStartMs) {
+                        playWarmupSlice(streamer, coreEngine, polyBoltWindowEvents, simulatedUpToMs, tStartMs);
+                        simulatedUpToMs = tStartMs;
+                    }
+
+                    if (Log.isDebugEnabled()) {
+                        Log.debugf("Processing market at %d (%s): twapOpen=%.2f, twapClose=%.2f, outcome=%s",
+                                tStart, market.datetimeUtc(), market.twapOpen(), market.twapClose(), actualOutcome);
+                    }
+
+                    currentMarketTrades.clear();
+                    coreEngine.setWarmupMode(false);
+
+                    boolean windowedClob = clobLookbackMs > 0L && clobLookbackMs < (tEndMs - tStartMs);
+                    long quoteStartMs = windowedClob
+                            ? Math.max(tStartMs, tEndMs - clobLookbackMs)
+                            : 0L;
+
+                    streamer.loadCandleEvents(market, polyBoltWindowEvents, clobLookbackMs);
+
+                    double brierDiffSq = 0.0;
+                    boolean evaluated = false;
+                    long lastSeededClobTs = -1L;
+                    boolean quoteWindowEntered = !windowedClob;
+
+                    while (streamer.hasNext()) {
+                        BacktestEvent event = streamer.next();
+                        long evTs = event.timestampMs();
+
+                        if (evTs > tEndMs) {
+                            break;
+                        }
+
+                        if (!quoteWindowEntered && evTs >= quoteStartMs) {
+                            quoteWindowEntered = true;
+                            if (!(event instanceof BacktestEvent.PolymarketClobFrameEvent) && lastSeededClobTs >= 0L) {
+                                coreEngine.publishSeededOrderBook(lastSeededClobTs);
+                                lastSeededClobTs = -1L;
+                            }
+                        }
+
+                        switch (event) {
+                            case BacktestEvent.CandleLifecycleEvent e -> {
+                                if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_START) {
+                                    coreEngine.setCurrentClockMs(evTs);
+                                    coreEngine.beginCandleCycle(
+                                            tStart,
+                                            tEnd,
+                                            market.twapOpen(),
+                                            market.upTokenId(),
+                                            market.downTokenId(),
+                                            true
+                                    );
+                                } else if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_CLOSE) {
+                                    double pModelUp = coreEngine.estimateCurrentModelProbUp();
+                                    coreEngine.resolveCandle(actualOutcome, market.twapClose(), evTs);
+                                    double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
+                                    double diff = pModelUp - actualUp;
+                                    brierDiffSq = diff * diff;
+                                    evaluated = true;
+                                }
+                            }
+                            case BacktestEvent.ScheduledEngineActionEvent e -> {
+                                coreEngine.setCurrentClockMs(evTs);
+                                e.action().run();
+                            }
+                            case BacktestEvent.PolymarketClobFrameEvent e -> {
+                                coreEngine.setCurrentClockMs(evTs);
+                                boolean mutated = applyClobFrameBatch(streamer, orderBook, e);
+                                if (mutated) {
+                                    if (evTs >= quoteStartMs) {
+                                        lastSeededClobTs = -1L;
+                                        coreEngine.onOrderBookUpdated(evTs);
+                                    } else {
+                                        lastSeededClobTs = evTs;
+                                    }
+                                }
+                            }
+                            case BacktestEvent.ExchangeSpotTradeEvent e -> dispatchSpotTrade(coreEngine, e);
+                            case BacktestEvent.PolymarketCryptoPriceEvent e -> coreEngine.onPolyBoltCryptoPrice(
+                                    evTs, e.symbol(), e.source(), e.price(), e.priceTimestampMs());
+                            case BacktestEvent.PolymarketCryptoTwap60sEvent e -> coreEngine.onPolyBoltCryptoTwap60s(
+                                    evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
+                        }
+                    }
+
+                    streamer.clearCandleSlice();
+                    simulatedUpToMs = tEndMs;
+
+                    double marketNetPnl = 0.0;
+                    double marketFees = 0.0;
+                    int marketTradesCount = currentMarketTrades.size();
+                    int marketWinningTrades = 0;
+
+                    for (int t = 0; t < marketTradesCount; t++) {
+                        TradeRecord finalizedTrade = currentMarketTrades.get(t);
+                        marketNetPnl += finalizedTrade.netPnl();
+                        marketFees += finalizedTrade.feeUsd();
+                        if (finalizedTrade.isWin()) {
+                            marketWinningTrades++;
+                        }
+                        trades.add(finalizedTrade);
+
+                        if (traceEnabled) {
+                            Log.tracef("Trade executed: marketStart=%d (%s), side=%s, entryPrice=%.4f, exitPrice=%.4f, shares=%.2f, sizeUsd=%.2f, feeUsd=%.4f, netPnl=%.2f, win=%s, reason=%s, balanceAfter=%.2f",
+                                    finalizedTrade.intervalStartSec(),
+                                    finalizedTrade.entryTimeUtc(),
+                                    finalizedTrade.side(),
+                                    finalizedTrade.entryPrice(),
+                                    finalizedTrade.exitPrice(),
+                                    finalizedTrade.shares(),
+                                    finalizedTrade.sizeUsd(),
+                                    finalizedTrade.feeUsd(),
+                                    finalizedTrade.netPnl(),
+                                    finalizedTrade.isWin(),
+                                    finalizedTrade.exitReason(),
+                                    finalizedTrade.balanceAfterTrade());
+                        }
+                    }
+
+                    if (evaluated) {
+                        brierSum += brierDiffSq;
+                        evaluatedCount++;
+                        marketPoints.add(new MarketEquityPoint(
+                                tStart,
+                                dateStr,
+                                marketTradesCount,
+                                marketWinningTrades,
+                                marketNetPnl,
+                                marketFees,
+                                brierDiffSq,
+                                true,
+                                coreEngine.getRealizedEquityUsd()
+                        ));
+                    }
+
+                    if (Log.isDebugEnabled()) {
+                        Log.debugf("Market summary at %d (%s): outcome=%s, trades=%d, wins=%d, netPnl=%.2f, brierDiffSq=%.4f",
+                                tStart, market.datetimeUtc(), actualOutcome,
+                                marketTradesCount, marketWinningTrades, marketNetPnl, brierDiffSq);
+                    }
+                }
+
+                streamer.closeDailySpotStream();
+                completedDays++;
+                completedMarkets += dayMarketCount;
+                listener.onDayCompleted(completedDays, completedMarkets, dateStr);
+            }
         }
 
         long durationMs = Math.max(1L, (System.nanoTime() - startWallNs) / 1_000_000L);
 
         BacktestRunConfig runConfig = new BacktestRunConfig(
-                strategy.getName(),
+                activeStrategy.getName(),
                 sym,
                 resolvedStartDate,
                 resolvedEndDate,
                 capital,
                 resolvedLatencyFactor,
+                resolvedOrderGatewayDelayMs,
                 effectiveDelays.binanceDelayMs(),
                 effectiveDelays.krakenDelayMs(),
                 effectiveDelays.coinbaseDelayMs(),
@@ -552,7 +693,7 @@ public class BacktestEngine {
         BacktestResult result = new BacktestResult(
                 targetRunId,
                 resolvedLabel,
-                strategy.getName(),
+                activeStrategy.getName(),
                 sym,
                 Instant.now(),
                 durationMs,
@@ -568,178 +709,235 @@ public class BacktestEngine {
         historyRepository.saveRun(result);
         if (Log.isInfoEnabled()) {
             Log.infof("Completed backtest runId=%s for strategy=%s on %s: totalMarkets=%d, evaluatedMarkets=%d, totalTrades=%d, netPnl=%.2f, winRate=%.2f%%, durationMs=%d",
-                    targetRunId, strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
+                    targetRunId, activeStrategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
                     metrics.totalNetPnl(), metrics.winRatePct(), durationMs);
         }
         return result;
     }
 
-    private void executeWorkerLoop(
-            AtomicInteger cursor,
-            List<CollectorMarketMetadata> dayMarkets,
-            BacktestEvent[] sharedDailyEvents,
-            List<DailyIndicatorTrack> dailyIndicatorTracks,
-            MarketSimulationOutcome[] dayOutcomes,
-            TradingStrategy templateStrategy,
-            boolean createWorkerStrategyCopy,
-            double resolvedLatencyFactor,
-            BacktestProgressListener listener) {
+    private BacktestEvent[] loadPolyBoltWindowWithCache(
+            Map<String, BacktestEvent[]> polyBoltDayCache,
+            String symbol,
+            String dateStr,
+            long minTsMs,
+            long maxTsMs) {
+        if (dateStr == null || dateStr.isBlank()) {
+            return new BacktestEvent[0];
+        }
+        LocalDate curDate = LocalDate.parse(dateStr);
+        String prevDateStr = curDate.minusDays(1).toString();
+        String nextDateStr = curDate.plusDays(1).toString();
 
-        int total = dayMarkets.size();
-        PolymarketOrderBook orderBook = new PolymarketOrderBook();
-        SimulatedMatchingEngine matchingEngine = new SimulatedMatchingEngine(orderBook, resolvedLatencyFactor);
+        // Evict stale cached days older than prevDateStr
+        polyBoltDayCache.keySet().removeIf(k ->
+                !k.equals(prevDateStr) && !k.equals(dateStr) && !k.equals(nextDateStr));
 
-        try (ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(datasetService.getDuckDbSessionManager())) {
-            matchingEngine.setEventScheduler(streamer::scheduleEvent);
-            BacktestSimulationContext context = new BacktestSimulationContext(matchingEngine);
+        BacktestEvent[] prev = polyBoltDayCache.computeIfAbsent(
+                prevDateStr, d -> ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, symbol, d));
+        BacktestEvent[] cur = polyBoltDayCache.computeIfAbsent(
+                dateStr, d -> ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, symbol, d));
+        BacktestEvent[] next = polyBoltDayCache.computeIfAbsent(
+                nextDateStr, d -> ChronologicalEventStreamer.loadSharedDailyStreams(datasetService, symbol, d));
 
-            TradingStrategy activeStrategy = createWorkerStrategyCopy
-                    ? templateStrategy.createInstance()
-                    : templateStrategy;
-            activeStrategy.reset();
-            activeStrategy.init(context);
-            long clobLookbackMs = activeStrategy.getRequiredClobLookbackMs();
+        return ChronologicalEventStreamer.mergePolyBoltWindow(prev, cur, next, minTsMs, maxTsMs);
+    }
 
-            while (!listener.isCancelled()) {
-                int idx = cursor.getAndIncrement();
-                if (idx >= total) {
-                    break;
+    private static void playWarmupSlice(
+            ChronologicalEventStreamer streamer,
+            CoreTradingEngine coreEngine,
+            BacktestEvent[] polyBoltWindowEvents,
+            long sliceStartMs,
+            long sliceEndMs) {
+        coreEngine.setWarmupMode(true);
+        streamer.loadWarmupSlice(polyBoltWindowEvents, sliceStartMs, sliceEndMs);
+        while (streamer.hasNext()) {
+            BacktestEvent event = streamer.next();
+            long evTs = event.timestampMs();
+            switch (event) {
+                case BacktestEvent.ExchangeSpotTradeEvent e -> dispatchSpotTrade(coreEngine, e);
+                case BacktestEvent.PolymarketCryptoPriceEvent e -> coreEngine.onPolyBoltCryptoPrice(
+                        evTs, e.symbol(), e.source(), e.price(), e.priceTimestampMs());
+                case BacktestEvent.PolymarketCryptoTwap60sEvent e -> coreEngine.onPolyBoltCryptoTwap60s(
+                        evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
+                default -> {
                 }
+            }
+        }
+        streamer.clearCandleSlice();
+    }
 
-                CollectorMarketMetadata discoveredMarket = dayMarkets.get(idx);
-                CollectorMarketMetadata market = datasetService.loadMarketMetadata(discoveredMarket, sharedDailyEvents)
-                        .orElse(null);
-                if (market == null) {
-                    dayOutcomes[idx] = new MarketSimulationOutcome(List.of(), 0.0, false);
-                    continue;
-                }
-
-                if (Log.isDebugEnabled()) {
-                    Log.debugf("Processing market at %d (%s): twapOpen=%.2f, twapClose=%.2f, outcome=%s",
-                            market.tStart(), market.datetimeUtc(), market.twapOpen(), market.twapClose(), market.actualOutcome());
-                }
-
-                activeStrategy.reset();
-
-                long tStart = market.tStart();
-                long tEnd = market.tEnd();
-                long tStartMs = tStart * 1000L;
-                long tEndMs = tEnd * 1000L;
-                boolean windowedClob = clobLookbackMs > 0L && clobLookbackMs < (tEndMs - tStartMs);
-                long quoteStartMs = windowedClob
-                        ? Math.max(tStartMs, tEndMs - clobLookbackMs)
-                        : 0L;
-                TradeDirection actualOutcome = market.actualOutcome() != null ? market.actualOutcome() : TradeDirection.UP;
-
-                orderBook.clear();
-                orderBook.setMarketTokenIds(market.upTokenId(), market.downTokenId());
-                context.resetForCandle();
-
-                streamer.clear();
-                streamer.loadCandleEvents(market, sharedDailyEvents, dailyIndicatorTracks, clobLookbackMs);
-
-                List<TradeRecord> marketTrades = List.of();
-                double brierDiffSq = 0.0;
-                boolean evaluated = false;
-                long lastSeededClobTs = -1L;
-                boolean quoteWindowEntered = !windowedClob;
-
-                while (streamer.hasNext()) {
-                    BacktestEvent event = streamer.next();
-                    long evTs = event.timestampMs();
-                    context.setCurrentTimestampMs(evTs);
-
-                    if (!quoteWindowEntered && evTs >= quoteStartMs) {
-                        quoteWindowEntered = true;
-                        if (!(event instanceof BacktestEvent.PolymarketClobFrameEvent) && lastSeededClobTs >= 0L) {
-                            activeStrategy.onOrderBookQuote(orderBook.toOrderBookQuote(lastSeededClobTs));
-                            lastSeededClobTs = -1L;
-                        }
-                    }
-
-                    switch (event) {
-                        case BacktestEvent.PolymarketClobFrameEvent e -> {
-                            orderBook.applyClobFrame(e);
-                            if (evTs >= quoteStartMs) {
-                                lastSeededClobTs = -1L;
-                                OrderBookQuote quote = orderBook.toOrderBookQuote(evTs);
-                                activeStrategy.onOrderBookQuote(quote);
-                            } else {
-                                lastSeededClobTs = evTs;
-                            }
-                        }
-                        case BacktestEvent.CalculatedFastSpotMicroEvent e -> {
-                            context.setLastReferencePrice(e.fastDirectUsd());
-                            if (activeStrategy instanceof FastSpotMicroListener listenerStrategy) {
-                                listenerStrategy.onFastSpotMicro(
-                                        evTs, e.symbol(), e.fastDirectUsd(), e.signedOfi1s(), e.syncMove500Usd());
-                            }
-                        }
-                        case BacktestEvent.CalculatedSpotTwapEvent e -> {
-                            context.setLastReferencePrice(e.spotPrice());
-                            if (activeStrategy instanceof SpotTwapListener listenerStrategy) {
-                                listenerStrategy.onSpotTwap(evTs, e.symbol(), e.spotPrice(), e.twap60sPrice());
-                            }
-                        }
-                        case BacktestEvent.PolymarketCryptoPriceEvent e -> {
-                            context.setLastReferencePrice(e.price());
-                            activeStrategy.onPolymarketCryptoPrice(evTs, e.symbol(), e.source(), e.price(), e.priceTimestampMs());
-                        }
-                        case BacktestEvent.PolymarketCryptoTwap60sEvent e -> {
-                            context.setLastReferencePrice(e.twapPrice());
-                            activeStrategy.onPolymarketCryptoTwap60s(
-                                    evTs, e.symbol(), e.source(), e.twapPrice(), e.windowSeconds(), e.twapTimestampMs());
-                        }
-                        case BacktestEvent.PendingOrderExecutionEvent e -> {
-                            ExecutionReport report = matchingEngine.executePendingOrder(e);
-                            if (report != null) {
-                                activeStrategy.onExecutionReport(report);
-                                if ("FILLED".equalsIgnoreCase(report.status()) && evTs >= quoteStartMs) {
-                                    activeStrategy.onOrderBookQuote(orderBook.toOrderBookQuote(evTs));
-                                }
-                            }
-                        }
-                        case BacktestEvent.CandleLifecycleEvent e -> {
-                            if (e.type() == BacktestEvent.CandleLifecycleType.CANDLE_CLOSE) {
-                                activeStrategy.onCandleResolution(actualOutcome);
-
-                                if (context.hasActiveTrade()) {
-                                    marketTrades = context.finalizeTrades(market, actualOutcome, 0.0);
-                                }
-
-                                double actualUp = (actualOutcome == TradeDirection.UP) ? 1.0 : 0.0;
-                                double pModelUp = context.getEstimatedModelProbUp(market);
-                                double diff = pModelUp - actualUp;
-                                brierDiffSq = diff * diff;
-                                evaluated = true;
-                            }
-                        }
-                    }
-                }
-
-                if (Log.isDebugEnabled()) {
-                    double marketNetPnl = 0.0;
-                    int winningTrades = 0;
-                    for (int t = 0; t < marketTrades.size(); t++) {
-                        TradeRecord tr = marketTrades.get(t);
-                        marketNetPnl += tr.netPnl();
-                        if (tr.isWin()) {
-                            winningTrades++;
-                        }
-                    }
-                    Log.debugf("Market summary at %d (%s): outcome=%s, trades=%d, wins=%d, netPnl=%.2f, brierDiffSq=%.4f",
-                            market.tStart(), market.datetimeUtc(), actualOutcome,
-                            marketTrades.size(), winningTrades, marketNetPnl, brierDiffSq);
-                }
-
-                dayOutcomes[idx] = new MarketSimulationOutcome(marketTrades, brierDiffSq, evaluated);
+    private static void dispatchSpotTrade(CoreTradingEngine coreEngine, BacktestEvent.ExchangeSpotTradeEvent e) {
+        long ts = e.timestampMs();
+        switch (e.venueCode()) {
+            case BacktestEvent.ExchangeSpotTradeEvent.VENUE_KRAKEN_USDT ->
+                    coreEngine.onKrakenUsdtUsdTrade(ts, e.price());
+            case BacktestEvent.ExchangeSpotTradeEvent.VENUE_BINANCE ->
+                    coreEngine.onBinanceUsdtTrade(ts, e.price(), e.quantity(), e.isTakerBuy());
+            case BacktestEvent.ExchangeSpotTradeEvent.VENUE_COINBASE ->
+                    coreEngine.onCoinbaseUsdTrade(ts, e.price(), e.quantity(), e.isTakerBuy());
+            case BacktestEvent.ExchangeSpotTradeEvent.VENUE_KRAKEN_ASSET ->
+                    coreEngine.onKrakenUsdTrade(ts, e.price(), e.quantity(), e.isTakerBuy());
+            default -> {
             }
         }
     }
 
-    private record MarketSimulationOutcome(
-            List<TradeRecord> rawTrades,
-            double brierDiffSq,
-            boolean evaluated
-    ) {}
+    /**
+     * Applies a typed Polymarket CLOB frame (and any co-located {@code EVENT_BBO_HINT} frame sharing the
+     * identical receipt timestamp) to {@link PolymarketOrderBook} using identical per-side server timestamp
+     * guards and non-fabricating BBO pruning as live {@code PolymarketStreamParser}.
+     *
+     * @param streamer  active chronological event streamer
+     * @param orderBook canonical L2 order book
+     * @param frame     typed CLOB frame event
+     * @return {@code true} if book levels or BBO hints were applied
+     */
+    public static boolean applyClobFrameBatch(
+            ChronologicalEventStreamer streamer,
+            PolymarketOrderBook orderBook,
+            BacktestEvent.PolymarketClobFrameEvent frame) {
+        boolean mutated = applySingleClobFrame(orderBook, frame);
+        if (frame.eventCode() == BacktestEvent.PolymarketClobFrameEvent.EVENT_PRICE_CHANGE && streamer != null) {
+            while (streamer.peek() instanceof BacktestEvent.PolymarketClobFrameEvent nextFrame
+                    && nextFrame.timestampMs() == frame.timestampMs()
+                    && nextFrame.eventCode() == BacktestEvent.PolymarketClobFrameEvent.EVENT_BBO_HINT) {
+                streamer.next();
+                // Co-located BBO hint shares the same server_ts as its parent price_change frame
+                mutated |= applyBboHintLevels(orderBook, nextFrame, false);
+            }
+        }
+        return mutated;
+    }
+
+    private static boolean applySingleClobFrame(
+            PolymarketOrderBook orderBook,
+            BacktestEvent.PolymarketClobFrameEvent frame) {
+        long receiptTs = frame.timestampMs();
+        long serverTs = frame.serverTimestampMs();
+        orderBook.updateObservedLatency(receiptTs, serverTs);
+
+        return switch (frame.eventCode()) {
+            case BacktestEvent.PolymarketClobFrameEvent.EVENT_BOOK -> {
+                boolean isUp = frame.bookIsUp();
+                if (!orderBook.tryAcceptServerTimestamp(isUp, serverTs)) {
+                    yield false;
+                }
+                orderBook.clearSideForSnapshot(isUp);
+                boolean[] isBidFlags = frame.isBidFlags();
+                int[] ticks = frame.ticks();
+                double[] sizes = frame.sizes();
+                for (int i = 0, n = frame.levelCount(); i < n; i++) {
+                    orderBook.setSnapshotLevel(isUp, isBidFlags[i], ticks[i], sizes[i]);
+                }
+                orderBook.finishBookSnapshot(isUp, receiptTs);
+                yield true;
+            }
+            case BacktestEvent.PolymarketClobFrameEvent.EVENT_PRICE_CHANGE -> {
+                int n = frame.levelCount();
+                if (n <= 0) {
+                    yield false;
+                }
+                boolean[] isUpFlags = frame.isUpFlags();
+                boolean[] isBidFlags = frame.isBidFlags();
+                int[] ticks = frame.ticks();
+                double[] sizes = frame.sizes();
+
+                boolean hasUp = false;
+                boolean hasDown = false;
+                for (int i = 0; i < n; i++) {
+                    if (isUpFlags[i]) {
+                        hasUp = true;
+                    } else {
+                        hasDown = true;
+                    }
+                }
+                boolean acceptUp = hasUp && orderBook.tryAcceptServerTimestamp(true, serverTs);
+                boolean acceptDown = hasDown && orderBook.tryAcceptServerTimestamp(false, serverTs);
+                if (!acceptUp && !acceptDown) {
+                    yield false;
+                }
+                for (int i = 0; i < n; i++) {
+                    boolean sideUp = isUpFlags[i];
+                    if ((sideUp && acceptUp) || (!sideUp && acceptDown)) {
+                        orderBook.applyTickDelta(sideUp, isBidFlags[i], ticks[i], sizes[i], receiptTs);
+                    }
+                }
+                yield true;
+            }
+            case BacktestEvent.PolymarketClobFrameEvent.EVENT_BBO_HINT ->
+                    applyBboHintLevels(orderBook, frame, true);
+            default -> false;
+        };
+    }
+
+    private static boolean applyBboHintLevels(
+            PolymarketOrderBook orderBook,
+            BacktestEvent.PolymarketClobFrameEvent frame,
+            boolean checkServerTimestamp) {
+        int n = frame.levelCount();
+        if (n <= 0) {
+            return false;
+        }
+        boolean[] isUpFlags = frame.isUpFlags();
+        boolean[] isBidFlags = frame.isBidFlags();
+        int[] ticks = frame.ticks();
+
+        int upBid = -1;
+        int upAsk = -1;
+        int downBid = -1;
+        int downAsk = -1;
+        boolean hasUp = false;
+        boolean hasDown = false;
+
+        for (int i = 0; i < n; i++) {
+            if (isUpFlags[i]) {
+                hasUp = true;
+                if (isBidFlags[i]) {
+                    upBid = ticks[i];
+                } else {
+                    upAsk = ticks[i];
+                }
+            } else {
+                hasDown = true;
+                if (isBidFlags[i]) {
+                    downBid = ticks[i];
+                } else {
+                    downAsk = ticks[i];
+                }
+            }
+        }
+
+        boolean applied = false;
+        if (hasUp && (!checkServerTimestamp || orderBook.tryAcceptServerTimestamp(true, frame.serverTimestampMs()))) {
+            orderBook.applyBboHint(true, upBid, upAsk, frame.timestampMs());
+            applied = true;
+        }
+        if (hasDown && (!checkServerTimestamp || orderBook.tryAcceptServerTimestamp(false, frame.serverTimestampMs()))) {
+            orderBook.applyBboHint(false, downBid, downAsk, frame.timestampMs());
+            applied = true;
+        }
+        return applied;
+    }
+
+    private static TradingStrategy resolveFreshStrategyInstance(TradingStrategy strategy) {
+        TradingStrategy created = strategy.createInstance();
+        return created != null ? created : strategy;
+    }
+
+    private static Map<String, List<CollectorMarketMetadata>> groupMarketsByDay(List<CollectorMarketMetadata> markets) {
+        Map<String, List<CollectorMarketMetadata>> marketsByDay = new LinkedHashMap<>();
+        for (CollectorMarketMetadata market : markets) {
+            String dayKey = market.dateStr() != null ? market.dateStr() : "";
+            marketsByDay.computeIfAbsent(dayKey, k -> new ArrayList<>()).add(market);
+        }
+        return marketsByDay;
+    }
+
+    private static String minDate(String a, String b) {
+        return a.compareTo(b) <= 0 ? a : b;
+    }
+
+    private static String maxDate(String a, String b) {
+        return a.compareTo(b) >= 0 ? a : b;
+    }
 }

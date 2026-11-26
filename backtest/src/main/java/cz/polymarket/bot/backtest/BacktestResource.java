@@ -6,7 +6,6 @@ import cz.polymarket.bot.backtest.data.BacktestRunRequest;
 import cz.polymarket.bot.backtest.data.DatasetSymbolSummary;
 import cz.polymarket.bot.backtest.data.ExchangeDelays;
 import cz.polymarket.bot.backtest.data.StrategyMetadata;
-import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.StrategyParameterService;
@@ -49,30 +48,33 @@ public class BacktestResource {
     private final BacktestJobManager jobManager;
     private final StrategyParameterService strategyParameterService;
     private final CollectorParquetDatasetService datasetService;
-    private final IndicatorCacheService indicatorCacheService;
     private final String defaultStrategy;
     private final String defaultStartDate;
     private final double defaultInitialCapital;
     private final double defaultLatencyFactor;
+    private final long defaultOrderGatewayDelayMs;
+    private final ExchangeDelays defaultExchangeDelays;
 
     /**
      * Constructs a new {@link BacktestResource} with injected services and default engine settings.
      *
-     * @param jobManager orchestrator for queued asynchronous backtesting job execution
-     * @param strategyParameterService service introspecting and validating strategy parameters
-     * @param datasetService dataset discovery service for available symbols and date bounds
-     * @param indicatorCacheService indicator cache service exposing default exchange feed delays
-     * @param defaultStrategy default trading strategy name configured in application properties
-     * @param defaultStartDate default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
-     * @param defaultInitialCapital default initial capital in USD
-     * @param defaultLatencyFactor default order execution latency multiplier
+     * @param jobManager                 orchestrator for queued asynchronous backtesting job execution
+     * @param strategyParameterService   service introspecting and validating strategy parameters
+     * @param datasetService             dataset discovery service for available symbols and date bounds
+     * @param defaultStrategy            default trading strategy name configured in application properties
+     * @param defaultStartDate           default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
+     * @param defaultInitialCapital      default initial capital in USD
+     * @param defaultLatencyFactor       default order execution latency multiplier
+     * @param defaultOrderGatewayDelayMs default Polymarket CLOB order gateway round-trip delay in milliseconds
+     * @param binanceDelayMs             default simulated Binance one-way feed delay in milliseconds
+     * @param krakenDelayMs              default simulated Kraken one-way feed delay in milliseconds
+     * @param coinbaseDelayMs            default simulated Coinbase one-way feed delay in milliseconds
      */
     @Inject
     public BacktestResource(
             BacktestJobManager jobManager,
             StrategyParameterService strategyParameterService,
             CollectorParquetDatasetService datasetService,
-            IndicatorCacheService indicatorCacheService,
             @ConfigProperty(name = "polymarket.backtest.strategy", defaultValue = "OraclePulseLockStrategy")
             String defaultStrategy,
             @ConfigProperty(name = "polymarket.backtest.from", defaultValue = "2026-10-12")
@@ -80,7 +82,15 @@ public class BacktestResource {
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultInitialCapital,
             @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double defaultLatencyFactor) {
+            double defaultLatencyFactor,
+            @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
+            long defaultOrderGatewayDelayMs,
+            @ConfigProperty(name = "backtest.binance.delay-ms", defaultValue = "100")
+            long binanceDelayMs,
+            @ConfigProperty(name = "backtest.kraken.delay-ms", defaultValue = "50")
+            long krakenDelayMs,
+            @ConfigProperty(name = "backtest.coinbase.delay-ms", defaultValue = "50")
+            long coinbaseDelayMs) {
         if (jobManager == null) {
             Log.fatal("Fatal initialization error in BacktestResource: jobManager must not be null");
             throw new NullPointerException("jobManager must not be null");
@@ -93,14 +103,12 @@ public class BacktestResource {
             Log.fatal("Fatal initialization error in BacktestResource: datasetService must not be null");
             throw new NullPointerException("datasetService must not be null");
         }
-        if (indicatorCacheService == null) {
-            Log.fatal("Fatal initialization error in BacktestResource: indicatorCacheService must not be null");
-            throw new NullPointerException("indicatorCacheService must not be null");
+        if (defaultOrderGatewayDelayMs < 0L) {
+            throw new IllegalArgumentException("defaultOrderGatewayDelayMs must be non-negative");
         }
         this.jobManager = jobManager;
         this.strategyParameterService = strategyParameterService;
         this.datasetService = datasetService;
-        this.indicatorCacheService = indicatorCacheService;
         this.defaultStrategy = (defaultStrategy != null && !defaultStrategy.isBlank())
                 ? defaultStrategy.trim()
                 : "OraclePulseLockStrategy";
@@ -109,6 +117,8 @@ public class BacktestResource {
                 : "2026-10-12";
         this.defaultInitialCapital = defaultInitialCapital;
         this.defaultLatencyFactor = defaultLatencyFactor;
+        this.defaultOrderGatewayDelayMs = defaultOrderGatewayDelayMs;
+        this.defaultExchangeDelays = new ExchangeDelays(binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
     }
 
     /**
@@ -156,14 +166,14 @@ public class BacktestResource {
     public BacktestMetadataResponse getMetadata() {
         List<StrategyMetadata> strategies = strategyParameterService.listStrategies();
         List<DatasetSymbolSummary> datasets = datasetService.discoverAvailableDatasets();
-        ExchangeDelays delays = indicatorCacheService.getDefaultExchangeDelays();
         return new BacktestMetadataResponse(
                 defaultStrategy,
                 "BTCUSDT",
                 defaultStartDate,
                 defaultInitialCapital,
                 defaultLatencyFactor,
-                delays,
+                defaultOrderGatewayDelayMs,
+                defaultExchangeDelays,
                 strategies,
                 datasets
         );
@@ -291,6 +301,11 @@ public class BacktestResource {
                     .build();
         }
 
+        if (request.orderGatewayDelayMs() != null && request.orderGatewayDelayMs() < 0L) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "orderGatewayDelayMs must be non-negative"))
+                    .build();
+        }
         if (request.binanceDelayMs() != null && request.binanceDelayMs() < 0L) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "binanceDelayMs must be non-negative"))
@@ -323,6 +338,7 @@ public class BacktestResource {
                 Boolean.TRUE.equals(request.fullRange()),
                 request.initialCapital(),
                 request.latencyFactor(),
+                request.orderGatewayDelayMs(),
                 request.binanceDelayMs(),
                 request.krakenDelayMs(),
                 request.coinbaseDelayMs(),
@@ -504,6 +520,7 @@ public class BacktestResource {
             String defaultStartDate,
             double defaultInitialCapital,
             double defaultLatencyFactor,
+            long defaultOrderGatewayDelayMs,
             ExchangeDelays defaultExchangeDelays,
             List<StrategyMetadata> strategies,
             List<DatasetSymbolSummary> datasets

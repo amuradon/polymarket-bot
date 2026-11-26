@@ -1,5 +1,6 @@
 package cz.polymarket.bot.web;
 
+import cz.polymarket.bot.domain.OrderBookQuote;
 import cz.polymarket.bot.domain.Timeframe;
 import cz.polymarket.bot.engine.StrategyTradingEngine;
 import cz.polymarket.bot.strategy.OrderCommand;
@@ -79,6 +80,17 @@ class DashboardResourceTest {
 
         long tStartMs = 1_785_542_400_000L;
         engine.onPolymarketCryptoTwap60s(tStartMs, "btcusd", "chainlink", 88_000.0, 60, tStartMs);
+        engine.onOrderBookQuote(new OrderBookQuote(
+                0.50, 0.49, 0.51, 0.50, 250.0, 250.0, tStartMs + 50L
+        ));
+
+        given()
+                .when().get("/api/status")
+                .then()
+                .statusCode(200)
+                .body("depth1cUp", equalTo(250.0f))
+                .body("depth1cDown", equalTo(250.0f));
+
         engine.submitOrder(new OrderCommand(
                 "dash-paper-1", "0xMarket15m", "BTC-UP",
                 Timeframe.FIFTEEN_MINUTES, "BUY", BigDecimal.valueOf(0.50), BigDecimal.valueOf(100.0)
@@ -94,7 +106,10 @@ class DashboardResourceTest {
                         .body("$", hasSize(1))
                         .body("[0].clientOrderId", equalTo("dash-paper-1")));
 
-        // Close paper trade at 0.70 take profit
+        // Market rallies to 0.70 bid -> close paper trade at 0.70 take profit
+        engine.onOrderBookQuote(new OrderBookQuote(
+                0.71, 0.70, 0.30, 0.29, 250.0, 250.0, tStartMs + 500L
+        ));
         engine.submitOrder(new OrderCommand(
                 "dash-paper-exit-1", "0xMarket15m", "BTC-UP",
                 Timeframe.FIFTEEN_MINUTES, "SELL", BigDecimal.valueOf(0.70), BigDecimal.valueOf(100.0)

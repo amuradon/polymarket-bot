@@ -23,6 +23,7 @@ export class RunnerModalController {
         this.overwriteDaysCheckbox = document.getElementById("run-overwrite-days");
         this.capitalInput = document.getElementById("run-capital");
         this.latencyFactorInput = document.getElementById("run-latency-factor");
+        this.gatewayDelayInput = document.getElementById("run-gateway-delay");
         this.binanceDelayInput = document.getElementById("run-binance-delay");
         this.krakenDelayInput = document.getElementById("run-kraken-delay");
         this.coinbaseDelayInput = document.getElementById("run-coinbase-delay");
@@ -112,6 +113,7 @@ export class RunnerModalController {
         this.symbolSelect.value = this.metadata.defaultSymbol || this.symbolSelect.options[0]?.value || "BTCUSDT";
         this.capitalInput.value = String(this.metadata.defaultInitialCapital ?? 10000);
         this.latencyFactorInput.value = String(this.metadata.defaultLatencyFactor ?? 1.0);
+        this.gatewayDelayInput.value = String(this.metadata.defaultOrderGatewayDelayMs ?? 220);
         const delays = this.metadata.defaultExchangeDelays || {};
         this.binanceDelayInput.value = String(delays.binanceDelayMs ?? 100);
         this.krakenDelayInput.value = String(delays.krakenDelayMs ?? 50);
@@ -154,6 +156,7 @@ export class RunnerModalController {
 
         this.capitalInput.value = String(cfg.initialCapital ?? 10000);
         this.latencyFactorInput.value = String(cfg.latencyFactor ?? 1.0);
+        this.gatewayDelayInput.value = String(cfg.orderGatewayDelayMs ?? 220);
         this.binanceDelayInput.value = String(cfg.binanceDelayMs ?? 100);
         this.krakenDelayInput.value = String(cfg.krakenDelayMs ?? 50);
         this.coinbaseDelayInput.value = String(cfg.coinbaseDelayMs ?? 50);
@@ -372,6 +375,7 @@ export class RunnerModalController {
             fullRange,
             initialCapital: Number(this.capitalInput.value),
             latencyFactor: Number(this.latencyFactorInput.value),
+            orderGatewayDelayMs: Number(this.gatewayDelayInput.value),
             binanceDelayMs: Number(this.binanceDelayInput.value),
             krakenDelayMs: Number(this.krakenDelayInput.value),
             coinbaseDelayMs: Number(this.coinbaseDelayInput.value),

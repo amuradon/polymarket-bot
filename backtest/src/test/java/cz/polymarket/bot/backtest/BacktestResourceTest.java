@@ -3,7 +3,6 @@ package cz.polymarket.bot.backtest;
 import cz.polymarket.bot.backtest.TypedClobParquetTestHelper.ClobRow;
 import cz.polymarket.bot.backtest.data.BacktestJob;
 import cz.polymarket.bot.backtest.data.BacktestRunRequest;
-import cz.polymarket.bot.backtest.indicator.IndicatorCacheService;
 import cz.polymarket.bot.backtest.service.BacktestJobManager;
 import cz.polymarket.bot.backtest.service.CollectorParquetDatasetService;
 import cz.polymarket.bot.backtest.service.StrategyParameterService;
@@ -78,6 +77,7 @@ class BacktestResourceTest {
                 .contentType(ContentType.JSON)
                 .body("defaultStrategy", equalTo("OraclePulseLockStrategy"))
                 .body("defaultInitialCapital", equalTo(10000.0f))
+                .body("defaultOrderGatewayDelayMs", equalTo(220))
                 .body("strategies.size()", greaterThanOrEqualTo(9));
     }
 
@@ -119,6 +119,16 @@ class BacktestResourceTest {
                 .then()
                 .statusCode(400)
                 .body("error", containsString("latencyFactor must be non-negative"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body(Map.of(
+                        "strategyName", "UtterParameciumStrategy",
+                        "orderGatewayDelayMs", -10))
+                .when().post("/api/backtest/run")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("orderGatewayDelayMs must be non-negative"));
 
         given()
                 .contentType(ContentType.JSON)
@@ -327,7 +337,7 @@ class BacktestResourceTest {
     void shouldReturnNullTotalMarketsWithoutNpeForQueuedJob() {
         BacktestJob queuedJob = new BacktestJob(new BacktestRunRequest(
                 null, "OraclePulseLockStrategy", "BTCUSDT", "2026-10-12", "2026-11-21",
-                false, 10000.0, 1.0, 100L, 50L, 50L, Map.of(), false, false
+                false, 10000.0, 1.0, 220L, 100L, 50L, 50L, Map.of(), false, false
         ));
 
         BacktestJobManager mockJobManager = Mockito.mock(BacktestJobManager.class);
@@ -338,11 +348,14 @@ class BacktestResourceTest {
                 mockJobManager,
                 Mockito.mock(StrategyParameterService.class),
                 datasetService,
-                Mockito.mock(IndicatorCacheService.class),
                 "OraclePulseLockStrategy",
                 "2026-10-12",
                 10000.0,
-                1.0
+                1.0,
+                220L,
+                100L,
+                50L,
+                50L
         );
 
         List<BacktestResource.BacktestJobStatusResponse> jobs = directResource.listJobs();

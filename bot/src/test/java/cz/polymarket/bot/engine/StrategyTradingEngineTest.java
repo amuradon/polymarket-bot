@@ -466,7 +466,7 @@ class StrategyTradingEngineTest {
         assertThat(engine.getTwapOpenPrice()).isEqualTo(85_000.0);
 
         engine.onOrderBookQuote(new OrderBookQuote(
-                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, 0.64, 0.36, candleStartMs + 1_000L
+                0.65, 0.63, 0.37, 0.35, 500.0, 500.0, candleStartMs + 1_000L
         ));
 
         // 1. Price improvement: limit 0.70 fills at bestAskUp = 0.65 after 15ms latency without calling CLOB REST
@@ -694,7 +694,7 @@ class StrategyTradingEngineTest {
 
         long tau46Ms = candleEndMs - 46_000L;
         newEngine.onOrderBookQuote(new OrderBookQuote(
-                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, 0.46, 0.72, tau46Ms + 100L
+                0.46, 0.44, 0.72, 0.70, 100.0, 100.0, tau46Ms + 100L
         ));
         long breakoutTs = tau46Ms + 400L;
         newEngine.onRawBinanceFrameBatch(List.of(new TimestampedFrame(
@@ -722,7 +722,7 @@ class StrategyTradingEngineTest {
         engine.discoverAndRotateMarket(1792741500L);
         engine.onPolymarketCryptoPrice(1792742000_000L, "btcusd", "chainlink", 85100.0, 1792742000_000L);
         engine.onOrderBookQuote(new OrderBookQuote(
-                0.55, 0.54, 0.45, 0.44, 250.0, 300.0, 0.545, 0.445, 1792741999_500L
+                0.55, 0.54, 0.45, 0.44, 250.0, 300.0, 1792741999_500L
         ));
 
         TelemetryDto telemetry = engine.getTelemetry();
@@ -780,7 +780,7 @@ class StrategyTradingEngineTest {
         engine.discoverAndRotateMarket(c0 + 1L);
         engine.onPolymarketCryptoTwap60s(c0 * 1000L, "btcusd", "chainlink", 60_000.0, 60, c0 * 1000L);
         engine.onOrderBookQuote(new OrderBookQuote(
-                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, 0.545, 0.445, c0 * 1000L + 500L
+                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, c0 * 1000L + 500L
         ));
         engine.submitOrder(new OrderCommand(
                 "client-c0-1", "mkt-c0", "BTC-UP", Timeframe.FIFTEEN_MINUTES, "BUY",
@@ -816,7 +816,7 @@ class StrategyTradingEngineTest {
         engine.onPolymarketCryptoTwap60s(c5 * 1000L, "btcusd", "chainlink", 59_800.0, 60, c5 * 1000L);
         assertThat(engine.getTwapOpenPrice()).isEqualTo(59_800.0);
         engine.onOrderBookQuote(new OrderBookQuote(
-                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, 0.545, 0.445, c5 * 1000L + 1000L
+                0.55, 0.54, 0.45, 0.44, 500.0, 500.0, c5 * 1000L + 1000L
         ));
         engine.submitOrder(new OrderCommand(
                 "client-c5-1", "mkt-c5", "BTC-UP", Timeframe.FIFTEEN_MINUTES, "BUY",
@@ -829,6 +829,65 @@ class StrategyTradingEngineTest {
         engine.onPolymarketCryptoTwap60s(lateC6TsMs, "btcusd", "chainlink", 59_900.0, 60, lateC6TsMs);
         assertThat(paperRepository.getTrades()).isEmpty();
         assertThat(engine.getOpenPositions()).isEmpty();
+    }
+
+    @Test
+    void shouldSimulateTakerSpeedBumpMakerCancellationAndL2LiquidityDepletionInPaperMode() throws Exception {
+        StrategyTradingEngine engine = createEngine("PAPER", false, 5_000L, 120L);
+        long cycleSec = 1_795_536_000L;
+        long baseMs = System.currentTimeMillis();
+        engine.discoverAndRotateMarket(cycleSec + 1L);
+
+        // 1. Seed 50 shares at 0.50 on UP book, submit FAK BUY @ 0.50, then maker cancels 0.50 ask during speed bump (+25ms < ~107ms match)
+        engine.onRawClobFrame("""
+                [
+                  {"event_type":"book","asset_id":"%s","timestamp":"%d","bids":[{"price":"0.48","size":"100"}],"asks":[{"price":"0.50","size":"50"}]},
+                  {"event_type":"book","asset_id":"%s","timestamp":"%d","bids":[{"price":"0.49","size":"100"}],"asks":[{"price":"0.52","size":"100"}]}
+                ]
+                """.formatted(TEST_TOKEN_UP, baseMs, TEST_TOKEN_DOWN, baseMs), baseMs);
+
+        engine.submitOrder(new OrderCommand(
+                "paper-speedbump-reject", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "BUY", BigDecimal.valueOf(0.50), BigDecimal.valueOf(40.0)
+        ));
+        Thread.sleep(25L);
+        long cancelTs = System.currentTimeMillis();
+        engine.onRawClobFrame("""
+                {"event_type":"price_change","timestamp":"%d","price_changes":[{"asset_id":"%s","price":"0.50","size":"0","side":"SELL","best_bid":"0.48","best_ask":"0.55"}]}
+                """.formatted(cancelTs, TEST_TOKEN_UP), cancelTs);
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(engine.getTelemetry().ordersRejected()).isEqualTo(1L));
+        assertThat(engine.getOpenPositions()).isEmpty();
+
+        // 2. Multi-level L2 sweep and liquidity depletion across consecutive clips
+        StrategyTradingEngine syncPaperEngine = createEngine("PAPER", false, 5_000L, 0L);
+        syncPaperEngine.discoverAndRotateMarket(cycleSec + 1L);
+        long tBook = cycleSec * 1_000L + 2_000L;
+        syncPaperEngine.onRawClobFrame("""
+                [
+                  {"event_type":"book","asset_id":"%s","timestamp":"%d","bids":[{"price":"0.48","size":"100"}],"asks":[{"price":"0.50","size":"30"},{"price":"0.51","size":"30"}]},
+                  {"event_type":"book","asset_id":"%s","timestamp":"%d","bids":[{"price":"0.47","size":"100"}],"asks":[{"price":"0.52","size":"100"}]}
+                ]
+                """.formatted(TEST_TOKEN_UP, tBook, TEST_TOKEN_DOWN, tBook), tBook);
+        assertThat(syncPaperEngine.getDepth1cUp()).isEqualTo(60.0);
+
+        // Clip 1 buys 40 shares up to 0.51 -> sweeps 30 @ 0.50 + 10 @ 0.51 (VWAP = 0.5025), leaving 20 @ 0.51
+        syncPaperEngine.submitOrder(new OrderCommand(
+                "paper-clip-1", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "BUY", BigDecimal.valueOf(0.51), BigDecimal.valueOf(40.0)
+        ));
+        assertThat(syncPaperEngine.getOpenPositions()).hasSize(1);
+        assertThat(syncPaperEngine.getOpenPositions().getFirst().entryPrice()).isCloseTo(0.5025, org.assertj.core.data.Offset.offset(1e-6));
+
+        // Clip 2 buys 20 shares up to 0.51 -> 0.50 is already consumed, so fills strictly @ 0.5100
+        syncPaperEngine.submitOrder(new OrderCommand(
+                "paper-clip-2", "mkt-1", "BTC-UP", Timeframe.FIFTEEN_MINUTES,
+                "BUY", BigDecimal.valueOf(0.51), BigDecimal.valueOf(20.0)
+        ));
+        assertThat(syncPaperEngine.getOpenPositions()).hasSize(2);
+        assertThat(syncPaperEngine.getOpenPositions().get(1).entryPrice()).isCloseTo(0.5100, org.assertj.core.data.Offset.offset(1e-6));
     }
 
     private PolymarketSecretsResolver defaultSecretsResolver() {
