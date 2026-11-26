@@ -20,3 +20,5 @@ Read **only** the reference file required for your current task:
    - Measuring one-way WebSocket latency (`t_recv - t_exchange_event`) across 7 exchanges on `eu-west-1` EC2 (`./scripts/measure-exchange-ws-latency.sh`).
    - Downloading historical spot trades to daily ZSTD Parquet via Python (`download_binance_spot_aggtrades.py`, `download_kraken_trades.py`, `download_coinbase_trades.py`).
    - Executing the `backtest` module in startup **Batch Mode** (`polymarket.backtest.batchMode=true`) or **REST & Web UI Studio Mode** (`:8083`).
+3. **[../project-architecture/references/polymarket-mechanics-and-latencies.md](../project-architecture/references/polymarket-mechanics-and-latencies.md)**:
+   - Polymarket L2 orderbook rules, `event_code = 4` (`bbo_hint`) pruning semantics, CEX feed delays (`50/50/100 ms`), and the `~220 ms` two-phase CLOB `POST /order` speed-bump latency model.

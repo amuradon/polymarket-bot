@@ -2,12 +2,12 @@
 name: project-architecture
 description: >-
   Detailed architecture reference for Polymarket Bot's 4 Maven submodules
-  (common, connector, bot, backtest), exchange and Polymarket WebSocket stream
-  contracts, continuous Zstandard data collector, unified LIVE/PAPER/OFF
-  strategy runtime with state persistence, frontend stack, and local Bash
-  startup commands. Use when designing cross-module features, adding
-  connectors/streams/strategies, working on collector or trading runtime
-  internals, or starting applications locally.
+  (common, connector, bot, backtest), Polymarket CLOB/PolyBolt mechanics and
+  end-to-end link latencies (including the ~180 ms taker speed bump), exchange
+  WebSocket stream contracts, continuous Zstandard data collector, unified
+  LIVE/PAPER/OFF strategy runtime with state persistence, and local Bash startup
+  commands. Use when designing cross-module features, adding connectors/streams/strategies,
+  modeling orderbook or execution latency, or starting applications locally.
 ---
 
 # Polymarket Bot — Detailed Architecture Reference
@@ -69,3 +69,11 @@ Automated low-latency algorithmic trading platform for **Polymarket binary predi
 # Run full 4-module test suite (when Dev Mode is not running):
 ./mvnw test
 ```
+
+---
+
+## 4. Progressive Deep-Dive Reference
+
+Load **only** when working on orderbook reconstruction, WebSocket stream parsing, strategy execution, or latency/backtest modeling:
+
+- **[references/polymarket-mechanics-and-latencies.md](references/polymarket-mechanics-and-latencies.md)**: Binary CTF complementarity (`P_up + P_down = 1.0`), order constraints & parabolic fees, `FAK` matching, per-side `server_ts` & non-fabricating BBO hints, `/ws/user` reconciliation, and the empirically measured latency map across all CEX, PolyBolt, and Polymarket CLOB links from `eu-west-1` (including the `~180 ms` server-side Taker Speed Bump inside `~220 ms` `POST /order` RTT).

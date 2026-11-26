@@ -15,12 +15,14 @@ Only the internal dependencies listed under **Allowed Internal Deps** are permit
 
 | Submodule | Type | Allowed Internal Deps (Strict Whitelist) | Scope & Isolation Notes |
 | :--- | :--- | :--- | :--- |
-| **`common`** | Library | *None* | Pure domain records, math/TWAP calculators (`CalculatedSpotTwapEngine`), `TradingStrategy`, `StrategyContext`, `ExecutionRouter`. No heavy frameworks. |
+| **`common`** | Library | *None* | Canonical L2 `PolymarketOrderBook`, `CoreTradingEngine`, `SimulatedClobExecutionEngine`, `OrderExecutionGateway`, spot indicators (`SpotTwapIndicator`, `FastSpotMicroIndicator`), domain records, and `TradingStrategy` implementations. No heavy frameworks. |
 | **`connector`** | Library | *None* | Resilient WS/REST clients (Binance, Kraken, Coinbase, Polymarket Gamma/PolyBolt/CLOB). **Never depends on `common`, `bot`, or `backtest`.** |
 | **`bot`** | App (`:8080`) | `common`, `connector` | Unified production application combining `StrategyTradingEngine` (`StrategyMode`: `LIVE`, `PAPER`, `OFF`), continuous `.jsonl.zst` `DataCollectorService`, `RuntimeStateStore`, and unified Web/REST dashboard. Zero `backtest` leakage. |
-| **`backtest`** | App (`:8083`) | `common` | Historical simulation engine (DuckDB, Parquet replay, simulated `ExecutionRouter`). Isolated from `connector` and `bot`. |
+| **`backtest`** | App (`:8083`) | `common` | Continuous chronological historical simulation over Parquet/DuckDB driving `CoreTradingEngine` + `SimulatedClobExecutionEngine`. Isolated from `connector` and `bot`. |
 
-- **Zero Discrepancy**: Strategy (`TradingStrategy`) and calculator bytecode in `common` executes identically across `backtest` and `bot` (`PAPER` and `LIVE`) via `StrategyContext` and `ExecutionRouter`.
+- **Maximum `LIVE` / `PAPER` / `BACKTEST` Overlap (Single Engine Invariant)**:
+  - Maximize shared bytecode in `common`: `CoreTradingEngine`, `PolymarketOrderBook`, spot indicators, order normalization/validation (`>= 5` whole shares, `>= $1.00` notional), collateral reservation, position accounting, and candle rollover MUST execute identically across `LIVE`, `PAPER`, and `BACKTEST`. Only thin I/O boundaries may differ (`LIVE` REST/`/ws/user` gateway vs. shared `SimulatedClobExecutionEngine` in `PAPER` and `BACKTEST`).
+  - **Accuracy Over Shortcuts**: NEVER introduce separate orderbook classes, bucketed/coalesced indicator caches, simplified fill models, fixed-size VWAP fields on `OrderBookQuote`, or per-candle `strategy.reset()` / parallel candle isolation in `backtest` or `PAPER`. Replay continuous chronological streams with pre-run warm-up and evaluate exact order-size L2 sweeps on demand via `StrategyContext`.
 - **Jandex Indexing**: Shared Quarkus libraries (`common`, `connector`) must include `jandex-maven-plugin` and `META-INF/beans.xml`.
 
 ---
