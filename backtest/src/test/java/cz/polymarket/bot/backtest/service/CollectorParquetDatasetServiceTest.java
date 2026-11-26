@@ -27,7 +27,7 @@ class CollectorParquetDatasetServiceTest {
     @Test
     @DisplayName("Should discover market files purely by filename timestamp without reading Parquet metadata")
     void shouldDiscoverMarketsByFilenameTimestampWithoutReadingParquet(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService service = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
             long beforeRange = 1785542400L - 900L; // 2026-07-31 23:45:00 UTC
@@ -72,7 +72,7 @@ class CollectorParquetDatasetServiceTest {
     @Test
     @DisplayName("Should lazily load typed CLOB header and evaluate outcome strictly from 60s TWAP open vs close")
     void shouldLazyLoadTypedHeaderAndEvaluateOutcomeStrictlyFromTwap(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService service = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
             long c1Start = 1785542400L;        // 2026-08-01 00:00:00 UTC (valid UP: 60000 -> 60120)
@@ -171,7 +171,7 @@ class CollectorParquetDatasetServiceTest {
     @Test
     @DisplayName("Should discover available symbol datasets and resolve min/max UTC date bounds")
     void shouldDiscoverAvailableDatasetsAndDateBounds(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService service = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
             Path btcDir = service.getPolymarket15mDir("BTCUSDT");

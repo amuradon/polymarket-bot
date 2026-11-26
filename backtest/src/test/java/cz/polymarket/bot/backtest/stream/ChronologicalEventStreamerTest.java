@@ -28,7 +28,7 @@ class ChronologicalEventStreamerTest {
     @Test
     @DisplayName("Should pop events strictly in ascending receipt timestamp (ts) and priority order")
     void shouldPopEventsInAscendingOrder() {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp");
              ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
             streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(3000L, 1L, "btcusd", "chainlink", 60200.0, 2995L));
             streamer.scheduleEvent(new BacktestEvent.PolymarketCryptoPriceEvent(1000L, 2L, "btcusd", "chainlink", 60000.0, 995L));
@@ -46,7 +46,7 @@ class ChronologicalEventStreamerTest {
     @Test
     @DisplayName("Should stream typed Polymarket CLOB frames + BBO hints, full-accuracy PolyBolt feeds, and raw CEX spot trades")
     void shouldStreamPolymarketFullAccuracyAndRawSpotStreams(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
             long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
@@ -183,7 +183,7 @@ class ChronologicalEventStreamerTest {
                 new BacktestEvent.PolymarketCryptoPriceEvent(baseMs + 250L, 2L, "btcusd", "chainlink", 60010.0, baseMs + 245L)
         };
 
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp");
              ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
             streamer.loadCandleEvents(metadata, daily, Long.MAX_VALUE);
 
@@ -261,7 +261,7 @@ class ChronologicalEventStreamerTest {
         };
 
         PolymarketOrderBook book = new PolymarketOrderBook();
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB");
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp");
              ChronologicalEventStreamer streamer = new ChronologicalEventStreamer(duckDb)) {
 
             streamer.loadCandleEvents(metadata1, daily, 76_000L);
@@ -311,7 +311,7 @@ class ChronologicalEventStreamerTest {
     @Test
     @DisplayName("Should reorder multi-exchange spot trades chronologically after adding per-exchange delays and slice continuously across candle boundaries")
     void shouldReorderSpotTradesByExchangeDelayAndSliceAcrossBoundaries(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
             long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC

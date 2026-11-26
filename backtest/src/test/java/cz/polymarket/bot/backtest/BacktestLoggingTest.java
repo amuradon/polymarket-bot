@@ -293,7 +293,7 @@ class BacktestLoggingTest {
     }
 
     private BacktestEngine createSyntheticBacktestEngine(Path tempDir) throws Exception {
-        activeDuckDb = new DuckDbSessionManager("256MB");
+        activeDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp");
         Path collectorDir = tempDir.resolve("collector_log_test");
         CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), activeDuckDb);
 

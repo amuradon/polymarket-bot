@@ -81,7 +81,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
             ObjectMapper objectMapper,
             PerformanceMetricsCalculator metricsCalculator,
             @ConfigProperty(name = "polymarket.backtest.history-db-path",
-                    defaultValue = "/data/polymarket/backtesting/backtest-history.duckdb")
+                    defaultValue = "${user.home}/.local/share/polymarket-bot/backtest-history.duckdb")
             String historyDbPath) {
         this(
                 Path.of(validateNonBlank(historyDbPath, "historyDbPath")),

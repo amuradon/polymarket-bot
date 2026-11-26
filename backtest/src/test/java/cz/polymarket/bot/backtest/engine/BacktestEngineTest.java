@@ -66,7 +66,7 @@ class BacktestEngineTest {
 
     @BeforeEach
     void setUp(@TempDir Path tempDir) throws Exception {
-        duckDbSessionManager = new DuckDbSessionManager("256MB");
+        duckDbSessionManager = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp");
         Path collectorDir = tempDir.resolve("collector");
         datasetService = new CollectorParquetDatasetService(collectorDir.toString(), duckDbSessionManager);
 
@@ -277,7 +277,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should execute UtterParameciumStrategy final-minute TWAP lock-in sniping via normalized name")
     void shouldExecuteUtterParameciumStrategyInFinalMinuteWindow(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             Path collectorDir = tempDir.resolve("collector_utter");
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
@@ -382,7 +382,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Zero-Discrepancy: Bounded 76s CLOB lookback window must produce 100% identical trades, PnL, and Brier score as full 15m CLOB replay")
     void shouldProduceZeroDiscrepancyBetweenBoundedClobWindowAndFullCandleReplay(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             Path collectorDir = tempDir.resolve("collector_equivalence");
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
@@ -520,7 +520,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should warm up SpotTwap & FastSpotMicro over 15m pre-run window and preserve cross-candle strategy state without reset()")
     void shouldWarmUpSpotIndicatorsAndPreserveCrossCandleStrategyState(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             Path collectorDir = tempDir.resolve("collector_warmup");
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
@@ -664,7 +664,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Should reject FAK order during simulated ~196ms Polymarket speed bump when maker cancels best ask before matching")
     void shouldRejectFakOrderWhenMakerCancelsLiquidityDuringSpeedBump(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             Path collectorDir = tempDir.resolve("collector_speedbump");
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
@@ -761,7 +761,7 @@ class BacktestEngineTest {
     @Test
     @DisplayName("Exact PAPER == BACKTEST Parity: OraclePulseLockStrategy produces 100% bit-for-bit identical trades, fees, and equity in PAPER and BACKTEST")
     void shouldProduceExactBitForBitParityBetweenPaperEngineAndBacktestEngine(@TempDir Path tempDir) throws Exception {
-        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB")) {
+        try (DuckDbSessionManager localDuckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             Path collectorDir = tempDir.resolve("collector_parity");
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 

@@ -47,9 +47,9 @@ Options:
       --force                   Overwrite existing destination .parquet files.
   -c, --compression <codec>     Parquet compression codec (ZSTD, SNAPPY, GZIP, UNCOMPRESSED). Default: ZSTD.
       --duckdb-path <path>      Path to DuckDB executable (Default: duckdb).
-  -m, --memory-limit <limit>    DuckDB max memory limit (Default: 5GB).
-      --threads <num>           DuckDB execution threads (Default: 4).
-      --temp-dir <path>         Custom temporary directory for DuckDB operations.
+  -m, --memory-limit <limit>    DuckDB max memory limit (Default: 16GB).
+      --threads <num>           DuckDB execution threads (Default: min(nproc, 8)).
+      --temp-dir <path>         Custom temporary directory for DuckDB operations (Default: /var/tmp/polymarket-parquet-convert-<pid>).
       --help                    Display this help message.
 
 Examples:
@@ -73,7 +73,7 @@ KEEP_ORIGINAL=false
 FORCE=false
 COMPRESSION="ZSTD"
 DUCKDB_PATH="duckdb"
-MEMORY_LIMIT="5GB"
+MEMORY_LIMIT="16GB"
 
 # Detect core count
 if command -v nproc >/dev/null 2>&1; then
@@ -83,7 +83,7 @@ elif command -v sysctl >/dev/null 2>&1; then
 else
     CPU_CORES=4
 fi
-THREADS=$(( CPU_CORES > 4 ? 4 : CPU_CORES ))
+THREADS=$(( CPU_CORES > 8 ? 8 : CPU_CORES ))
 TEMP_DIR=""
 
 while [[ $# -gt 0 ]]; do
@@ -544,7 +544,7 @@ TEMP_FILE_LIST=$(mktemp /tmp/parquet_convert_files_XXXXXX.txt)
 TEMP_SQL_FILE=$(mktemp /tmp/parquet_convert_sql_XXXXXX.sql)
 
 if [ -z "$TEMP_DIR" ]; then
-    DUCKDB_TEMP_DIR="${TARGET_DIR_RESOLVED}/.duckdb_tmp"
+    DUCKDB_TEMP_DIR="/var/tmp/polymarket-parquet-convert-$$"
     CLEANUP_TEMP_DIR=true
 else
     DUCKDB_TEMP_DIR="$TEMP_DIR"
