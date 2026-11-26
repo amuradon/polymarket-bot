@@ -11,6 +11,16 @@ public interface BacktestProgressListener {
     BacktestProgressListener NOOP = new BacktestProgressListener() {};
 
     /**
+     * Invoked once the target run ID (new or existing merged run), label, and skipped day count are resolved.
+     *
+     * @param runId resolved persistent run ID
+     * @param label resolved run label
+     * @param mergedIntoExisting {@code true} if appending/merging into an existing persisted run
+     * @param skippedDays count of UTC days skipped because they were already present in the existing run
+     */
+    default void onRunResolved(String runId, String label, boolean mergedIntoExisting, int skippedDays) {}
+
+    /**
      * Invoked once all target markets and UTC days have been discovered for the simulation run.
      *
      * @param totalDays number of distinct UTC days to process

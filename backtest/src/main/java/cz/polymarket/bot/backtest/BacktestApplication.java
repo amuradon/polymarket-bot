@@ -129,7 +129,9 @@ public class BacktestApplication implements QuarkusApplication {
                     null,
                     null,
                     null,
-                    null
+                    null,
+                    false,
+                    false
             );
             BacktestResult result = backtestEngine.runBacktest(null, request, BacktestProgressListener.NOOP);
             if (Log.isInfoEnabled()) {

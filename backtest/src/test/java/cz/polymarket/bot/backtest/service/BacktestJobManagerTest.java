@@ -64,7 +64,9 @@ class BacktestJobManagerTest {
                 100L,
                 50L,
                 50L,
-                null
+                null,
+                false,
+                false
         );
 
         when(backtestEngine.runBacktest(any(), eq(request), any())).thenAnswer(inv -> {
@@ -86,7 +88,9 @@ class BacktestJobManagerTest {
                             10000.0, 1.5, 100L, 50L, 50L, Map.of(), Map.of()),
                     PerformanceMetrics.empty(10000.0),
                     List.of(),
-                    List.of()
+                    List.of(),
+                    false,
+                    0
             );
         });
 
@@ -118,7 +122,7 @@ class BacktestJobManagerTest {
     void shouldHandleJobFailure() {
         BacktestRunRequest request = new BacktestRunRequest(
                 null, "UtterParameciumStrategy", "BTCUSDT", "2026-08-01", "2026-08-05",
-                false, 10000.0, 1.0, null, null, null, null
+                false, 10000.0, 1.0, null, null, null, null, false, false
         );
 
         when(backtestEngine.runBacktest(any(), any(), any()))
@@ -144,10 +148,10 @@ class BacktestJobManagerTest {
 
         BacktestRunRequest req1 = new BacktestRunRequest(
                 "First", "UtterParameciumStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null);
+                false, 10000.0, 1.0, null, null, null, null, false, false);
         BacktestRunRequest req2 = new BacktestRunRequest(
                 "Queued Second", "UtterParameciumStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null);
+                false, 10000.0, 1.0, null, null, null, null, false, false);
 
         when(backtestEngine.runBacktest(any(), eq(req1), any())).thenAnswer(inv -> {
             BacktestProgressListener listener = inv.getArgument(2);

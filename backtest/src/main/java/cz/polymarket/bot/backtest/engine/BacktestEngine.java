@@ -39,10 +39,14 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -270,14 +274,36 @@ public class BacktestEngine {
             }
         }
 
-        String resolvedLabel = (request.label() != null && !request.label().isBlank())
+        String explicitLabel = (request.label() != null && !request.label().isBlank())
                 ? request.label().trim()
-                : strategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")";
+                : null;
+        String configHash = BacktestRunConfig.computeConfigHash(
+                strategy.getName(),
+                sym,
+                capital,
+                resolvedLatencyFactor,
+                effectiveDelays.binanceDelayMs(),
+                effectiveDelays.krakenDelayMs(),
+                effectiveDelays.coinbaseDelayMs(),
+                configuredStrategy.effectiveParams()
+        );
+
+        boolean forceNew = Boolean.TRUE.equals(request.forceNewRun());
+        boolean overwriteExisting = Boolean.TRUE.equals(request.overwriteExistingDays());
+        Optional<BacktestHistoryRepository.RunSummaryDto> existingMatch = forceNew
+                ? Optional.empty()
+                : historyRepository.findLatestRunByConfigHash(configHash);
+
+        boolean merging = existingMatch.isPresent();
+        String targetRunId = merging ? existingMatch.get().runId() : resolvedRunId;
+        String resolvedLabel = explicitLabel != null
+                ? explicitLabel
+                : (merging ? existingMatch.get().label() : strategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")");
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting backtest: runId=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
-                    resolvedRunId, resolvedLabel, strategy.getName(), sym, resolvedStartDate, resolvedEndDate,
-                    capital, resolvedLatencyFactor, workerCount,
+            Log.infof("Starting backtest: runId=%s, merging=%s, overwriteExisting=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, workers=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
+                    targetRunId, merging, overwriteExisting, resolvedLabel, strategy.getName(), sym,
+                    resolvedStartDate, resolvedEndDate, capital, resolvedLatencyFactor, workerCount,
                     effectiveDelays.binanceDelayMs(), effectiveDelays.krakenDelayMs(), effectiveDelays.coinbaseDelayMs());
         }
 
@@ -295,7 +321,46 @@ public class BacktestEngine {
             marketsByDay.computeIfAbsent(dayKey, k -> new ArrayList<>()).add(market);
         }
 
-        listener.onDiscovered(marketsByDay.size(), markets.size());
+        int skippedDays = 0;
+        Set<String> overwrittenDates = new LinkedHashSet<>();
+        int remainingMarketCount = markets.size();
+
+        if (merging) {
+            Set<String> storedDates = historyRepository.getStoredDatesForRun(targetRunId);
+            if (!overwriteExisting) {
+                Iterator<Map.Entry<String, List<CollectorMarketMetadata>>> it = marketsByDay.entrySet().iterator();
+                while (it.hasNext()) {
+                    Map.Entry<String, List<CollectorMarketMetadata>> entry = it.next();
+                    if (storedDates.contains(entry.getKey())) {
+                        skippedDays++;
+                        remainingMarketCount -= entry.getValue().size();
+                        it.remove();
+                    }
+                }
+            } else {
+                for (String dayKey : marketsByDay.keySet()) {
+                    if (storedDates.contains(dayKey)) {
+                        overwrittenDates.add(dayKey);
+                    }
+                }
+            }
+        }
+
+        listener.onRunResolved(targetRunId, resolvedLabel, merging, skippedDays);
+
+        if (merging && marketsByDay.isEmpty()) {
+            if (Log.isInfoEnabled()) {
+                Log.infof("All %d requested UTC day(s) already exist in run %s; skipping simulation",
+                        skippedDays, targetRunId);
+            }
+            if (explicitLabel != null) {
+                historyRepository.updateLabel(targetRunId, explicitLabel);
+            }
+            return historyRepository.loadFullResult(targetRunId, true, skippedDays)
+                    .orElseThrow(() -> new IllegalStateException("Existing run disappeared during skip: " + targetRunId));
+        }
+
+        listener.onDiscovered(marketsByDay.size(), remainingMarketCount);
 
         TradingStrategy probeInstance = strategy.createInstance();
         boolean parallelCapable = (probeInstance != null && probeInstance != strategy);
@@ -310,7 +375,7 @@ public class BacktestEngine {
 
         for (Map.Entry<String, List<CollectorMarketMetadata>> dayEntry : marketsByDay.entrySet()) {
             if (listener.isCancelled()) {
-                throw new BacktestCancelledException("Backtest run " + resolvedRunId + " cancelled");
+                throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
             }
             String dateStr = dayEntry.getKey();
             List<CollectorMarketMetadata> dayMarkets = dayEntry.getValue();
@@ -370,7 +435,7 @@ public class BacktestEngine {
             }
 
             if (listener.isCancelled()) {
-                throw new BacktestCancelledException("Backtest run " + resolvedRunId + " cancelled");
+                throw new BacktestCancelledException("Backtest run " + targetRunId + " cancelled");
             }
 
             // 4. Deterministic chronological reduction of trades, per-market equity points, balance, and Brier score
@@ -451,9 +516,6 @@ public class BacktestEngine {
             listener.onDayCompleted(completedDays, completedMarkets, dateStr);
         }
 
-        double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
-        double durationDays = Math.max(1.0, ChronoUnit.DAYS.between(parsedStart, parsedEnd) + 1.0);
-        PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier, durationDays);
         long durationMs = Math.max(1L, (System.nanoTime() - startWallNs) / 1_000_000L);
 
         BacktestRunConfig runConfig = new BacktestRunConfig(
@@ -470,8 +532,25 @@ public class BacktestEngine {
                 configuredStrategy.appliedOverrides()
         );
 
+        if (merging) {
+            return historyRepository.mergeRunDays(
+                    targetRunId,
+                    explicitLabel,
+                    runConfig,
+                    marketPoints,
+                    trades,
+                    overwrittenDates,
+                    durationMs,
+                    skippedDays
+            );
+        }
+
+        double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
+        double durationDays = Math.max(1.0, ChronoUnit.DAYS.between(parsedStart, parsedEnd) + 1.0);
+        PerformanceMetrics metrics = metricsCalculator.calculate(trades, capital, avgBrier, durationDays);
+
         BacktestResult result = new BacktestResult(
-                resolvedRunId,
+                targetRunId,
                 resolvedLabel,
                 strategy.getName(),
                 sym,
@@ -481,13 +560,15 @@ public class BacktestEngine {
                 runConfig,
                 metrics,
                 Collections.unmodifiableList(marketPoints),
-                Collections.unmodifiableList(trades)
+                Collections.unmodifiableList(trades),
+                false,
+                0
         );
 
         historyRepository.saveRun(result);
         if (Log.isInfoEnabled()) {
             Log.infof("Completed backtest runId=%s for strategy=%s on %s: totalMarkets=%d, evaluatedMarkets=%d, totalTrades=%d, netPnl=%.2f, winRate=%.2f%%, durationMs=%d",
-                    resolvedRunId, strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
+                    targetRunId, strategy.getName(), sym, markets.size(), evaluatedCount, trades.size(),
                     metrics.totalNetPnl(), metrics.winRatePct(), durationMs);
         }
         return result;

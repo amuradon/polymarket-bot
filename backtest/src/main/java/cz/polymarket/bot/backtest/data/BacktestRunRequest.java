@@ -19,6 +19,8 @@ import java.util.Map;
  * @param krakenDelayMs optional simulated Kraken one-way feed delay in ms
  * @param coinbaseDelayMs optional simulated Coinbase one-way feed delay in ms
  * @param strategyParams optional strategy parameter overrides keyed by parameter name
+ * @param forceNewRun when true, creates a new separate run even if an identical configuration already exists
+ * @param overwriteExistingDays when true, re-simulates and overwrites UTC days already stored in a matching run
  */
 @Schema(name = "BacktestRunRequest", description = "Parameters for executing a backtest simulation run")
 public record BacktestRunRequest(
@@ -56,6 +58,12 @@ public record BacktestRunRequest(
         Long coinbaseDelayMs,
 
         @Schema(description = "Optional map of strategy parameter overrides")
-        Map<String, Object> strategyParams
+        Map<String, Object> strategyParams,
+
+        @Schema(description = "When true, creates a separate new run instead of merging into a matching existing run", examples = "false")
+        Boolean forceNewRun,
+
+        @Schema(description = "When true, overwrites UTC days already present in the matching run instead of skipping them", examples = "false")
+        Boolean overwriteExistingDays
 ) {
 }

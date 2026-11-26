@@ -88,7 +88,9 @@ class BacktestApplicationTest {
                         10000.0, 1.0, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(10000.0),
                 List.of(),
-                List.of()
+                List.of(),
+                false,
+                0
         );
 
         when(mockEngine.runBacktest(isNull(), any(BacktestRunRequest.class), any())).thenReturn(expectedResult);
@@ -134,7 +136,9 @@ class BacktestApplicationTest {
                         25000.0, 1.25, 100L, 50L, 50L, Map.of(), Map.of()),
                 PerformanceMetrics.empty(25000.0),
                 List.of(),
-                List.of()
+                List.of(),
+                false,
+                0
         );
 
         when(mockEngine.runBacktest(isNull(), any(BacktestRunRequest.class), any())).thenReturn(expectedResult);

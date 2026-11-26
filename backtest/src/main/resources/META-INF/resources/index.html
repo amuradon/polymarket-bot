@@ -271,6 +271,17 @@
                     <input type="checkbox" id="run-full-range">
                     <span>Spustit pro celé dostupné historické období</span>
                 </label>
+                <div class="mt-8" style="display:flex; flex-direction:column; gap:6px;">
+                    <label class="checkbox-inline">
+                        <input type="checkbox" id="run-force-new">
+                        <span>Vynutit nový samostatný běh (neslučovat se shodným nastavením)</span>
+                    </label>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" id="run-overwrite-days">
+                        <span>Přepsat již spočítané dny (výchozí: přeskočit)</span>
+                    </label>
+                    <span class="field-hint">Výchozí režim: při shodném nastavení strategie a enginu se automaticky doplní jen nové chybějící dny do stávajícího běhu.</span>
+                </div>
             </fieldset>
 
             <fieldset class="fieldset">

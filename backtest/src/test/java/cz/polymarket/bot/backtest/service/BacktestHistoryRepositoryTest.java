@@ -59,7 +59,7 @@ class BacktestHistoryRepositoryTest {
                 "run-1", "Oracle Default", "OraclePulseLockStrategy", "BTCUSDT",
                 Instant.parse("2026-08-04T10:00:00Z"), 150L, 4, cfg1,
                 CALC.calculate(List.of(r1t1, r1t2, r1t3), 10000.0, 0.185, 3.0),
-                r1Points, List.of(r1t1, r1t2, r1t3)
+                r1Points, List.of(r1t1, r1t2, r1t3), false, 0
         );
 
         TradeRecord r2t1 = new TradeRecord("2026-08-02T00:10:00Z", day2T1, TradeDirection.UP, 0.50, 1.00, 100.0, 200.0, 2.0, 98.0, "Resolution", 0.72, 0.50, 0.22, true, 10098.0);
@@ -79,7 +79,7 @@ class BacktestHistoryRepositoryTest {
                 "run-2", "Oracle Tau 5s", "OraclePulseLockStrategy", "BTCUSDT",
                 Instant.parse("2026-08-04T11:00:00Z"), 120L, 4, cfg2,
                 CALC.calculate(List.of(r2t1), 10000.0, 0.21, 3.0),
-                r2Points, List.of(r2t1)
+                r2Points, List.of(r2t1), false, 0
         );
 
         try (BacktestHistoryRepository repo = new BacktestHistoryRepository(dbFile, new ObjectMapper(), CALC)) {
@@ -144,6 +144,90 @@ class BacktestHistoryRepositoryTest {
             assertThat(reopened.getRun("run-1").orElseThrow().summary().label()).isEqualTo("Renamed Oracle");
             assertThat(reopened.deleteRun("run-2")).isTrue();
             assertThat(reopened.listRuns(null, null)).hasSize(1);
+        }
+    }
+
+    @Test
+    @DisplayName("Should match configHash across Integer/Long param types and merge appended/backfilled/overwritten days chronologically")
+    void shouldMatchConfigHashAndMergeDaysChronologically(@TempDir Path tempDir) {
+        String hashWithInt = BacktestRunConfig.computeConfigHash(
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 100L, 50L, 50L,
+                Map.of("minTauMs", 2000, "maxSpread", 0.026));
+        String hashWithLong = BacktestRunConfig.computeConfigHash(
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 100L, 50L, 50L,
+                Map.of("maxSpread", 0.026, "minTauMs", 2000L));
+        assertThat(hashWithInt).isEqualTo(hashWithLong);
+
+        Path dbFile = tempDir.resolve("merge-history.duckdb");
+        long day2T1 = 1785628800L; // 2026-08-02
+        long day3T1 = 1785715200L; // 2026-08-03
+        long day1T1 = 1785542400L; // 2026-08-01 (backfilled later)
+
+        TradeRecord day2Trade = new TradeRecord("2026-08-02T00:10:00Z", day2T1, TradeDirection.UP, 0.50, 1.00, 100.0, 200.0, 2.0, 100.0, "Resolution", 0.70, 0.50, 0.20, true, 10100.0);
+        BacktestRunConfig initialCfg = new BacktestRunConfig(
+                "OraclePulseLockStrategy", "BTCUSDT", "2026-08-02", "2026-08-02",
+                10000.0, 1.0, 100L, 50L, 50L,
+                Map.of("minTauMs", 2000, "maxSpread", 0.026), Map.of()
+        );
+        BacktestResult initialRes = new BacktestResult(
+                "run-merge", "OraclePulseLockStrategy (2026-08-02 .. 2026-08-02)", "OraclePulseLockStrategy", "BTCUSDT",
+                Instant.parse("2026-08-02T23:00:00Z"), 50L, 1, initialCfg,
+                CALC.calculate(List.of(day2Trade), 10000.0, 0.09, 1.0),
+                List.of(new MarketEquityPoint(day2T1, "2026-08-02", 1, 1, 100.0, 2.0, 0.09, true, 10100.0)),
+                List.of(day2Trade), false, 0
+        );
+
+        try (BacktestHistoryRepository repo = new BacktestHistoryRepository(dbFile, new ObjectMapper(), CALC)) {
+            repo.saveRun(initialRes);
+            assertThat(repo.findLatestRunByConfigHash(hashWithLong)).isPresent()
+                    .get().extracting(RunSummaryDto::runId).isEqualTo("run-merge");
+            assertThat(repo.getStoredDatesForRun("run-merge")).containsExactly("2026-08-02");
+
+            // Append day 3 AND backfill day 1
+            TradeRecord day1Trade = new TradeRecord("2026-08-01T00:10:00Z", day1T1, TradeDirection.UP, 0.50, 1.00, 100.0, 200.0, 2.0, 50.0, "Resolution", 0.70, 0.50, 0.20, true, 10050.0);
+            TradeRecord day3Trade = new TradeRecord("2026-08-03T00:10:00Z", day3T1, TradeDirection.DOWN, 0.50, 0.00, 40.0, 80.0, 1.0, -40.0, "Resolution", 0.60, 0.50, 0.10, false, 9960.0);
+            BacktestResult merged = repo.mergeRunDays(
+                    "run-merge",
+                    null,
+                    initialCfg,
+                    List.of(
+                            new MarketEquityPoint(day3T1, "2026-08-03", 1, 0, -40.0, 1.0, 0.36, true, 9960.0),
+                            new MarketEquityPoint(day1T1, "2026-08-01", 1, 1, 50.0, 2.0, 0.04, true, 10050.0)
+                    ),
+                    List.of(day3Trade, day1Trade),
+                    java.util.Set.of(),
+                    80L,
+                    1
+            );
+
+            assertThat(merged.mergedIntoExisting()).isTrue();
+            assertThat(merged.skippedDays()).isEqualTo(1);
+            assertThat(merged.label()).isEqualTo("OraclePulseLockStrategy (2026-08-01 .. 2026-08-03)");
+            assertThat(merged.config().startDate()).isEqualTo("2026-08-01");
+            assertThat(merged.config().endDate()).isEqualTo("2026-08-03");
+            // Chronological balance replay: 10000 + 50 (day1) + 100 (day2) - 40 (day3) = 10110
+            assertThat(merged.trades()).hasSize(3);
+            assertThat(merged.trades().get(0).balanceAfterTrade()).isCloseTo(10050.0, within(1e-6));
+            assertThat(merged.trades().get(1).balanceAfterTrade()).isCloseTo(10150.0, within(1e-6));
+            assertThat(merged.trades().get(2).balanceAfterTrade()).isCloseTo(10110.0, within(1e-6));
+            assertThat(merged.metrics().finalBalance()).isCloseTo(10110.0, within(1e-6));
+            assertThat(repo.getStoredDatesForRun("run-merge")).containsExactlyInAnyOrder("2026-08-01", "2026-08-02", "2026-08-03");
+
+            // Overwrite day 2 with -20 netPnL
+            TradeRecord newDay2Trade = new TradeRecord("2026-08-02T00:10:00Z", day2T1, TradeDirection.DOWN, 0.50, 0.00, 20.0, 40.0, 1.0, -20.0, "Resolution", 0.55, 0.50, 0.05, false, 9980.0);
+            BacktestResult overwritten = repo.mergeRunDays(
+                    "run-merge",
+                    null,
+                    initialCfg,
+                    List.of(new MarketEquityPoint(day2T1, "2026-08-02", 1, 0, -20.0, 1.0, 0.25, true, 9980.0)),
+                    List.of(newDay2Trade),
+                    java.util.Set.of("2026-08-02"),
+                    30L,
+                    0
+            );
+            assertThat(overwritten.trades()).hasSize(3);
+            // 10000 + 50 (day1) - 20 (day2 overwritten) - 40 (day3) = 9990
+            assertThat(overwritten.metrics().finalBalance()).isCloseTo(9990.0, within(1e-6));
         }
     }
 }

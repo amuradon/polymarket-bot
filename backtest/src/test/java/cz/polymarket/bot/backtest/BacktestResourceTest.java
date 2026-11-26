@@ -200,6 +200,66 @@ class BacktestResourceTest {
             assertThat(status).isEqualTo("COMPLETED");
         });
 
+        // Re-running identical config without forceNewRun merges into existing runId & skips stored days
+        var mergedSubmit = given()
+                .contentType(ContentType.JSON)
+                .body(Map.of(
+                        "strategyName", "UtterParameciumStrategy",
+                        "symbol", "BTCUSDT",
+                        "startDate", "2026-08-01",
+                        "endDate", "2026-08-01",
+                        "initialCapital", 5000.0,
+                        "latencyFactor", 1.0,
+                        "strategyParams", Map.of("minEdgeMc", 25)
+                ))
+                .when().post("/api/backtest/run")
+                .then()
+                .statusCode(202)
+                .extract();
+        String mergedJobId = mergedSubmit.path("jobId");
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            var poll = given()
+                    .when().get("/api/backtest/run/" + mergedJobId)
+                    .then()
+                    .statusCode(200)
+                    .extract();
+            assertThat(poll.<String>path("status")).isEqualTo("COMPLETED");
+            assertThat(poll.<String>path("runId")).isEqualTo(runId);
+            assertThat(poll.<Boolean>path("mergedIntoExisting")).isTrue();
+            assertThat(poll.<Integer>path("skippedDays")).isGreaterThanOrEqualTo(1);
+        });
+
+        // Explicit forceNewRun=true creates a distinct runId
+        var forcedSubmit = given()
+                .contentType(ContentType.JSON)
+                .body(Map.of(
+                        "strategyName", "UtterParameciumStrategy",
+                        "symbol", "BTCUSDT",
+                        "startDate", "2026-08-01",
+                        "endDate", "2026-08-01",
+                        "initialCapital", 5000.0,
+                        "latencyFactor", 1.0,
+                        "strategyParams", Map.of("minEdgeMc", 25),
+                        "forceNewRun", true
+                ))
+                .when().post("/api/backtest/run")
+                .then()
+                .statusCode(202)
+                .extract();
+        String forcedJobId = forcedSubmit.path("jobId");
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            var poll = given()
+                    .when().get("/api/backtest/run/" + forcedJobId)
+                    .then()
+                    .statusCode(200)
+                    .extract();
+            assertThat(poll.<String>path("status")).isEqualTo("COMPLETED");
+            assertThat(poll.<Boolean>path("mergedIntoExisting")).isFalse();
+            assertThat(poll.<String>path("runId")).isNotEqualTo(runId);
+        });
+        String forcedRunId = given().when().get("/api/backtest/run/" + forcedJobId).then().extract().path("runId");
+
         given()
                 .when().get("/api/backtest/jobs")
                 .then()
@@ -238,6 +298,11 @@ class BacktestResourceTest {
                 .then()
                 .statusCode(200)
                 .body("runId", equalTo(runId));
+
+        given()
+                .when().delete("/api/backtest/runs/" + forcedRunId)
+                .then()
+                .statusCode(204);
 
         given()
                 .when().delete("/api/backtest/runs/" + runId)

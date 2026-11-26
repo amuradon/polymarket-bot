@@ -8,7 +8,8 @@ import {
     fetchRuns,
     fetchRunTrades,
     fetchStatus,
-    renameRun
+    renameRun,
+    submitBacktest
 } from "./api.js";
 import { BacktestChartsController, SERIES_PALETTE } from "./charts.js";
 import { RunnerModalController } from "./runner-modal.js";
@@ -354,12 +355,16 @@ function renderJobs() {
         meta.className = "job-meta";
         const pct = (job.progressPct || 0).toFixed(0);
         if (job.status === "IN_PROGRESS") {
-            meta.textContent = `${job.completedDays}/${job.totalDays || "?"} dnů · ${job.completedMarkets}/${job.totalMarkets || "?"} trhů (${pct}%)${job.currentDate ? " · " + job.currentDate : ""}`;
+            const prefix = job.mergedIntoExisting ? `Doplňování (přeskočeno ${job.skippedDays || 0} dnů) · ` : "";
+            meta.textContent = `${prefix}${job.completedDays}/${job.totalDays || "?"} dnů · ${job.completedMarkets}/${job.totalMarkets || "?"} trhů (${pct}%)${job.currentDate ? " · " + job.currentDate : ""}`;
         } else if (job.status === "QUEUED") {
             meta.textContent = `${job.strategyName} · ${job.symbol} · Čeká ve frontě…`;
         } else if (job.status === "COMPLETED") {
             const pnl = job.metrics ? formatSignedUsd(job.metrics.totalNetPnl) : "";
-            meta.textContent = `${job.totalMarkets ?? 0} trhů · ${job.tradeCount ?? 0} obchodů ${pnl}`;
+            const mergeNote = job.mergedIntoExisting
+                ? `Doplněno (přeskočeno ${job.skippedDays || 0} dnů) · `
+                : "";
+            meta.textContent = `${mergeNote}${job.totalMarkets ?? 0} trhů · ${job.tradeCount ?? 0} obchodů ${pnl}`;
         } else if (job.status === "FAILED") {
             meta.textContent = job.error || "Běh selhal";
         } else {
@@ -505,6 +510,36 @@ function renderRunsList() {
         const actions = document.createElement("div");
         actions.className = "run-actions";
 
+        const appendBtn = document.createElement("button");
+        appendBtn.type = "button";
+        appendBtn.className = "btn-icon";
+        appendBtn.title = "Doplnit nová data (celé dostupné období, přeskočit uložené dny)";
+        appendBtn.textContent = "↻";
+        appendBtn.addEventListener("click", async () => {
+            const detail = await fetchRunDetail(run.runId);
+            const cfg = detail.config;
+            await submitBacktest({
+                label: null,
+                strategyName: cfg.strategyName,
+                symbol: cfg.symbol,
+                startDate: null,
+                endDate: null,
+                fullRange: true,
+                initialCapital: cfg.initialCapital,
+                latencyFactor: cfg.latencyFactor,
+                binanceDelayMs: cfg.binanceDelayMs,
+                krakenDelayMs: cfg.krakenDelayMs,
+                coinbaseDelayMs: cfg.coinbaseDelayMs,
+                strategyParams: cfg.strategyOverrides && Object.keys(cfg.strategyOverrides).length > 0
+                    ? cfg.strategyOverrides
+                    : null,
+                forceNewRun: false,
+                overwriteExistingDays: false
+            });
+            await refreshJobs();
+            startPollingIfNeeded();
+        });
+
         const cloneBtn = document.createElement("button");
         cloneBtn.type = "button";
         cloneBtn.className = "btn-icon";
@@ -537,7 +572,7 @@ function renderRunsList() {
             deleteDialog.showModal();
         });
 
-        actions.append(cloneBtn, renameBtn, delBtn);
+        actions.append(appendBtn, cloneBtn, renameBtn, delBtn);
         top.append(labelEl, actions);
 
         const meta = document.createElement("div");

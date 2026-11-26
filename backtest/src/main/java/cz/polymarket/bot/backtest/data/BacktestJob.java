@@ -15,12 +15,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class BacktestJob {
 
     private final String jobId;
-    private final String runId;
+    private volatile String runId;
     private final BacktestRunRequest request;
     private final Instant createdAt;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
     private volatile String label;
+    private volatile boolean mergedIntoExisting;
+    private volatile int skippedDays;
     private volatile BacktestJobStatus status;
     private volatile Instant completedAt;
     private volatile BacktestResult result;
@@ -65,6 +67,51 @@ public class BacktestJob {
      */
     public String runId() {
         return runId;
+    }
+
+    /**
+     * Updates the resolved persistent run identifier (e.g., when merging into an existing run).
+     *
+     * @param runId resolved run identifier
+     */
+    public void setRunId(String runId) {
+        this.runId = runId;
+    }
+
+    /**
+     * Returns whether this job merged into an existing run with matching configuration.
+     *
+     * @return {@code true} when merged into an existing run
+     */
+    public boolean mergedIntoExisting() {
+        return mergedIntoExisting;
+    }
+
+    /**
+     * Sets whether this job merged into an existing run.
+     *
+     * @param mergedIntoExisting merge flag
+     */
+    public void setMergedIntoExisting(boolean mergedIntoExisting) {
+        this.mergedIntoExisting = mergedIntoExisting;
+    }
+
+    /**
+     * Returns count of UTC days skipped because they were already present in the target run.
+     *
+     * @return skipped day count
+     */
+    public int skippedDays() {
+        return skippedDays;
+    }
+
+    /**
+     * Sets count of skipped UTC days.
+     *
+     * @param skippedDays skipped day count
+     */
+    public void setSkippedDays(int skippedDays) {
+        this.skippedDays = skippedDays;
     }
 
     /**

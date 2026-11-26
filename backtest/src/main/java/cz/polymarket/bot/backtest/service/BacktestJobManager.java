@@ -174,6 +174,18 @@ public class BacktestJobManager {
 
         BacktestProgressListener progressListener = new BacktestProgressListener() {
             @Override
+            public void onRunResolved(String runId, String label, boolean mergedIntoExisting, int skippedDays) {
+                if (runId != null && !runId.isBlank()) {
+                    job.setRunId(runId);
+                }
+                if (label != null && !label.isBlank()) {
+                    job.setLabel(label);
+                }
+                job.setMergedIntoExisting(mergedIntoExisting);
+                job.setSkippedDays(skippedDays);
+            }
+
+            @Override
             public void onDiscovered(int totalDays, int totalMarkets) {
                 job.setTotalDays(totalDays);
                 job.setTotalMarkets(totalMarkets);
@@ -200,7 +212,10 @@ public class BacktestJobManager {
         try {
             BacktestResult result = backtestEngine.runBacktest(job.runId(), request, progressListener);
             job.setResult(result);
+            job.setRunId(result.runId());
             job.setLabel(result.label());
+            job.setMergedIntoExisting(result.mergedIntoExisting());
+            job.setSkippedDays(result.skippedDays());
             job.setDurationMs(result.durationMs());
             job.setCompletedAt(Instant.now());
             job.setStatus(BacktestJobStatus.COMPLETED);

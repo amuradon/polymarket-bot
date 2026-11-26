@@ -141,6 +141,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
 
         String paramsJson = serializeMap(cfg != null ? cfg.strategyParams() : Map.of());
         String overridesJson = serializeMap(cfg != null ? cfg.strategyOverrides() : Map.of());
+        String configHash = cfg != null ? cfg.configHash() : "";
 
         dbLock.lock();
         try {
@@ -157,8 +158,8 @@ public class BacktestHistoryRepository implements AutoCloseable {
                             win_rate_pct, total_net_pnl, total_fees, gross_pnl, gross_profit, gross_loss,
                             profit_factor, max_drawdown_usd, max_drawdown_pct, expected_value_per_trade,
                             sharpe_ratio, sortino_ratio, brier_score, final_balance,
-                            execution_time_utc, duration_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            execution_time_utc, duration_ms, config_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """;
                 try (PreparedStatement ps = conn.prepareStatement(insertRunSql)) {
                     ps.setString(1, result.runId());
@@ -194,77 +195,12 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     ps.setDouble(31, m.finalBalance());
                     ps.setString(32, result.executionTimeUtc().toString());
                     ps.setLong(33, result.durationMs());
+                    ps.setString(34, configHash);
                     ps.executeUpdate();
                 }
 
-                if (!marketPoints.isEmpty()) {
-                    String insertPointSql = """
-                            INSERT INTO backtest_market_points (
-                                run_id, market_idx, t_start, date_utc, trades_count, winning_trades,
-                                net_pnl, fees_usd, brier_diff_sq, evaluated, balance_after
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """;
-                    try (PreparedStatement ps = conn.prepareStatement(insertPointSql)) {
-                        for (int i = 0; i < marketPoints.size(); i++) {
-                            MarketEquityPoint mp = marketPoints.get(i);
-                            ps.setString(1, result.runId());
-                            ps.setInt(2, i);
-                            ps.setLong(3, mp.tStart());
-                            ps.setString(4, mp.dateUtc());
-                            ps.setInt(5, mp.tradesCount());
-                            ps.setInt(6, mp.winningTrades());
-                            ps.setDouble(7, mp.netPnl());
-                            ps.setDouble(8, mp.feesUsd());
-                            ps.setDouble(9, mp.brierDiffSq());
-                            ps.setBoolean(10, mp.evaluated());
-                            ps.setDouble(11, mp.balanceAfter());
-                            ps.addBatch();
-                            if ((i + 1) % 2000 == 0) {
-                                ps.executeBatch();
-                            }
-                        }
-                        ps.executeBatch();
-                    }
-                }
-
-                if (!trades.isEmpty()) {
-                    String insertTradeSql = """
-                            INSERT INTO backtest_trades (
-                                run_id, trade_idx, entry_time_utc, interval_start_sec, date_utc,
-                                side, entry_price, exit_price, size_usd, shares, fee_usd, net_pnl,
-                                exit_reason, model_probability, market_price, edge, is_win, balance_after_trade
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """;
-                    try (PreparedStatement ps = conn.prepareStatement(insertTradeSql)) {
-                        for (int i = 0; i < trades.size(); i++) {
-                            TradeRecord tr = trades.get(i);
-                            String dateUtc = DATE_FMT.format(Instant.ofEpochSecond(tr.intervalStartSec()));
-                            ps.setString(1, result.runId());
-                            ps.setInt(2, i);
-                            ps.setString(3, tr.entryTimeUtc());
-                            ps.setLong(4, tr.intervalStartSec());
-                            ps.setString(5, dateUtc);
-                            ps.setString(6, tr.side() != null ? tr.side().name() : TradeDirection.UP.name());
-                            ps.setDouble(7, tr.entryPrice());
-                            ps.setDouble(8, tr.exitPrice());
-                            ps.setDouble(9, tr.sizeUsd());
-                            ps.setDouble(10, tr.shares());
-                            ps.setDouble(11, tr.feeUsd());
-                            ps.setDouble(12, tr.netPnl());
-                            ps.setString(13, tr.exitReason() != null ? tr.exitReason() : "");
-                            ps.setDouble(14, tr.modelProbability());
-                            ps.setDouble(15, tr.marketPrice());
-                            ps.setDouble(16, tr.edge());
-                            ps.setBoolean(17, tr.isWin());
-                            ps.setDouble(18, tr.balanceAfterTrade());
-                            ps.addBatch();
-                            if ((i + 1) % 2000 == 0) {
-                                ps.executeBatch();
-                            }
-                        }
-                        ps.executeBatch();
-                    }
-                }
+                insertMarketPoints(conn, result.runId(), marketPoints);
+                insertTrades(conn, result.runId(), trades);
 
                 conn.commit();
                 if (Log.isInfoEnabled()) {
@@ -379,6 +315,427 @@ public class BacktestHistoryRepository implements AutoCloseable {
         } catch (SQLException e) {
             Log.errorf(e, "Failed loading backtest run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed loading backtest run: " + e.getMessage(), e);
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    /**
+     * Finds the newest persisted run matching the given deterministic configuration hash.
+     *
+     * @param configHash 64-character SHA-256 configuration hash
+     * @return optional matching {@link RunSummaryDto}
+     */
+    public Optional<RunSummaryDto> findLatestRunByConfigHash(String configHash) {
+        if (configHash == null || configHash.isBlank()) {
+            return Optional.empty();
+        }
+        String sql = """
+                SELECT run_id, label, strategy_name, symbol, start_date, end_date,
+                       initial_capital, latency_factor, binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
+                       strategy_overrides_json, total_markets, total_trades, winning_trades, losing_trades,
+                       win_rate_pct, total_net_pnl, total_fees, gross_pnl, gross_profit, gross_loss,
+                       profit_factor, max_drawdown_usd, max_drawdown_pct, expected_value_per_trade,
+                       sharpe_ratio, sortino_ratio, brier_score, final_balance, execution_time_utc, duration_ms
+                FROM backtest_runs
+                WHERE config_hash = ?
+                ORDER BY execution_time_utc DESC
+                LIMIT 1
+                """;
+        dbLock.lock();
+        try {
+            Connection conn = ensureConnected();
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, configHash.trim());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return Optional.empty();
+                    }
+                    return Optional.of(mapSummaryRow(rs));
+                }
+            }
+        } catch (SQLException e) {
+            Log.errorf(e, "Failed querying run by configHash %s: %s", configHash, e.getMessage());
+            throw new IllegalStateException("Failed querying run by configHash: " + e.getMessage(), e);
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    /**
+     * Returns the set of distinct UTC dates ({@code yyyy-MM-dd}) already stored in {@code backtest_market_points}
+     * for the specified run.
+     *
+     * @param runId target run identifier
+     * @return set of stored UTC date strings
+     */
+    public Set<String> getStoredDatesForRun(String runId) {
+        if (runId == null || runId.isBlank()) {
+            return Set.of();
+        }
+        dbLock.lock();
+        try {
+            Connection conn = ensureConnected();
+            Set<String> dates = new LinkedHashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT DISTINCT date_utc FROM backtest_market_points WHERE run_id = ?")) {
+                ps.setString(1, runId.trim());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String d = rs.getString(1);
+                        if (d != null && !d.isBlank()) {
+                            dates.add(d);
+                        }
+                    }
+                }
+            }
+            return Collections.unmodifiableSet(dates);
+        } catch (SQLException e) {
+            Log.errorf(e, "Failed loading stored dates for run %s: %s", runId, e.getMessage());
+            throw new IllegalStateException("Failed loading stored dates: " + e.getMessage(), e);
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    /**
+     * Loads a complete {@link BacktestResult} (summary, config, market points, and trades) from DuckDB
+     * for an existing run without re-running simulation.
+     *
+     * @param runId target run identifier
+     * @param mergedIntoExisting whether this result reflects an incremental merge operation
+     * @param skippedDays count of UTC days skipped as already present
+     * @return optional {@link BacktestResult}
+     */
+    public Optional<BacktestResult> loadFullResult(String runId, boolean mergedIntoExisting, int skippedDays) {
+        if (runId == null || runId.isBlank()) {
+            return Optional.empty();
+        }
+        String trimmed = runId.trim();
+        dbLock.lock();
+        try {
+            Connection conn = ensureConnected();
+            Optional<RunDetailDto> detailOpt = loadRunDetailInternal(conn, trimmed);
+            if (detailOpt.isEmpty()) {
+                return Optional.empty();
+            }
+            RunDetailDto detail = detailOpt.get();
+            List<MarketEquityPoint> points = loadMarketPointsInternal(conn, trimmed, Set.of());
+            List<TradeRecord> trades = loadTradesInternal(conn, trimmed, Set.of());
+            RunSummaryDto s = detail.summary();
+            return Optional.of(new BacktestResult(
+                    s.runId(),
+                    s.label(),
+                    s.strategyName(),
+                    s.symbol(),
+                    Instant.parse(s.executionTimeUtc()),
+                    s.durationMs(),
+                    s.totalMarkets(),
+                    detail.config(),
+                    s.metrics(),
+                    Collections.unmodifiableList(points),
+                    Collections.unmodifiableList(trades),
+                    mergedIntoExisting,
+                    skippedDays
+            ));
+        } catch (SQLException e) {
+            Log.errorf(e, "Failed loading full result for run %s: %s", runId, e.getMessage());
+            throw new IllegalStateException("Failed loading full result: " + e.getMessage(), e);
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    /**
+     * Merges newly simulated market points and trades into an existing persisted run atomically,
+     * optionally overwriting specified UTC days, chronologically replaying account balances,
+     * and recomputing full-period {@link PerformanceMetrics}.
+     *
+     * @param existingRunId target run identifier in DuckDB
+     * @param explicitLabel optional explicit user label (when null/blank, preserves custom label or refreshes auto-generated date span)
+     * @param latestConfig resolved configuration snapshot of the incremental execution
+     * @param newMarketPoints newly simulated per-market equity points
+     * @param newTrades newly simulated trade records
+     * @param overwrittenDates UTC dates to replace rather than preserve from existing storage
+     * @param durationMs incremental simulation wall-clock duration in milliseconds
+     * @param skippedDays count of UTC days skipped because they were already stored
+     * @return updated full {@link BacktestResult} reflecting the merged timeline
+     */
+    public BacktestResult mergeRunDays(
+            String existingRunId,
+            String explicitLabel,
+            BacktestRunConfig latestConfig,
+            List<MarketEquityPoint> newMarketPoints,
+            List<TradeRecord> newTrades,
+            Set<String> overwrittenDates,
+            long durationMs,
+            int skippedDays) {
+        if (existingRunId == null || existingRunId.isBlank()) {
+            throw new IllegalArgumentException("existingRunId cannot be null or blank");
+        }
+        if (latestConfig == null) {
+            throw new IllegalArgumentException("latestConfig cannot be null");
+        }
+        String runId = existingRunId.trim();
+        Set<String> excludedDates = overwrittenDates != null ? overwrittenDates : Set.of();
+
+        dbLock.lock();
+        try {
+            Connection conn = ensureConnected();
+            RunDetailDto existingDetail = loadRunDetailInternal(conn, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("Run not found for merge: " + runId));
+
+            List<MarketEquityPoint> existingPoints = loadMarketPointsInternal(conn, runId, excludedDates);
+            List<TradeRecord> existingTrades = loadTradesInternal(conn, runId, excludedDates);
+
+            // Merge market points chronologically by tStart (new overwrites existing on same tStart)
+            Map<Long, MarketEquityPoint> mergedPointsByTStart = new LinkedHashMap<>();
+            for (MarketEquityPoint mp : existingPoints) {
+                mergedPointsByTStart.put(mp.tStart(), mp);
+            }
+            Set<Long> newMarketTStarts = new LinkedHashSet<>();
+            if (newMarketPoints != null) {
+                for (MarketEquityPoint mp : newMarketPoints) {
+                    mergedPointsByTStart.put(mp.tStart(), mp);
+                    newMarketTStarts.add(mp.tStart());
+                }
+            }
+            List<MarketEquityPoint> sortedRawPoints = new ArrayList<>(mergedPointsByTStart.values());
+            sortedRawPoints.sort(java.util.Comparator.comparingLong(MarketEquityPoint::tStart));
+
+            // Group existing & new trades by intervalStartSec (new trades replace same-market trades)
+            Map<Long, List<TradeRecord>> tradesByMarket = new LinkedHashMap<>();
+            for (TradeRecord tr : existingTrades) {
+                if (!newMarketTStarts.contains(tr.intervalStartSec())) {
+                    tradesByMarket.computeIfAbsent(tr.intervalStartSec(), k -> new ArrayList<>()).add(tr);
+                }
+            }
+            if (newTrades != null) {
+                for (TradeRecord tr : newTrades) {
+                    tradesByMarket.computeIfAbsent(tr.intervalStartSec(), k -> new ArrayList<>()).add(tr);
+                }
+            }
+
+            // Deterministic chronological balance & Brier score replay across merged timeline
+            double initialCapital = latestConfig.initialCapital();
+            double runningBalance = initialCapital;
+            double brierSum = 0.0;
+            int evaluatedCount = 0;
+
+            List<MarketEquityPoint> finalizedPoints = new ArrayList<>(sortedRawPoints.size());
+            List<TradeRecord> finalizedTrades = new ArrayList<>();
+            String mergedStartDate = null;
+            String mergedEndDate = null;
+
+            for (MarketEquityPoint mp : sortedRawPoints) {
+                if (mergedStartDate == null || mp.dateUtc().compareTo(mergedStartDate) < 0) {
+                    mergedStartDate = mp.dateUtc();
+                }
+                if (mergedEndDate == null || mp.dateUtc().compareTo(mergedEndDate) > 0) {
+                    mergedEndDate = mp.dateUtc();
+                }
+
+                List<TradeRecord> mTrades = tradesByMarket.remove(mp.tStart());
+                if (mTrades != null) {
+                    for (TradeRecord tr : mTrades) {
+                        runningBalance += tr.netPnl();
+                        finalizedTrades.add(new TradeRecord(
+                                tr.entryTimeUtc(),
+                                tr.intervalStartSec(),
+                                tr.side(),
+                                tr.entryPrice(),
+                                tr.exitPrice(),
+                                tr.sizeUsd(),
+                                tr.shares(),
+                                tr.feeUsd(),
+                                tr.netPnl(),
+                                tr.exitReason(),
+                                tr.modelProbability(),
+                                tr.marketPrice(),
+                                tr.edge(),
+                                tr.isWin(),
+                                runningBalance
+                        ));
+                    }
+                }
+
+                if (mp.evaluated()) {
+                    brierSum += mp.brierDiffSq();
+                    evaluatedCount++;
+                }
+                finalizedPoints.add(new MarketEquityPoint(
+                        mp.tStart(),
+                        mp.dateUtc(),
+                        mp.tradesCount(),
+                        mp.winningTrades(),
+                        mp.netPnl(),
+                        mp.feesUsd(),
+                        mp.brierDiffSq(),
+                        mp.evaluated(),
+                        runningBalance
+                ));
+            }
+
+            // Preserve any orphan trades not matched to a market point in chronological order
+            if (!tradesByMarket.isEmpty()) {
+                List<Long> remainingStarts = new ArrayList<>(tradesByMarket.keySet());
+                Collections.sort(remainingStarts);
+                for (Long tStart : remainingStarts) {
+                    for (TradeRecord tr : tradesByMarket.get(tStart)) {
+                        runningBalance += tr.netPnl();
+                        finalizedTrades.add(new TradeRecord(
+                                tr.entryTimeUtc(),
+                                tr.intervalStartSec(),
+                                tr.side(),
+                                tr.entryPrice(),
+                                tr.exitPrice(),
+                                tr.sizeUsd(),
+                                tr.shares(),
+                                tr.feeUsd(),
+                                tr.netPnl(),
+                                tr.exitReason(),
+                                tr.modelProbability(),
+                                tr.marketPrice(),
+                                tr.edge(),
+                                tr.isWin(),
+                                runningBalance
+                        ));
+                    }
+                }
+            }
+
+            if (mergedStartDate == null) {
+                mergedStartDate = latestConfig.startDate();
+            }
+            if (mergedEndDate == null) {
+                mergedEndDate = latestConfig.endDate();
+            }
+
+            double durationDays = Math.max(
+                    1.0,
+                    ChronoUnit.DAYS.between(LocalDate.parse(mergedStartDate), LocalDate.parse(mergedEndDate)) + 1.0
+            );
+            double avgBrier = evaluatedCount > 0 ? (brierSum / evaluatedCount) : 0.25;
+            PerformanceMetrics mergedMetrics = metricsCalculator.calculate(
+                    finalizedTrades, initialCapital, avgBrier, durationDays);
+
+            String existingLabel = existingDetail.summary().label();
+            String autoPrefix = latestConfig.strategyName() + " (";
+            String resolvedLabel;
+            if (explicitLabel != null && !explicitLabel.isBlank()) {
+                resolvedLabel = explicitLabel.trim();
+            } else if (existingLabel != null && existingLabel.startsWith(autoPrefix) && existingLabel.endsWith(")")) {
+                resolvedLabel = latestConfig.strategyName() + " (" + mergedStartDate + " .. " + mergedEndDate + ")";
+            } else {
+                resolvedLabel = (existingLabel != null && !existingLabel.isBlank())
+                        ? existingLabel
+                        : latestConfig.strategyName() + " (" + mergedStartDate + " .. " + mergedEndDate + ")";
+            }
+
+            Instant completedAt = Instant.now();
+            BacktestRunConfig mergedConfig = new BacktestRunConfig(
+                    latestConfig.strategyName(),
+                    latestConfig.symbol(),
+                    mergedStartDate,
+                    mergedEndDate,
+                    latestConfig.initialCapital(),
+                    latestConfig.latencyFactor(),
+                    latestConfig.binanceDelayMs(),
+                    latestConfig.krakenDelayMs(),
+                    latestConfig.coinbaseDelayMs(),
+                    latestConfig.strategyParams(),
+                    latestConfig.strategyOverrides()
+            );
+
+            boolean prevAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM backtest_trades WHERE run_id = ?")) {
+                    ps.setString(1, runId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM backtest_market_points WHERE run_id = ?")) {
+                    ps.setString(1, runId);
+                    ps.executeUpdate();
+                }
+                String updateRunSql = """
+                        UPDATE backtest_runs SET
+                            label = ?, start_date = ?, end_date = ?,
+                            total_markets = ?, total_trades = ?, winning_trades = ?, losing_trades = ?,
+                            win_rate_pct = ?, total_net_pnl = ?, total_fees = ?, gross_pnl = ?, gross_profit = ?, gross_loss = ?,
+                            profit_factor = ?, max_drawdown_usd = ?, max_drawdown_pct = ?, expected_value_per_trade = ?,
+                            sharpe_ratio = ?, sortino_ratio = ?, brier_score = ?, final_balance = ?,
+                            execution_time_utc = ?, duration_ms = ?, config_hash = ?
+                        WHERE run_id = ?
+                        """;
+                try (PreparedStatement ps = conn.prepareStatement(updateRunSql)) {
+                    ps.setString(1, resolvedLabel);
+                    ps.setString(2, mergedStartDate);
+                    ps.setString(3, mergedEndDate);
+                    ps.setInt(4, finalizedPoints.size());
+                    ps.setInt(5, mergedMetrics.totalTrades());
+                    ps.setInt(6, mergedMetrics.winningTrades());
+                    ps.setInt(7, mergedMetrics.losingTrades());
+                    ps.setDouble(8, mergedMetrics.winRatePct());
+                    ps.setDouble(9, mergedMetrics.totalNetPnl());
+                    ps.setDouble(10, mergedMetrics.totalFees());
+                    ps.setDouble(11, mergedMetrics.grossPnl());
+                    ps.setDouble(12, mergedMetrics.grossProfit());
+                    ps.setDouble(13, mergedMetrics.grossLoss());
+                    ps.setDouble(14, mergedMetrics.profitFactor());
+                    ps.setDouble(15, mergedMetrics.maxDrawdownUsd());
+                    ps.setDouble(16, mergedMetrics.maxDrawdownPct());
+                    ps.setDouble(17, mergedMetrics.expectedValuePerTrade());
+                    ps.setDouble(18, mergedMetrics.sharpeRatio());
+                    ps.setDouble(19, mergedMetrics.sortinoRatio());
+                    ps.setDouble(20, mergedMetrics.brierScore());
+                    ps.setDouble(21, mergedMetrics.finalBalance());
+                    ps.setString(22, completedAt.toString());
+                    ps.setLong(23, durationMs);
+                    ps.setString(24, mergedConfig.configHash());
+                    ps.setString(25, runId);
+                    ps.executeUpdate();
+                }
+
+                insertMarketPoints(conn, runId, finalizedPoints);
+                insertTrades(conn, runId, finalizedTrades);
+
+                conn.commit();
+                if (Log.isInfoEnabled()) {
+                    Log.infof("Merged incremental backtest into run %s (%s): span=%s..%s, markets=%d, trades=%d, skippedDays=%d",
+                            runId, resolvedLabel, mergedStartDate, mergedEndDate,
+                            finalizedPoints.size(), finalizedTrades.size(), skippedDays);
+                }
+                return new BacktestResult(
+                        runId,
+                        resolvedLabel,
+                        mergedConfig.strategyName(),
+                        mergedConfig.symbol(),
+                        completedAt,
+                        durationMs,
+                        finalizedPoints.size(),
+                        mergedConfig,
+                        mergedMetrics,
+                        Collections.unmodifiableList(finalizedPoints),
+                        Collections.unmodifiableList(finalizedTrades),
+                        true,
+                        skippedDays
+                );
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw e;
+            } finally {
+                try {
+                    conn.setAutoCommit(prevAutoCommit);
+                } catch (SQLException ignored) {
+                }
+            }
+        } catch (SQLException e) {
+            Log.errorf(e, "Failed merging incremental days into run %s: %s", runId, e.getMessage());
+            throw new IllegalStateException("Failed merging incremental days: " + e.getMessage(), e);
         } finally {
             dbLock.unlock();
         }
@@ -713,7 +1070,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
         return connection;
     }
 
-    private static void initializeSchema(Connection conn) throws SQLException {
+    private void initializeSchema(Connection conn) throws SQLException {
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -749,9 +1106,11 @@ public class BacktestHistoryRepository implements AutoCloseable {
                         brier_score DOUBLE NOT NULL,
                         final_balance DOUBLE NOT NULL,
                         execution_time_utc VARCHAR NOT NULL,
-                        duration_ms BIGINT NOT NULL
+                        duration_ms BIGINT NOT NULL,
+                        config_hash VARCHAR
                     )
                     """);
+            stmt.execute("ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS config_hash VARCHAR");
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS backtest_market_points (
                         run_id VARCHAR NOT NULL,
@@ -791,7 +1150,190 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     """);
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_bt_points_run ON backtest_market_points (run_id, market_idx)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_bt_trades_run ON backtest_trades (run_id, trade_idx)");
+            // Drop any legacy config_hash ART index: DuckDB throws Duplicate PK errors on UPDATE when a secondary index coexists with PRIMARY KEY
+            stmt.execute("DROP INDEX IF EXISTS idx_bt_runs_config_hash");
         }
+        backfillMissingConfigHashes(conn);
+    }
+
+    private void backfillMissingConfigHashes(Connection conn) throws SQLException {
+        List<Map.Entry<String, String>> updates = new ArrayList<>();
+        String selectSql = """
+                SELECT run_id, strategy_name, symbol, initial_capital, latency_factor,
+                       binance_delay_ms, kraken_delay_ms, coinbase_delay_ms, strategy_params_json
+                FROM backtest_runs
+                WHERE config_hash IS NULL OR config_hash = ''
+                """;
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(selectSql)) {
+            while (rs.next()) {
+                String runId = rs.getString(1);
+                Map<String, Object> params = deserializeMap(rs.getString(9));
+                String hash = BacktestRunConfig.computeConfigHash(
+                        rs.getString(2),
+                        rs.getString(3),
+                        rs.getDouble(4),
+                        rs.getDouble(5),
+                        rs.getLong(6),
+                        rs.getLong(7),
+                        rs.getLong(8),
+                        params
+                );
+                updates.add(Map.entry(runId, hash));
+            }
+        }
+        if (!updates.isEmpty()) {
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE backtest_runs SET config_hash = ? WHERE run_id = ?")) {
+                for (Map.Entry<String, String> entry : updates) {
+                    ps.setString(1, entry.getValue());
+                    ps.setString(2, entry.getKey());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        }
+    }
+
+    private static void insertMarketPoints(Connection conn, String runId, List<MarketEquityPoint> marketPoints)
+            throws SQLException {
+        if (marketPoints == null || marketPoints.isEmpty()) {
+            return;
+        }
+        String insertPointSql = """
+                INSERT INTO backtest_market_points (
+                    run_id, market_idx, t_start, date_utc, trades_count, winning_trades,
+                    net_pnl, fees_usd, brier_diff_sq, evaluated, balance_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(insertPointSql)) {
+            for (int i = 0; i < marketPoints.size(); i++) {
+                MarketEquityPoint mp = marketPoints.get(i);
+                ps.setString(1, runId);
+                ps.setInt(2, i);
+                ps.setLong(3, mp.tStart());
+                ps.setString(4, mp.dateUtc());
+                ps.setInt(5, mp.tradesCount());
+                ps.setInt(6, mp.winningTrades());
+                ps.setDouble(7, mp.netPnl());
+                ps.setDouble(8, mp.feesUsd());
+                ps.setDouble(9, mp.brierDiffSq());
+                ps.setBoolean(10, mp.evaluated());
+                ps.setDouble(11, mp.balanceAfter());
+                ps.addBatch();
+                if ((i + 1) % 2000 == 0) {
+                    ps.executeBatch();
+                }
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private static void insertTrades(Connection conn, String runId, List<TradeRecord> trades)
+            throws SQLException {
+        if (trades == null || trades.isEmpty()) {
+            return;
+        }
+        String insertTradeSql = """
+                INSERT INTO backtest_trades (
+                    run_id, trade_idx, entry_time_utc, interval_start_sec, date_utc,
+                    side, entry_price, exit_price, size_usd, shares, fee_usd, net_pnl,
+                    exit_reason, model_probability, market_price, edge, is_win, balance_after_trade
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(insertTradeSql)) {
+            for (int i = 0; i < trades.size(); i++) {
+                TradeRecord tr = trades.get(i);
+                String dateUtc = DATE_FMT.format(Instant.ofEpochSecond(tr.intervalStartSec()));
+                ps.setString(1, runId);
+                ps.setInt(2, i);
+                ps.setString(3, tr.entryTimeUtc());
+                ps.setLong(4, tr.intervalStartSec());
+                ps.setString(5, dateUtc);
+                ps.setString(6, tr.side() != null ? tr.side().name() : TradeDirection.UP.name());
+                ps.setDouble(7, tr.entryPrice());
+                ps.setDouble(8, tr.exitPrice());
+                ps.setDouble(9, tr.sizeUsd());
+                ps.setDouble(10, tr.shares());
+                ps.setDouble(11, tr.feeUsd());
+                ps.setDouble(12, tr.netPnl());
+                ps.setString(13, tr.exitReason() != null ? tr.exitReason() : "");
+                ps.setDouble(14, tr.modelProbability());
+                ps.setDouble(15, tr.marketPrice());
+                ps.setDouble(16, tr.edge());
+                ps.setBoolean(17, tr.isWin());
+                ps.setDouble(18, tr.balanceAfterTrade());
+                ps.addBatch();
+                if ((i + 1) % 2000 == 0) {
+                    ps.executeBatch();
+                }
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private static List<MarketEquityPoint> loadMarketPointsInternal(
+            Connection conn,
+            String runId,
+            Set<String> excludedDates) throws SQLException {
+        String sql = """
+                SELECT t_start, date_utc, trades_count, winning_trades,
+                       net_pnl, fees_usd, brier_diff_sq, evaluated, balance_after
+                FROM backtest_market_points
+                WHERE run_id = ?
+                ORDER BY market_idx ASC
+                """;
+        List<MarketEquityPoint> points = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String dateUtc = rs.getString(2);
+                    if (excludedDates != null && excludedDates.contains(dateUtc)) {
+                        continue;
+                    }
+                    points.add(new MarketEquityPoint(
+                            rs.getLong(1),
+                            dateUtc,
+                            rs.getInt(3),
+                            rs.getInt(4),
+                            rs.getDouble(5),
+                            rs.getDouble(6),
+                            rs.getDouble(7),
+                            rs.getBoolean(8),
+                            rs.getDouble(9)
+                    ));
+                }
+            }
+        }
+        return points;
+    }
+
+    private static List<TradeRecord> loadTradesInternal(
+            Connection conn,
+            String runId,
+            Set<String> excludedDates) throws SQLException {
+        String sql = """
+                SELECT entry_time_utc, interval_start_sec, side, entry_price, exit_price,
+                       size_usd, shares, fee_usd, net_pnl, exit_reason, model_probability,
+                       market_price, edge, is_win, balance_after_trade, date_utc
+                FROM backtest_trades
+                WHERE run_id = ?
+                ORDER BY trade_idx ASC
+                """;
+        List<TradeRecord> trades = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String dateUtc = rs.getString(16);
+                    if (excludedDates != null && excludedDates.contains(dateUtc)) {
+                        continue;
+                    }
+                    trades.add(mapTradeRow(rs));
+                }
+            }
+        }
+        return trades;
     }
 
     private ComparedRunSeries buildComparedSeries(

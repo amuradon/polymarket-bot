@@ -19,6 +19,8 @@ export class RunnerModalController {
         this.startDateInput = document.getElementById("run-start-date");
         this.endDateInput = document.getElementById("run-end-date");
         this.fullRangeCheckbox = document.getElementById("run-full-range");
+        this.forceNewCheckbox = document.getElementById("run-force-new");
+        this.overwriteDaysCheckbox = document.getElementById("run-overwrite-days");
         this.capitalInput = document.getElementById("run-capital");
         this.latencyFactorInput = document.getElementById("run-latency-factor");
         this.binanceDelayInput = document.getElementById("run-binance-delay");
@@ -49,6 +51,10 @@ export class RunnerModalController {
 
         this.fullRangeCheckbox.addEventListener("change", () => {
             this.syncDateInputsEnabled();
+        });
+
+        this.forceNewCheckbox.addEventListener("change", () => {
+            this.syncMergeOptionsEnabled();
         });
 
         document.getElementById("btn-reset-strategy-params").addEventListener("click", () => {
@@ -112,6 +118,9 @@ export class RunnerModalController {
         this.coinbaseDelayInput.value = String(delays.coinbaseDelayMs ?? 50);
 
         this.fullRangeCheckbox.checked = this.datasetBySymbol.has(this.symbolSelect.value);
+        this.forceNewCheckbox.checked = false;
+        this.overwriteDaysCheckbox.checked = false;
+        this.syncMergeOptionsEnabled();
         this.updateDatasetHintAndDates(true);
         this.syncDateInputsEnabled();
         this.resetParamsToStrategyDefaults(this.strategySelect.value);
@@ -135,6 +144,9 @@ export class RunnerModalController {
         }
 
         this.fullRangeCheckbox.checked = false;
+        this.forceNewCheckbox.checked = false;
+        this.overwriteDaysCheckbox.checked = false;
+        this.syncMergeOptionsEnabled();
         this.startDateInput.value = cfg.startDate || "";
         this.endDateInput.value = cfg.endDate || "";
         this.syncDateInputsEnabled();
@@ -178,6 +190,14 @@ export class RunnerModalController {
                 this.endDateInput.value = ds.maxDate;
             }
         }
+    }
+
+    syncMergeOptionsEnabled() {
+        const forceNew = this.forceNewCheckbox.checked;
+        if (forceNew) {
+            this.overwriteDaysCheckbox.checked = false;
+        }
+        this.overwriteDaysCheckbox.disabled = forceNew;
     }
 
     resetParamsToStrategyDefaults(strategyName) {
@@ -355,7 +375,9 @@ export class RunnerModalController {
             binanceDelayMs: Number(this.binanceDelayInput.value),
             krakenDelayMs: Number(this.krakenDelayInput.value),
             coinbaseDelayMs: Number(this.coinbaseDelayInput.value),
-            strategyParams: Object.keys(overrides).length > 0 ? overrides : null
+            strategyParams: Object.keys(overrides).length > 0 ? overrides : null,
+            forceNewRun: this.forceNewCheckbox.checked,
+            overwriteExistingDays: this.overwriteDaysCheckbox.checked
         };
 
         this.submitBtn.disabled = true;

@@ -403,7 +403,7 @@ class BacktestLoggingTest {
     private static BacktestRunRequest runRequest(String strategyName, String symbol) {
         return new BacktestRunRequest(
                 null, strategyName, symbol, "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null
+                false, 10000.0, 1.0, null, null, null, null, false, false
         );
     }
 

@@ -10,7 +10,8 @@ import java.util.List;
 
 /**
  * Encapsulates the complete backtest simulation outcome, including resolved configuration,
- * summary performance metrics, per-market equity progression, and individual trade records.
+ * summary performance metrics, per-market equity progression, individual trade records,
+ * and incremental merge metadata.
  *
  * @param runId unique persistent run identifier
  * @param label human-readable label for the run
@@ -23,6 +24,8 @@ import java.util.List;
  * @param metrics summary performance metrics (PnL, Sharpe, Brier, Win rate)
  * @param marketPoints per-market equity progression across all evaluated markets
  * @param trades complete list of executed trade records
+ * @param mergedIntoExisting {@code true} if results were merged into an existing run with matching configuration
+ * @param skippedDays count of UTC days skipped because they were already persisted in the matching run
  */
 public record BacktestResult(
         String runId,
@@ -35,6 +38,8 @@ public record BacktestResult(
         BacktestRunConfig config,
         PerformanceMetrics metrics,
         List<MarketEquityPoint> marketPoints,
-        List<TradeRecord> trades
+        List<TradeRecord> trades,
+        boolean mergedIntoExisting,
+        int skippedDays
 ) {
 }

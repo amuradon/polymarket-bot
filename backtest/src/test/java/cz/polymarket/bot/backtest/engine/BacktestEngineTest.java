@@ -48,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class BacktestEngineTest {
 
     private DuckDbSessionManager duckDbSessionManager;
+    private CollectorParquetDatasetService datasetService;
     private BacktestHistoryRepository historyRepository;
     private BacktestEngine backtestEngine;
     private final AtomicInteger polymarketCryptoPriceCount = new AtomicInteger();
@@ -59,7 +60,7 @@ class BacktestEngineTest {
     void setUp(@TempDir Path tempDir) throws Exception {
         duckDbSessionManager = new DuckDbSessionManager("256MB");
         Path collectorDir = tempDir.resolve("collector");
-        CollectorParquetDatasetService datasetService = new CollectorParquetDatasetService(collectorDir.toString(), duckDbSessionManager);
+        datasetService = new CollectorParquetDatasetService(collectorDir.toString(), duckDbSessionManager);
 
         long c1Start = BASE_START;
         long c2Start = BASE_START + 900L;
@@ -243,7 +244,7 @@ class BacktestEngineTest {
     void shouldRunBacktestOverCollectorParquetArchives() {
         BacktestRunRequest req = new BacktestRunRequest(
                 "PM Only 1.5x", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, null, null, null, null);
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -266,7 +267,7 @@ class BacktestEngineTest {
 
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null);
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -372,7 +373,7 @@ class BacktestEngineTest {
                             null,
                             new BacktestRunRequest(
                                     null, "utter_paramecium", "BTCUSDT", "2026-08-01", "2026-08-01",
-                                    false, 10000.0, 1.0, null, null, null, null),
+                                    false, 10000.0, 1.0, null, null, null, null, false, false),
                             BacktestProgressListener.NOOP
                     );
 
@@ -527,10 +528,10 @@ class BacktestEngineTest {
                 try {
                     BacktestResult windowedRes = engine.runBacktest(null, new BacktestRunRequest(
                             null, windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
+                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
                     BacktestResult fullRes = engine.runBacktest(null, new BacktestRunRequest(
                             null, fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
+                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
 
                     assertThat(windowedRes.trades()).isNotEmpty();
                     assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
@@ -549,7 +550,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when unknown strategy requested")
     void shouldThrowWhenUnknownStrategy() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null);
+                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown strategy");
@@ -559,7 +560,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when no market rows available")
     void shouldThrowWhenNoMarketRowsAvailable() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null);
+                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
@@ -570,7 +571,7 @@ class BacktestEngineTest {
     void shouldResolveDefaultParametersWhenOmitted() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, null, "BTCUSDT", null, null, true, null, null, null, null, null,
-                Map.of("minTauMs", 3000L));
+                Map.of("minTauMs", 3000L), false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -586,7 +587,7 @@ class BacktestEngineTest {
     void shouldThrowWhenStartDateIsAfterEndDate() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null);
+                false, 10000.0, 1.0, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("startDate must not be after endDate");
@@ -597,7 +598,7 @@ class BacktestEngineTest {
     void shouldCancelBacktestCooperatively() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null);
+                false, 10000.0, 1.0, null, null, null, null, false, false);
         BacktestProgressListener cancelledListener = new BacktestProgressListener() {
             @Override
             public boolean isCancelled() {
@@ -728,7 +729,7 @@ class BacktestEngineTest {
                 try {
                     BacktestRunRequest req = new BacktestRunRequest(
                             null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
-                            false, 10000.0, 1.0, null, null, null, null);
+                            false, 10000.0, 1.0, null, null, null, null, false, false);
                     // First run: Cache Miss -> computes and caches indicator values
                     localEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
                     List<String> firstRunTicks = new ArrayList<>(observedSpotTwapTicks);
@@ -744,11 +745,14 @@ class BacktestEngineTest {
                             spotTwapIndicator, "BTCUSDT", dateStr, new ExchangeDelays(150L, 50L, 50L));
                     assertThat(customDelayParquet).isNotEqualTo(cachedParquet);
 
-                    // Delete raw exchange Parquet file and re-run -> must read purely from cache
+                    // Delete raw exchange Parquet file and re-run with forceNewRun=true -> must read purely from cache
                     Files.delete(spotFile);
                     observedSpotTwapTicks.clear();
 
-                    localEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
+                    BacktestRunRequest forceReq = new BacktestRunRequest(
+                            null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
+                            false, 10000.0, 1.0, null, null, null, null, true, false);
+                    localEngine.runBacktest(null, forceReq, BacktestProgressListener.NOOP);
 
                     assertThat(observedSpotTwapTicks).isEqualTo(firstRunTicks);
                 } finally {
@@ -862,7 +866,7 @@ class BacktestEngineTest {
                 try {
                     localEngine.runBacktest(null, new BacktestRunRequest(
                             null, recordingStrategy.getName(), "BTCUSDT", dateStr, dateStr,
-                            false, 10000.0, 1.0, null, null, null, null), BacktestProgressListener.NOOP);
+                            false, 10000.0, 1.0, null, null, null, null, false, false), BacktestProgressListener.NOOP);
                     assertThat(observedFastTicks).isNotEmpty();
                     double[] tick = observedFastTicks.getLast();
                     assertThat(tick[1]).isCloseTo(0.70 * 60050.0 + 0.30 * 60060.0, org.assertj.core.api.Assertions.within(1e-4));
@@ -872,5 +876,101 @@ class BacktestEngineTest {
                 }
             }
         }
+    }
+
+    @Test
+    @DisplayName("Should auto-merge new days, skip stored days by default, overwrite on flag, and create distinct run when forceNewRun=true")
+    void shouldAutoMergeNewDaysSkipExistingOverwriteAndForceNewRun() throws Exception {
+        // 1. Initial 1-day run on 2026-08-01
+        BacktestResult run1 = backtestEngine.runBacktest(null, new BacktestRunRequest(
+                "Incremental Test", "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false),
+                BacktestProgressListener.NOOP);
+        assertThat(run1.mergedIntoExisting()).isFalse();
+        assertThat(run1.skippedDays()).isZero();
+        assertThat(run1.totalMarkets()).isEqualTo(3);
+        int initialTrades = run1.trades().size();
+
+        // 2. Re-running identical date with default flags skips all days and returns existing run
+        BacktestResult allSkipped = backtestEngine.runBacktest(null, new BacktestRunRequest(
+                null, "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, null, null, null, null, false, false),
+                BacktestProgressListener.NOOP);
+        assertThat(allSkipped.runId()).isEqualTo(run1.runId());
+        assertThat(allSkipped.label()).isEqualTo("Incremental Test");
+        assertThat(allSkipped.mergedIntoExisting()).isTrue();
+        assertThat(allSkipped.skippedDays()).isEqualTo(1);
+        assertThat(allSkipped.totalMarkets()).isEqualTo(3);
+
+        // 3. Add Parquet fixtures for 2026-08-02 (1 market)
+        long day2Start = BASE_START + 86_400L;
+        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path cryptoPriceDay2 = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-02");
+        Path twap60sDay2 = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-02");
+        Path spotDay2 = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", "2026-08-02");
+        Files.createDirectories(cryptoPriceDay2.getParent());
+        Files.createDirectories(twap60sDay2.getParent());
+        Files.createDirectories(spotDay2.getParent());
+
+        try (Connection conn = duckDbSessionManager.openSession();
+             Statement stmt = conn.createStatement()) {
+            String normTwap = twap60sDay2.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + (day2Start * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60000.0::DOUBLE, '60000.0'::VARCHAR, 60::INT, " + (day2Start * 1000L) + "::UBIGINT), " +
+                    "(" + ((day2Start + 900L) * 1000L) + "::UBIGINT, 2::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60120.0::DOUBLE, '60120.0'::VARCHAR, 60::INT, " + ((day2Start + 900L) * 1000L) + "::UBIGINT)" +
+                    ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
+
+            String normCrypto = cryptoPriceDay2.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(" + ((day2Start + 60L) * 1000L) + "::UBIGINT, 1::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60120.0::DOUBLE, '60120.0'::VARCHAR, " + ((day2Start + 60L) * 1000L - 5L) + "::UBIGINT)" +
+                    ") AS t(ts, seq, symbol, source, price, full_accuracy_price, price_timestamp)) TO '" + normCrypto + "' (FORMAT PARQUET)");
+
+            String normSpot = spotDay2.toAbsolutePath().toString().replace('\\', '/');
+            stmt.execute("COPY (SELECT * FROM (VALUES " +
+                    "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (day2Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
+                    ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
+
+            TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + day2Start + ".parquet"), List.of(
+                    ClobRow.discovered(day2Start * 1000L - 5000L, "401", "402"),
+                    ClobRow.bookLevel((day2Start + 60L) * 1000L + 10L, (day2Start + 60L) * 1000L, 4, true, true, 4900, 300.0),
+                    ClobRow.bookLevel((day2Start + 60L) * 1000L + 10L, (day2Start + 60L) * 1000L, 4, true, false, 5000, 300.0)
+            ));
+        }
+
+        // 4. Full range 2026-08-01..2026-08-02 skips day 1, executes day 2, merges into run1
+        BacktestResult merged = backtestEngine.runBacktest(null, new BacktestRunRequest(
+                null, "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, false, false),
+                BacktestProgressListener.NOOP);
+        assertThat(merged.runId()).isEqualTo(run1.runId());
+        assertThat(merged.label()).isEqualTo("Incremental Test");
+        assertThat(merged.mergedIntoExisting()).isTrue();
+        assertThat(merged.skippedDays()).isEqualTo(1);
+        assertThat(merged.totalMarkets()).isEqualTo(4);
+        assertThat(merged.config().startDate()).isEqualTo("2026-08-01");
+        assertThat(merged.config().endDate()).isEqualTo("2026-08-02");
+        assertThat(merged.trades().size()).isGreaterThan(initialTrades);
+
+        // 5. Overwrite day 2 explicitly (replaces without duplicating day 2 points/trades)
+        BacktestResult overwritten = backtestEngine.runBacktest(null, new BacktestRunRequest(
+                null, "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, false, true),
+                BacktestProgressListener.NOOP);
+        assertThat(overwritten.runId()).isEqualTo(run1.runId());
+        assertThat(overwritten.mergedIntoExisting()).isTrue();
+        assertThat(overwritten.skippedDays()).isZero();
+        assertThat(overwritten.totalMarkets()).isEqualTo(4);
+        assertThat(overwritten.trades()).hasSameSizeAs(merged.trades());
+
+        // 6. Explicit forceNewRun=true creates a distinct dataset for day 2 only
+        BacktestResult forced = backtestEngine.runBacktest(null, new BacktestRunRequest(
+                "Forced Run", "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, null, null, null, null, true, false),
+                BacktestProgressListener.NOOP);
+        assertThat(forced.runId()).isNotEqualTo(run1.runId());
+        assertThat(forced.label()).isEqualTo("Forced Run");
+        assertThat(forced.mergedIntoExisting()).isFalse();
+        assertThat(forced.skippedDays()).isZero();
+        assertThat(forced.totalMarkets()).isEqualTo(1);
     }
 }

@@ -307,12 +307,15 @@ public class BacktestResource {
                     .build();
         }
 
-        String resolvedLabel = (request.label() != null && !request.label().isBlank())
+        String explicitLabel = (request.label() != null && !request.label().isBlank())
                 ? request.label().trim()
+                : null;
+        String displayLabel = explicitLabel != null
+                ? explicitLabel
                 : resolvedStrategyName + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")";
 
         BacktestRunRequest resolvedRequest = new BacktestRunRequest(
-                resolvedLabel,
+                explicitLabel,
                 resolvedStrategyName,
                 resolvedSymbol,
                 resolvedStartDate,
@@ -323,7 +326,9 @@ public class BacktestResource {
                 request.binanceDelayMs(),
                 request.krakenDelayMs(),
                 request.coinbaseDelayMs(),
-                request.strategyParams()
+                request.strategyParams(),
+                Boolean.TRUE.equals(request.forceNewRun()),
+                Boolean.TRUE.equals(request.overwriteExistingDays())
         );
         BacktestJob job = jobManager.submitJob(resolvedRequest);
         if (Log.isInfoEnabled()) {
@@ -335,7 +340,7 @@ public class BacktestResource {
                 job.jobId(),
                 job.runId(),
                 job.status().name(),
-                resolvedLabel,
+                displayLabel,
                 resolvedStrategyName,
                 resolvedSymbol,
                 job.createdAt().toString()
@@ -464,6 +469,8 @@ public class BacktestResource {
                 job.completedMarkets(),
                 job.currentDate(),
                 job.progressPct(),
+                job.mergedIntoExisting(),
+                job.skippedDays(),
                 tradeCount,
                 metrics
         );
@@ -540,6 +547,8 @@ public class BacktestResource {
             int completedMarkets,
             String currentDate,
             double progressPct,
+            boolean mergedIntoExisting,
+            int skippedDays,
             Integer tradeCount,
             PerformanceMetrics metrics
     ) {}
