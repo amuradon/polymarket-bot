@@ -137,6 +137,20 @@ public class BacktestHistoryResource {
     }
 
     /**
+     * Deletes all persisted backtest runs and all associated market points and trade records.
+     *
+     * @return HTTP 200 with count of deleted runs
+     */
+    @DELETE
+    @Path("/backtest/runs")
+    @Produces(MediaType.APPLICATION_JSON)
+    @Operation(summary = "Delete all backtest runs", description = "Deletes all persisted runs, equity points, and trades from DuckDB.")
+    public Response deleteAllRuns() {
+        int deletedRuns = historyRepository.deleteAllRuns();
+        return Response.ok(Map.of("deletedRuns", deletedRuns)).build();
+    }
+
+    /**
      * Compares one or more persisted runs across an optional UTC date slice at {@code DAY} or {@code MARKET}
      * granularity, rebasing every equity series from zero at the start of the slice and computing
      * slice metrics plus parameter differences.

@@ -18,7 +18,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -233,6 +238,134 @@ class BacktestHistoryRepositoryTest {
             assertThat(overwritten.trades()).hasSize(3);
             // 10000 + 50 (day1) - 20 (day2 overwritten) - 40 (day3) = 9990
             assertThat(overwritten.metrics().finalBalance()).isCloseTo(9990.0, within(1e-6));
+        }
+    }
+
+    @Test
+    @DisplayName("Should automatically drop legacy secondary ART indexes and cleanly merge/delete runs with 600+ trades")
+    void shouldDropLegacyArtIndexesAndDeleteHighTradeCountRunsCleanly(@TempDir Path tempDir) throws Exception {
+        Path dbFile = tempDir.resolve("legacy-indexed-history.duckdb");
+
+        // Simulate a legacy DB that still carries secondary ART indexes idx_bt_points_run and idx_bt_trades_run
+        try (BacktestHistoryRepository bootstrap = new BacktestHistoryRepository(dbFile, new ObjectMapper(), CALC)) {
+            assertThat(bootstrap.listRuns(null, null)).isEmpty();
+        }
+        try (Connection rawConn = DriverManager.getConnection("jdbc:duckdb:" + dbFile);
+             Statement stmt = rawConn.createStatement()) {
+            stmt.execute("CREATE INDEX idx_bt_points_run ON backtest_market_points (run_id, market_idx)");
+            stmt.execute("CREATE INDEX idx_bt_trades_run ON backtest_trades (run_id, trade_idx)");
+        }
+
+        long baseEpoch = 1785542400L; // 2026-08-01T00:00:00Z
+        List<MarketEquityPoint> points600 = new ArrayList<>(600);
+        List<TradeRecord> trades600 = new ArrayList<>(600);
+        double bal1 = 10000.0;
+        for (int i = 0; i < 600; i++) {
+            long tStart = baseEpoch + i * 300L;
+            String dateUtc = Instant.ofEpochSecond(tStart).toString().substring(0, 10);
+            double pnl = (i % 2 == 0) ? 4.0 : -3.0;
+            bal1 += pnl;
+            trades600.add(new TradeRecord(
+                    Instant.ofEpochSecond(tStart + 60L).toString(),
+                    tStart,
+                    (i % 2 == 0) ? TradeDirection.UP : TradeDirection.DOWN,
+                    0.50,
+                    (i % 2 == 0) ? 1.0 : 0.0,
+                    10.0,
+                    20.0,
+                    0.2,
+                    pnl,
+                    "Resolution",
+                    0.65,
+                    0.50,
+                    0.15,
+                    pnl > 0,
+                    bal1
+            ));
+            points600.add(new MarketEquityPoint(tStart, dateUtc, 1, pnl > 0 ? 1 : 0, pnl, 0.2, 0.12, true, bal1));
+        }
+
+        List<MarketEquityPoint> points350 = points600.subList(0, 350);
+        List<TradeRecord> trades350 = trades600.subList(0, 350);
+
+        BacktestRunConfig cfg = new BacktestRunConfig(
+                "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
+                10000.0, 1.0, 220L, 100L, 50L, 50L,
+                Map.of("minTauMs", 2000L), Map.of()
+        );
+        BacktestResult largeRun1 = new BacktestResult(
+                "1c2bf32f-7ffa-4980-ae14-f3bf408a6f48",
+                "Oracle Large 600",
+                "OraclePulseLockStrategy",
+                "BTCUSDT",
+                Instant.parse("2026-08-04T10:00:00Z"),
+                250L,
+                points600.size(),
+                cfg,
+                CALC.calculate(trades600, 10000.0, 0.12, 3.0),
+                points600,
+                trades600,
+                false,
+                0
+        );
+        BacktestResult largeRun2 = new BacktestResult(
+                "6493f360-d36a-4140-a6d1-2dbcfa02e57c",
+                "Oracle Large 350",
+                "OraclePulseLockStrategy",
+                "BTCUSDT",
+                Instant.parse("2026-08-04T11:00:00Z"),
+                190L,
+                points350.size(),
+                cfg,
+                CALC.calculate(trades350, 10000.0, 0.12, 2.0),
+                points350,
+                trades350,
+                false,
+                0
+        );
+
+        try (BacktestHistoryRepository repo = new BacktestHistoryRepository(dbFile, new ObjectMapper(), CALC)) {
+            repo.saveRun(largeRun1);
+            repo.saveRun(largeRun2);
+
+            // Merge an extra day into the 600-trade run (exercises DELETE + UPDATE + batch re-insert)
+            long extraEpoch = 1785801600L; // 2026-08-04T00:00:00Z
+            TradeRecord extraTrade = new TradeRecord(
+                    "2026-08-04T00:01:00Z", extraEpoch, TradeDirection.UP,
+                    0.50, 1.0, 10.0, 20.0, 0.2, 9.8, "Resolution", 0.7, 0.5, 0.2, true, bal1 + 9.8);
+            BacktestResult merged = repo.mergeRunDays(
+                    largeRun1.runId(),
+                    null,
+                    cfg,
+                    List.of(new MarketEquityPoint(extraEpoch, "2026-08-04", 1, 1, 9.8, 0.2, 0.09, true, bal1 + 9.8)),
+                    List.of(extraTrade),
+                    java.util.Set.of(),
+                    40L,
+                    0
+            );
+            assertThat(merged.trades()).hasSize(601);
+
+            // Deleting the 601-trade run must succeed without DuckDB ART index error
+            assertThat(repo.deleteRun(largeRun1.runId())).isTrue();
+            assertThat(repo.listRuns(null, null)).hasSize(1);
+            assertThat(repo.queryTrades(largeRun2.runId(), null, null, "ALL", "ALL", null, 10, 0))
+                    .isPresent()
+                    .get()
+                    .extracting(TradesPageResponse::totalCount)
+                    .isEqualTo(350);
+
+            // Bulk deleteAllRuns clears remaining history cleanly
+            assertThat(repo.deleteAllRuns()).isEqualTo(1);
+            assertThat(repo.listRuns(null, null)).isEmpty();
+        }
+
+        // Verify secondary ART indexes remain absent on disk
+        try (Connection rawConn = DriverManager.getConnection("jdbc:duckdb:" + dbFile);
+             Statement stmt = rawConn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT COUNT(*) FROM duckdb_indexes() WHERE index_name IN ('idx_bt_points_run', 'idx_bt_trades_run')")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).isZero();
         }
     }
 }

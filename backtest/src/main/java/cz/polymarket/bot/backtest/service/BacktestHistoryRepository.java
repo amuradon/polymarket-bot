@@ -222,6 +222,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed saving backtest run %s to DuckDB: %s", result.runId(), e.getMessage());
             throw new IllegalStateException("Failed saving backtest run to DuckDB: " + e.getMessage(), e);
         } finally {
@@ -275,6 +276,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 return Collections.unmodifiableList(runs);
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed listing backtest runs from DuckDB: %s", e.getMessage());
             throw new IllegalStateException("Failed listing backtest runs: " + e.getMessage(), e);
         } finally {
@@ -317,6 +319,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed loading backtest run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed loading backtest run: " + e.getMessage(), e);
         } finally {
@@ -360,6 +363,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed querying run by configHash %s: %s", configHash, e.getMessage());
             throw new IllegalStateException("Failed querying run by configHash: " + e.getMessage(), e);
         } finally {
@@ -396,6 +400,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
             }
             return Collections.unmodifiableSet(dates);
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed loading stored dates for run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed loading stored dates: " + e.getMessage(), e);
         } finally {
@@ -444,6 +449,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     skippedDays
             ));
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed loading full result for run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed loading full result: " + e.getMessage(), e);
         } finally {
@@ -740,6 +746,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed merging incremental days into run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed merging incremental days: " + e.getMessage(), e);
         } finally {
@@ -772,6 +779,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 return ps.executeUpdate() > 0;
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed updating label for run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed updating label: " + e.getMessage(), e);
         } finally {
@@ -825,8 +833,51 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed deleting backtest run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed deleting backtest run: " + e.getMessage(), e);
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    /**
+     * Deletes all persisted backtest runs together with all associated market points and trade records
+     * atomically inside a single DuckDB transaction.
+     *
+     * @return count of deleted runs
+     */
+    public int deleteAllRuns() {
+        dbLock.lock();
+        try {
+            Connection conn = ensureConnected();
+            boolean prevAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("DELETE FROM backtest_trades");
+                stmt.executeUpdate("DELETE FROM backtest_market_points");
+                int deletedRuns = stmt.executeUpdate("DELETE FROM backtest_runs");
+                conn.commit();
+                if (Log.isInfoEnabled()) {
+                    Log.infof("Deleted all backtest runs from DuckDB history: deletedRuns=%d", deletedRuns);
+                }
+                return deletedRuns;
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw e;
+            } finally {
+                try {
+                    conn.setAutoCommit(prevAutoCommit);
+                } catch (SQLException ignored) {
+                }
+            }
+        } catch (SQLException e) {
+            resetConnectionIfFatal(e);
+            Log.errorf(e, "Failed deleting all backtest runs: %s", e.getMessage());
+            throw new IllegalStateException("Failed deleting all backtest runs: " + e.getMessage(), e);
         } finally {
             dbLock.unlock();
         }
@@ -905,6 +956,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     Collections.unmodifiableList(parameterDiffs)
             );
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed comparing backtest runs: %s", e.getMessage());
             throw new IllegalStateException("Failed comparing backtest runs: " + e.getMessage(), e);
         } finally {
@@ -1026,6 +1078,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     Collections.unmodifiableList(trades)
             ));
         } catch (SQLException e) {
+            resetConnectionIfFatal(e);
             Log.errorf(e, "Failed querying trades for run %s: %s", runId, e.getMessage());
             throw new IllegalStateException("Failed querying trades: " + e.getMessage(), e);
         } finally {
@@ -1070,10 +1123,51 @@ public class BacktestHistoryRepository implements AutoCloseable {
             schemaInitialized = false;
         }
         if (!schemaInitialized) {
-            initializeSchema(connection);
-            schemaInitialized = true;
+            try {
+                initializeSchema(connection);
+                schemaInitialized = true;
+            } catch (SQLException e) {
+                try {
+                    connection.close();
+                } catch (SQLException ignored) {
+                } finally {
+                    connection = null;
+                    schemaInitialized = false;
+                }
+                throw e;
+            }
         }
         return connection;
+    }
+
+    private void resetConnectionIfFatal(SQLException e) {
+        if (connection == null) {
+            schemaInitialized = false;
+            return;
+        }
+        boolean shouldReset = false;
+        try {
+            shouldReset = connection.isClosed();
+        } catch (SQLException ignored) {
+            shouldReset = true;
+        }
+        if (!shouldReset && e != null && e.getMessage() != null) {
+            String msg = e.getMessage().toLowerCase(Locale.ROOT);
+            if (msg.contains("fatal") || msg.contains("invalidated")) {
+                shouldReset = true;
+            }
+        }
+        if (shouldReset) {
+            Log.warnf("Resetting invalidated DuckDB history connection after fatal error: %s",
+                    e != null ? e.getMessage() : "unknown");
+            try {
+                connection.close();
+            } catch (SQLException ignored) {
+            } finally {
+                connection = null;
+                schemaInitialized = false;
+            }
+        }
     }
 
     private void initializeSchema(Connection conn) throws SQLException {
@@ -1157,9 +1251,10 @@ public class BacktestHistoryRepository implements AutoCloseable {
                         balance_after_trade DOUBLE NOT NULL
                     )
                     """);
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_bt_points_run ON backtest_market_points (run_id, market_idx)");
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_bt_trades_run ON backtest_trades (run_id, trade_idx)");
-            // Drop any legacy config_hash ART index: DuckDB throws Duplicate PK errors on UPDATE when a secondary index coexists with PRIMARY KEY
+            // Drop secondary ART indexes: DuckDB's columnar min/max zonemaps handle run_id/date_utc scans natively,
+            // whereas secondary ART indexes fail on bulk DELETE/UPDATE (e.g. 400+ rows in backtest_trades).
+            stmt.execute("DROP INDEX IF EXISTS idx_bt_points_run");
+            stmt.execute("DROP INDEX IF EXISTS idx_bt_trades_run");
             stmt.execute("DROP INDEX IF EXISTS idx_bt_runs_config_hash");
         }
         backfillMissingConfigHashes(conn);
