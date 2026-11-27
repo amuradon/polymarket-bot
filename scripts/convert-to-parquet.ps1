@@ -516,15 +516,27 @@ Write-Host "=================================================================" -
 
 # Step 1: Discover archive files
 Write-Host "[1/3] Scanning for matching archives in $resolvedTargetDir..." -ForegroundColor Cyan
-$allFiles = Get-ChildItem -Path $resolvedTargetDir -Recurse -File -Filter $Filter
+$allFiles = @(Get-ChildItem -Path $resolvedTargetDir -Recurse -File -Filter $Filter | Where-Object { $_.FullName -notmatch '([\\/]|^)\.duckdb_tmp([\\/]|$)' })
 
 $files = $allFiles
 if ($Date) {
-    $files = $files | Where-Object { $_.Name -like "*$Date*" -or $_.FullName -like "*$Date*" }
+    $dayStart = [DateTimeOffset]::ParseExact($Date, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUnixTimeSeconds()
+    $dayEnd = $dayStart + 86400L
+    $files = @($files | Where-Object {
+        if ($_.Name -like "*$Date*" -or $_.FullName -like "*$Date*") {
+            return $true
+        }
+        if ($_.Name -match '-updown-[^-]+-(\d+)\.(?:jsonl\.zst|jsonl|zst)$') {
+            $ep = [int64]$Matches[1]
+            return ($ep -ge $dayStart -and $ep -lt $dayEnd)
+        }
+        return $false
+    })
 }
 if ($Stream) {
-    $files = $files | Where-Object { $_.FullName -like "*$Stream*" }
+    $files = @($files | Where-Object { $_.FullName -like "*$Stream*" })
 }
+$files = @($files | Sort-Object -Property FullName)
 
 $fileCount = if ($files) { @($files).Count } else { 0 }
 if ($fileCount -eq 0) {
@@ -570,6 +582,13 @@ try {
         $sizeMb = [math]::Round($file.Length / 1MB, 2)
         $inputEscaped = $srcPath.Replace('\', '/')
 
+        $streamType = Get-StreamType -FilePath $srcPath
+        if (-not $streamType) {
+            Write-Host "  [$index/$fileCount] [WARN] Skipping unknown stream type: $relPath ($sizeMb MB)" -ForegroundColor Yellow
+            $skippedCount++
+            continue
+        }
+
         # Determine destination .parquet filename
         if ($srcPath.EndsWith(".jsonl.zst", [System.StringComparison]::OrdinalIgnoreCase)) {
             $destPath = $srcPath.Substring(0, $srcPath.Length - 10) + ".parquet"
@@ -579,6 +598,20 @@ try {
             $destPath = $srcPath.Substring(0, $srcPath.Length - 4) + ".parquet"
         } else {
             $destPath = $srcPath + ".parquet"
+        }
+
+        # Normalize Polymarket CLOB archives into yyyy-MM-dd/ even when converting legacy flat transition files
+        if ($streamType -eq "polymarket-clob-market") {
+            $srcParentDir = Split-Path -Parent $srcPath
+            $srcParentName = Split-Path -Leaf $srcParentDir
+            if ($srcParentName -notmatch '^\d{4}-\d{2}-\d{2}$') {
+                $destLeaf = Split-Path -Leaf $destPath
+                $destStem = [System.IO.Path]::GetFileNameWithoutExtension($destLeaf)
+                if ($destStem -match '-(\d+)$') {
+                    $utcDate = [DateTimeOffset]::FromUnixTimeSeconds([int64]$Matches[1]).UtcDateTime.ToString("yyyy-MM-dd")
+                    $destPath = Join-Path (Join-Path $srcParentDir $utcDate) $destLeaf
+                }
+            }
         }
 
         # Check if target .parquet already exists
@@ -591,20 +624,19 @@ try {
             }
         }
 
-        $streamType = Get-StreamType -FilePath $srcPath
-        if (-not $streamType) {
-            Write-Host "  [$index/$fileCount] [WARN] Skipping unknown stream type: $relPath ($sizeMb MB)" -ForegroundColor Yellow
-            $skippedCount++
-            continue
-        }
         if ($DryRun) {
-            Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $([System.IO.Path]::GetFileName($destPath))" -ForegroundColor Yellow
+            $relDest = $destPath.Substring($resolvedTargetDir.Length).TrimStart('\', '/')
+            Write-Host "  [$index/$fileCount] [DRY-RUN] Would convert [$streamType] $relPath ($sizeMb MB) -> $relDest" -ForegroundColor Yellow
             $successCount++
             continue
         }
 
         Write-Host "  [$index/$fileCount] Converting [$streamType] $relPath ($sizeMb MB)..." -NoNewline
 
+        $destDir = Split-Path -Parent $destPath
+        if (-not (Test-Path -LiteralPath $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
         $tempParquetPath = "$destPath.tmp.parquet"
         if (Test-Path -LiteralPath $tempParquetPath) {
             Remove-Item -LiteralPath $tempParquetPath -Force -ErrorAction SilentlyContinue

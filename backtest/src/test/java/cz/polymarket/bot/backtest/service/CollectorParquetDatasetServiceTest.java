@@ -35,14 +35,22 @@ class CollectorParquetDatasetServiceTest {
             long c2Start = c1Start + 900L;         // 2026-08-01 00:15:00 UTC
             long afterRange = 1785628800L;         // 2026-08-02 00:00:00 UTC
 
-            Path pmDir = service.getPolymarket15mDir("BTCUSDT");
-            Files.createDirectories(pmDir);
+            Path pmFileBefore = service.getPolymarket15mFile("BTCUSDT", beforeRange);
+            Path pmFileC1 = service.getPolymarket15mFile("BTCUSDT", c1Start);
+            Path pmFileC2 = service.getPolymarket15mFile("BTCUSDT", c2Start);
+            Path pmFileAfter = service.getPolymarket15mFile("BTCUSDT", afterRange);
+            Files.createDirectories(pmFileBefore.getParent());
+            Files.createDirectories(pmFileC1.getParent());
+            Files.createDirectories(pmFileAfter.getParent());
+
+            // Non-date directories and root-level files should be ignored cleanly
+            Files.createDirectories(service.getPolymarket15mDir("BTCUSDT").resolve("ignored-subdir"));
 
             // Create empty dummy files (not valid Parquet) to prove discoverMarkets does NOT read file contents
-            Files.writeString(pmDir.resolve("btc-updown-15m-" + beforeRange + ".parquet"), "dummy");
-            Files.writeString(pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet"), "dummy");
-            Files.writeString(pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), "dummy");
-            Files.writeString(pmDir.resolve("btc-updown-15m-" + afterRange + ".parquet"), "dummy");
+            Files.writeString(pmFileBefore, "dummy");
+            Files.writeString(pmFileC2, "dummy");
+            Files.writeString(pmFileC1, "dummy");
+            Files.writeString(pmFileAfter, "dummy");
 
             List<CollectorMarketMetadata> markets = service.discoverMarkets("BTCUSDT", "2026-08-01", "2026-08-01");
             assertThat(markets).hasSize(2);
@@ -82,17 +90,17 @@ class CollectorParquetDatasetServiceTest {
             long c5Start = c4Start + 900L;     // 2026-08-01 01:00:00 UTC (missing twapClose)
             long c6Start = c5Start + 900L;     // 2026-08-01 01:15:00 UTC (missing twapOpen)
 
-            Path pmDir = service.getPolymarket15mDir("BTCUSDT");
+            Path pmDayDir = service.getPolymarket15mDayDir("BTCUSDT", "2026-08-01");
             Path twapDir = service.getPolymarketCryptoTwap60sDir("BTCUSDT");
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmDayDir);
             Files.createDirectories(twapDir);
 
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-            Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet");
-            Path pmFile3 = pmDir.resolve("btc-updown-15m-" + c3Start + ".parquet");
-            Path pmFile4 = pmDir.resolve("btc-updown-15m-" + c4Start + ".parquet");
-            Path pmFile5 = pmDir.resolve("btc-updown-15m-" + c5Start + ".parquet");
-            Path pmFile6 = pmDir.resolve("btc-updown-15m-" + c6Start + ".parquet");
+            Path pmFile1 = service.getPolymarket15mFile("BTCUSDT", c1Start);
+            Path pmFile2 = service.getPolymarket15mFile("BTCUSDT", c2Start);
+            Path pmFile3 = service.getPolymarket15mFile("BTCUSDT", c3Start);
+            Path pmFile4 = service.getPolymarket15mFile("BTCUSDT", c4Start);
+            Path pmFile5 = service.getPolymarket15mFile("BTCUSDT", c5Start);
+            Path pmFile6 = service.getPolymarket15mFile("BTCUSDT", c6Start);
             Path twapFile = service.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
             try (Connection conn = duckDb.openSession();
@@ -174,16 +182,17 @@ class CollectorParquetDatasetServiceTest {
         try (DuckDbSessionManager duckDb = new DuckDbSessionManager("256MB", 1, "target/test-data/duckdb-tmp")) {
             CollectorParquetDatasetService service = new CollectorParquetDatasetService(tempDir.toString(), duckDb);
 
-            Path btcDir = service.getPolymarket15mDir("BTCUSDT");
-            Path ethDir = service.getPolymarket15mDir("ETHUSDT");
-            Files.createDirectories(btcDir);
-            Files.createDirectories(ethDir);
-
             long day1 = 1785542400L; // 2026-08-01
             long day2 = 1785628800L; // 2026-08-02
-            Files.writeString(btcDir.resolve("btc-updown-15m-" + day1 + ".parquet"), "dummy");
-            Files.writeString(btcDir.resolve("btc-updown-15m-" + day2 + ".parquet"), "dummy");
-            Files.writeString(ethDir.resolve("eth-updown-15m-" + day1 + ".parquet"), "dummy");
+            Path btcDay1File = service.getPolymarket15mFile("BTCUSDT", day1);
+            Path btcDay2File = service.getPolymarket15mFile("BTCUSDT", day2);
+            Path ethDay1File = service.getPolymarket15mFile("ETHUSDT", day1);
+            Files.createDirectories(btcDay1File.getParent());
+            Files.createDirectories(btcDay2File.getParent());
+            Files.createDirectories(ethDay1File.getParent());
+            Files.writeString(btcDay1File, "dummy");
+            Files.writeString(btcDay2File, "dummy");
+            Files.writeString(ethDay1File, "dummy");
 
             List<DatasetSymbolSummary> datasets = service.discoverAvailableDatasets();
             assertThat(datasets).hasSize(2);

@@ -1,6 +1,7 @@
 package cz.polymarket.bot.collector;
 
 import cz.polymarket.bot.collector.storage.PolymarketMarketStorageManager;
+import cz.polymarket.bot.collector.storage.ZstdJsonlWriter;
 import cz.polymarket.bot.collector.storage.ZstdJsonlWriterTest;
 import cz.polymarket.bot.connector.polymarket.PolymarketClobClient;
 import cz.polymarket.bot.connector.polymarket.PolymarketGammaClient;
@@ -144,8 +145,8 @@ class PolymarketLifecycleCoordinatorTest {
         verify(clobClient).closeCollectorMarketStream(slug0);
         assertThat(coordinator2.getTrackedMarketSlugs()).containsExactlyInAnyOrder(slug1, slug2);
 
-        // Verify slug0 archive has strictly ONE market_discovered record despite restart
-        Path market0File = tempDir.resolve("polymarket/btc-updown-15m/" + slug0 + ".jsonl.zst");
+        // Verify slug0 archive has strictly ONE market_discovered record despite restart in daily yyyy-MM-dd directory
+        Path market0File = tempDir.resolve("polymarket/btc-updown-15m/2026-09-10/" + slug0 + ".jsonl.zst");
         assertThat(Files.exists(market0File)).isTrue();
         List<String> lines = ZstdJsonlWriterTest.readAllZstdLines(market0File);
         assertThat(lines.stream().filter(l -> l.contains("\"type\":\"market_discovered\"")).count()).isEqualTo(1L);
@@ -203,5 +204,112 @@ class PolymarketLifecycleCoordinatorTest {
 
         coordinator.stop();
         storage.closeAll();
+    }
+
+    @Test
+    void shouldResumeLegacyFlatMarketArchiveOnDeploymentUpgradeAndCreateSubsequentMarketsInDailySubdirectory() throws Exception {
+        PolymarketGammaClient gammaClient = mock(PolymarketGammaClient.class);
+        PolymarketClobClient clobClient = mock(PolymarketClobClient.class);
+
+        Map<String, RawWebSocketListener> clobListenersBySlug = new HashMap<>();
+        Map<String, Consumer<WebSocketStreamTelemetry>> closeListenersBySlug = new HashMap<>();
+        doAnswer(invocation -> {
+            String slug = invocation.getArgument(0);
+            clobListenersBySlug.put(slug, invocation.getArgument(2));
+            closeListenersBySlug.put(slug, invocation.getArgument(3));
+            return null;
+        }).when(clobClient).openCollectorMarketStream(any(), any(), any(), any(), any());
+
+        long baseStartSec = 1789041600L; // 2026-09-10 12:00:00 UTC
+        long durationSec = 900L;
+        for (int i = 0; i <= 3; i++) {
+            long startSec = baseStartSec + (i * durationSec);
+            String slug = "btc-updown-15m-" + startSec;
+            PolymarketMarketInfo info = new PolymarketMarketInfo(
+                    slug,
+                    startSec,
+                    startSec + durationSec,
+                    List.of("token_up_" + i, "token_down_" + i),
+                    false,
+                    "{\"slug\":\"" + slug + "\",\"closed\":false}"
+            );
+            when(gammaClient.fetchMarketBySlug(eq(slug), eq(durationSec))).thenReturn(Optional.of(info));
+        }
+
+        String slug0 = "btc-updown-15m-" + baseStartSec;
+        String slug1 = "btc-updown-15m-" + (baseStartSec + durationSec);
+        String slug2 = "btc-updown-15m-" + (baseStartSec + 2 * durationSec);
+
+        // Simulate pre-deploy version having written active market slug0 in legacy flat structure
+        Path legacyFile0 = tempDir.resolve("polymarket/btc-updown-15m/" + slug0 + ".jsonl.zst");
+        try (ZstdJsonlWriter legacyWriter = new ZstdJsonlWriter(legacyFile0)) {
+            legacyWriter.writePolymarketEvent(
+                    baseStartSec * 1000L,
+                    "market_discovered",
+                    "{\"slug\":\"" + slug0 + "\",\"closed\":false}"
+            );
+            legacyWriter.writePolymarketEvent(
+                    (baseStartSec + 5L) * 1000L,
+                    "clob",
+                    "[{\"event_type\":\"book\",\"asset_id\":\"token_up_0\"}]"
+            );
+        }
+
+        // Start newly deployed storage + coordinator mid-candle
+        PolymarketMarketStorageManager newStorage = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        PolymarketLifecycleCoordinator newCoordinator = new PolymarketLifecycleCoordinator(
+                gammaClient,
+                clobClient,
+                newStorage,
+                "BTCUSDT",
+                "15m",
+                1
+        );
+        newCoordinator.start(baseStartSec + 30L);
+
+        // Active market slug0 receives additional CLOB frames after deployment; lookahead slug1 was NOT in legacy dir
+        clobListenersBySlug.get(slug0).onMessageBytes(new TimestampedFrame(
+                "{\"event_type\":\"last_trade_price\",\"price\":\"0.55\"}".getBytes(StandardCharsets.UTF_8),
+                (baseStartSec + 35L) * 1000L
+        ));
+        clobListenersBySlug.get(slug1).onMessageBytes(new TimestampedFrame(
+                "[{\"event_type\":\"book\",\"asset_id\":\"token_up_1\"}]".getBytes(StandardCharsets.UTF_8),
+                (baseStartSec + 36L) * 1000L
+        ));
+
+        // Advance into slug1 window, then close slug0 cleanly -> lookahead slug2 is opened in daily directory too
+        newCoordinator.discoverAndRefreshMarkets(baseStartSec + durationSec + 5L);
+        closeListenersBySlug.get(slug0).accept(new WebSocketStreamTelemetry(
+                "POLYMARKET-CLOB-" + slug0,
+                ConnectionState.DISCONNECTED,
+                "ws-subscriptions-clob.polymarket.com:443",
+                0, 10, 0L, 2L, 5L, 20L, 2L, 0L, 0L,
+                (baseStartSec + durationSec + 5L) * 1000L,
+                1000,
+                "all subscribed assets resolved"
+        ));
+
+        newCoordinator.stop();
+        newStorage.closeAll();
+
+        // slug0 resumed in legacy file with strictly ONE market_discovered and NO daily split file
+        Path dailyFile0 = tempDir.resolve("polymarket/btc-updown-15m/2026-09-10/" + slug0 + ".jsonl.zst");
+        assertThat(Files.exists(dailyFile0)).isFalse();
+        List<String> lines0 = ZstdJsonlWriterTest.readAllZstdLines(legacyFile0);
+        assertThat(lines0).hasSize(3);
+        assertThat(lines0.stream().filter(l -> l.contains("\"type\":\"market_discovered\"")).count()).isEqualTo(1L);
+        assertThat(lines0.get(2)).contains("\"event_type\":\"last_trade_price\"");
+
+        // Brand-new markets slug1 and slug2 were written in daily yyyy-MM-dd directory
+        Path dailyFile1 = tempDir.resolve("polymarket/btc-updown-15m/2026-09-10/" + slug1 + ".jsonl.zst");
+        Path dailyFile2 = tempDir.resolve("polymarket/btc-updown-15m/2026-09-10/" + slug2 + ".jsonl.zst");
+        assertThat(Files.exists(dailyFile1)).isTrue();
+        assertThat(Files.exists(dailyFile2)).isTrue();
+        assertThat(Files.exists(tempDir.resolve("polymarket/btc-updown-15m/" + slug1 + ".jsonl.zst"))).isFalse();
+        assertThat(Files.exists(tempDir.resolve("polymarket/btc-updown-15m/" + slug2 + ".jsonl.zst"))).isFalse();
+
+        List<String> lines1 = ZstdJsonlWriterTest.readAllZstdLines(dailyFile1);
+        assertThat(lines1.stream().filter(l -> l.contains("\"type\":\"market_discovered\"")).count()).isEqualTo(1L);
+        assertThat(lines1).anyMatch(l -> l.contains("\"event_type\":\"book\""));
     }
 }

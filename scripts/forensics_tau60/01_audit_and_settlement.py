@@ -55,7 +55,7 @@ def main() -> None:
     price_glob = str(COLLECTOR_ROOT / "polymarket" / "price_crypto" / "btcusd" / "*.parquet")
     twap_glob = str(COLLECTOR_ROOT / "polymarket" / "price_crypto_twap_60s" / "btcusd" / "*.parquet")
 
-    market_files = sorted(glob.glob(str(clob_dir / "btc-updown-15m-*.parquet")))
+    market_files = sorted(glob.glob(str(clob_dir / "*" / "btc-updown-15m-*.parquet")))
     print(f"[01_audit] Found {len(market_files)} CLOB 15m market files.")
 
     # 1. Extract deduplicated monotonic PolyBolt price_crypto and twap_60s via DuckDB
@@ -102,7 +102,7 @@ def main() -> None:
                 CAST(server_ts AS BIGINT) AS server_ts,
                 event_code,
                 is_up
-            FROM read_parquet('{clob_dir}/btc-updown-15m-*.parquet', filename=true)
+            FROM read_parquet('{clob_dir}/*/btc-updown-15m-*.parquet', filename=true)
             WHERE event_code > 0
         )
         SELECT

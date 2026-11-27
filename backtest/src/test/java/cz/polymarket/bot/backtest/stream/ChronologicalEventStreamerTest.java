@@ -54,19 +54,17 @@ class ChronologicalEventStreamerTest {
             long baseMs = tStart * 1000L;
             String dateStr = "2026-08-01";
 
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+            Path pmFile = datasetService.getPolymarket15mFile("BTCUSDT", tStart);
             Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", dateStr);
             Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", dateStr);
             Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
             Path krakenFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile.getParent());
             Files.createDirectories(cryptoPriceFile.getParent());
             Files.createDirectories(twap60sFile.getParent());
             Files.createDirectories(spotFile.getParent());
             Files.createDirectories(krakenFile.getParent());
-
-            Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
 
             try (Connection conn = duckDb.openSession();
                  Statement stmt = conn.createStatement()) {
@@ -320,20 +318,18 @@ class ChronologicalEventStreamerTest {
             long endMs = tEnd * 1000L;
             String dateStr = "2026-08-01";
 
-            Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+            Path pmFile1 = datasetService.getPolymarket15mFile("BTCUSDT", tStart);
+            Path pmFile2 = datasetService.getPolymarket15mFile("BTCUSDT", tEnd);
             Path binanceSpotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", dateStr);
             Path coinbaseSpotFile = datasetService.getCoinbaseSpotTradesFile("BTCUSDT", dateStr);
             Path krakenSpotFile = datasetService.getKrakenSpotTradesFile("BTCUSDT", dateStr);
             Path krakenUsdtFile = datasetService.getKrakenSpotUsdtUsdTradesFile(dateStr);
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(binanceSpotFile.getParent());
             Files.createDirectories(coinbaseSpotFile.getParent());
             Files.createDirectories(krakenSpotFile.getParent());
             Files.createDirectories(krakenUsdtFile.getParent());
-
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
-            Path pmFile2 = pmDir.resolve("btc-updown-15m-" + tEnd + ".parquet");
 
             try (Connection conn = duckDb.openSession();
                  Statement stmt = conn.createStatement()) {

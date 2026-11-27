@@ -146,6 +146,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -n "$DATE_FILTER" ] && [[ ! "$DATE_FILTER" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    log_error "Date filter '$DATE_FILTER' must be in YYYY-MM-DD format."
+    exit 1
+fi
+
 if ! command -v "$DUCKDB_PATH" >/dev/null 2>&1; then
     log_error "DuckDB CLI ('$DUCKDB_PATH') was not found on PATH. Please install DuckDB."
     exit 1
@@ -560,25 +565,49 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Scan files using python for exact matching
+# Scan files using python for exact matching (supporting daily subdirectories and legacy flat -updown- files)
 python3 - << EOF > "$TEMP_FILE_LIST"
-import os, sys, fnmatch
+import os, sys, fnmatch, re, datetime
 
 target = "$TARGET_DIR_RESOLVED"
 date_filter = "$DATE_FILTER"
-stream_filter = "$STREAM_FILTER"
+stream_filter = "$STREAM_FILTER".lower()
 file_filter = "$FILE_FILTER"
 
+date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+updown_epoch_re = re.compile(r"-updown-[^-]+-([0-9]+)\.(?:jsonl\.zst|jsonl|zst)$", re.IGNORECASE)
+
+day_start = None
+day_end = None
+if date_filter:
+    day_start = int(datetime.datetime.strptime(date_filter + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
+    day_end = day_start + 86400
+
+matched = []
 for root, dirs, files in os.walk(target):
+    dirs[:] = sorted(
+        d for d in dirs
+        if d != ".duckdb_tmp" and (not date_filter or not date_dir_re.fullmatch(d) or d == date_filter)
+    )
     for f in files:
         if fnmatch.fnmatch(f, file_filter):
             full = os.path.join(root, f)
-            if date_filter and (date_filter not in f and date_filter not in full):
+            if date_filter:
+                date_ok = (date_filter in f) or (date_filter in full)
+                if not date_ok:
+                    m = updown_epoch_re.search(f)
+                    if m:
+                        epoch = int(m.group(1))
+                        date_ok = (day_start <= epoch < day_end)
+                if not date_ok:
+                    continue
+            if stream_filter and (stream_filter not in full.lower()):
                 continue
-            if stream_filter and (stream_filter not in full):
-                continue
-            size = os.path.getsize(full)
-            sys.stdout.write(f"{full}\t{size}\n")
+            matched.append((full, os.path.getsize(full)))
+
+matched.sort(key=lambda item: item[0])
+for full, size in matched:
+    sys.stdout.write(f"{full}\t{size}\n")
 EOF
 
 TOTAL_ARCHIVES=$(wc -l < "$TEMP_FILE_LIST" | tr -d ' ')
@@ -608,6 +637,13 @@ while IFS=$'\t' read -r src_path src_size; do
     rel_path="${src_path#"${TARGET_DIR_RESOLVED}/"}"
     size_mb=$(awk -v b="$src_size" 'BEGIN { printf "%.2f", b / (1024*1024) }')
 
+    stream_type=$(get_stream_type "$src_path")
+    if [ -z "$stream_type" ]; then
+        log_warn "  [$CURRENT_INDEX/$TOTAL_ARCHIVES] [WARN] Skipping unknown stream type: $rel_path ($size_mb MB)"
+        SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
+        continue
+    fi
+
     # Determine destination .parquet filename
     if [[ "$src_path" == *.jsonl.zst ]]; then
         dest_path="${src_path%.jsonl.zst}.parquet"
@@ -617,6 +653,19 @@ while IFS=$'\t' read -r src_path src_size; do
         dest_path="${src_path%.zst}.parquet"
     else
         dest_path="${src_path}.parquet"
+    fi
+
+    # Normalize Polymarket CLOB archives into yyyy-MM-dd/ even when converting legacy flat transition files
+    if [ "$stream_type" = "polymarket-clob-market" ]; then
+        src_parent_dir=$(dirname "$src_path")
+        src_parent_name=$(basename "$src_parent_dir")
+        if [[ ! "$src_parent_name" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            dest_stem=$(basename "$dest_path" .parquet)
+            if [[ "$dest_stem" =~ -([0-9]+)$ ]]; then
+                utc_date=$(python3 -c 'import datetime, sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%d"))' "${BASH_REMATCH[1]}")
+                dest_path="${src_parent_dir}/${utc_date}/$(basename "$dest_path")"
+            fi
+        fi
     fi
 
     # Check if target exists
@@ -630,22 +679,16 @@ while IFS=$'\t' read -r src_path src_size; do
         fi
     fi
 
-    stream_type=$(get_stream_type "$src_path")
-    if [ -z "$stream_type" ]; then
-        log_warn "  [$CURRENT_INDEX/$TOTAL_ARCHIVES] [WARN] Skipping unknown stream type: $rel_path ($size_mb MB)"
-        SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
-        continue
-    fi
-
     if [ "$DRY_RUN" = true ]; then
-        dest_base=$(basename "$dest_path")
-        log_warn "  [$CURRENT_INDEX/$TOTAL_ARCHIVES] [DRY-RUN] Would convert [$stream_type] $rel_path ($size_mb MB) -> $dest_base"
+        rel_dest="${dest_path#"${TARGET_DIR_RESOLVED}/"}"
+        log_warn "  [$CURRENT_INDEX/$TOTAL_ARCHIVES] [DRY-RUN] Would convert [$stream_type] $rel_path ($size_mb MB) -> $rel_dest"
         SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
         continue
     fi
 
     echo -ne "${COLOR_WHITE}  [$CURRENT_INDEX/$TOTAL_ARCHIVES] Converting [$stream_type] $rel_path ($size_mb MB)...${COLOR_RESET}"
 
+    mkdir -p "$(dirname "$dest_path")"
     temp_parquet_path="${dest_path}.tmp.parquet"
     rm -f "$temp_parquet_path"
 

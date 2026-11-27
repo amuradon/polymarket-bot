@@ -9,6 +9,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,11 +20,18 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages per-market Zstandard streaming JSONL files ({@code .jsonl.zst}) for Polymarket markets,
- * keeping each market's file open across its entire lifecycle (from discovery through resolution)
+ * partitioning archives into UTC daily subdirectories ({@code polymarket/<asset>-updown-<tf>/<yyyy-MM-dd>/})
+ * and keeping each market's file open across its entire lifecycle (from discovery through resolution)
  * with per-market lock isolation and zero-decode {@code byte[]} writing.
+ * <p>
+ * During deployment transitions from the legacy flat directory layout, any pre-existing archive in
+ * {@code polymarket/<asset>-updown-<tf>/<marketSlug>.jsonl.zst} is resumed in-place, while newly
+ * discovered markets are written into the daily {@code yyyy-MM-dd} subdirectory.
  */
 @ApplicationScoped
 public class PolymarketMarketStorageManager {
+
+    private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final Path polymarketDir;
     private final Map<String, ZstdJsonlWriter> marketWriters = new ConcurrentHashMap<>();
@@ -158,13 +169,78 @@ public class PolymarketMarketStorageManager {
     }
 
     /**
-     * Resolves the file path for a given market slug.
+     * Resolves the effective file path for a given market slug.
+     * <p>
+     * Prefers the UTC daily subdirectory path ({@code <polymarketDir>/<yyyy-MM-dd>/<marketSlug>.jsonl.zst}).
+     * If the daily archive does not yet exist but a pre-existing legacy flat archive
+     * ({@code <polymarketDir>/<marketSlug>.jsonl.zst}) is present on disk from before deployment,
+     * returns the legacy path so in-progress markets resume seamlessly in one continuous file.
      *
-     * @param marketSlug market slug
+     * @param marketSlug market slug (e.g. {@code btc-updown-15m-1789041600})
      * @return path to the market's {@code .jsonl.zst} file
      */
     public Path resolveMarketFilePath(String marketSlug) {
+        Path dailyPath = resolveDailyMarketFilePath(marketSlug);
+        if (Files.exists(dailyPath)) {
+            return dailyPath;
+        }
+        Path legacyPath = resolveLegacyMarketFilePath(marketSlug);
+        if (Files.exists(legacyPath)) {
+            return legacyPath;
+        }
+        return dailyPath;
+    }
+
+    /**
+     * Resolves the UTC daily subdirectory file path for a given market slug
+     * ({@code <polymarketDir>/<yyyy-MM-dd>/<marketSlug>.jsonl.zst}).
+     *
+     * @param marketSlug market slug ending with {@code -<epochSeconds>}
+     * @return daily subdirectory path for the market's {@code .jsonl.zst} file
+     */
+    public Path resolveDailyMarketFilePath(String marketSlug) {
+        String dateDir = extractUtcDateFromSlug(marketSlug);
+        return polymarketDir.resolve(dateDir).resolve(marketSlug + ".jsonl.zst");
+    }
+
+    /**
+     * Resolves the legacy flat file path for a given market slug
+     * ({@code <polymarketDir>/<marketSlug>.jsonl.zst}).
+     *
+     * @param marketSlug market slug
+     * @return legacy flat path for the market's {@code .jsonl.zst} file
+     */
+    public Path resolveLegacyMarketFilePath(String marketSlug) {
+        if (marketSlug == null || marketSlug.isBlank()) {
+            throw new IllegalArgumentException("Market slug cannot be null or blank");
+        }
         return polymarketDir.resolve(marketSlug + ".jsonl.zst");
+    }
+
+    /**
+     * Extracts the UTC {@code yyyy-MM-dd} date string from a market slug's trailing epoch timestamp
+     * (e.g. {@code btc-updown-15m-1789041600} -> {@code "2026-09-10"}).
+     *
+     * @param marketSlug market slug ending with {@code -<epochSeconds>}
+     * @return UTC date formatted as {@code yyyy-MM-dd}
+     */
+    public static String extractUtcDateFromSlug(String marketSlug) {
+        if (marketSlug == null || marketSlug.isBlank()) {
+            throw new IllegalArgumentException("Market slug cannot be null or blank");
+        }
+        int lastDash = marketSlug.lastIndexOf('-');
+        if (lastDash < 0 || lastDash == marketSlug.length() - 1) {
+            throw new IllegalArgumentException("Market slug must end with '-<epochSeconds>': " + marketSlug);
+        }
+        String epochPart = marketSlug.substring(lastDash + 1);
+        final long startSec;
+        try {
+            startSec = Long.parseLong(epochPart);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Market slug must end with numeric epoch seconds: " + marketSlug, e);
+        }
+        LocalDate utcDate = Instant.ofEpochSecond(startSec).atZone(ZoneOffset.UTC).toLocalDate();
+        return utcDate.format(UTC_DATE_FORMATTER);
     }
 
     /**
@@ -187,9 +263,14 @@ public class PolymarketMarketStorageManager {
                 return existing;
             }
             Path filePath = resolveMarketFilePath(marketSlug);
+            boolean resumingLegacy = polymarketDir.equals(filePath.getParent()) && Files.exists(filePath);
             ZstdJsonlWriter created = new ZstdJsonlWriter(filePath);
             marketWriters.put(marketSlug, created);
-            Log.infof("Opened Polymarket market stream file: %s", filePath);
+            if (resumingLegacy) {
+                Log.infof("Resuming in-progress legacy Polymarket market stream file: %s", filePath);
+            } else {
+                Log.infof("Opened Polymarket market stream file: %s", filePath);
+            }
             return created;
         }
     }

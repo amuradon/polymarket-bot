@@ -74,19 +74,17 @@ class BacktestEngineTest {
         long c2Start = BASE_START + 900L;
         long c3Start = BASE_START + 1800L;
 
-        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path pmFile1 = datasetService.getPolymarket15mFile("BTCUSDT", c1Start);
+        Path pmFile2 = datasetService.getPolymarket15mFile("BTCUSDT", c2Start);
+        Path pmFile3 = datasetService.getPolymarket15mFile("BTCUSDT", c3Start);
         Path cryptoPriceFile = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
         Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
         Path spotFile = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", "2026-08-01");
 
-        Files.createDirectories(pmDir);
+        Files.createDirectories(pmFile1.getParent());
         Files.createDirectories(cryptoPriceFile.getParent());
         Files.createDirectories(twap60sFile.getParent());
         Files.createDirectories(spotFile.getParent());
-
-        Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-        Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet");
-        Path pmFile3 = pmDir.resolve("btc-updown-15m-" + c3Start + ".parquet");
 
         try (Connection conn = duckDbSessionManager.openSession();
              Statement stmt = conn.createStatement()) {
@@ -281,17 +279,15 @@ class BacktestEngineTest {
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
             long c1Start = BASE_START;
-            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            long c2MissingTwapStart = BASE_START + 1800L;
+            Path pmFile1 = localDataset.getPolymarket15mFile("BTCUSDT", c1Start);
+            Path pmFile2 = localDataset.getPolymarket15mFile("BTCUSDT", c2MissingTwapStart);
             Path cryptoPriceFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
             Path twap60sFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(cryptoPriceFile.getParent());
             Files.createDirectories(twap60sFile.getParent());
-
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-            long c2MissingTwapStart = BASE_START + 1800L;
-            Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2MissingTwapStart + ".parquet");
 
             try (Connection conn = localDuckDb.openSession();
                  Statement stmt = conn.createStatement()) {
@@ -385,15 +381,13 @@ class BacktestEngineTest {
             CollectorParquetDatasetService localDataset = new CollectorParquetDatasetService(collectorDir.toString(), localDuckDb);
 
             long c1Start = BASE_START;
-            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path pmFile1 = localDataset.getPolymarket15mFile("BTCUSDT", c1Start);
             Path cryptoPriceFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-01");
             Path twap60sFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(cryptoPriceFile.getParent());
             Files.createDirectories(twap60sFile.getParent());
-
-            Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
 
             try (Connection conn = localDuckDb.openSession();
                  Statement stmt = conn.createStatement()) {
@@ -526,14 +520,15 @@ class BacktestEngineTest {
             String prevDate = "2026-07-31";
             String curDate = "2026-08-01";
 
-            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path pmFile1 = localDataset.getPolymarket15mFile("BTCUSDT", c1Start);
+            Path pmFile2 = localDataset.getPolymarket15mFile("BTCUSDT", c2Start);
             Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
             Path prevCbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", prevDate);
             Path curCbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", curDate);
             Path curKrFile = localDataset.getKrakenSpotTradesFile("BTCUSDT", curDate);
             Path curBnFile = localDataset.getBinanceSpotAggTradesFile("BTCUSDT", curDate);
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(twapFile.getParent());
             Files.createDirectories(prevCbFile.getParent());
             Files.createDirectories(curKrFile.getParent());
@@ -569,12 +564,12 @@ class BacktestEngineTest {
                         "(" + ((c2Start + 900L) * 1000L) + "::UBIGINT, 3::UBIGINT, 'btcusd'::VARCHAR, 'chainlink'::VARCHAR, 60200.0::DOUBLE, '60200.0'::VARCHAR, 60::INT, " + ((c2Start + 900L) * 1000L) + "::UBIGINT)" +
                         ") AS t(ts, seq, symbol, source, twap_price, full_accuracy_twap_price, window_seconds, twap_timestamp)) TO '" + normTwap + "' (FORMAT PARQUET)");
 
-                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), List.of(
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
                         ClobRow.discovered(c1Start * 1000L - 5000L, "101", "102"),
                         ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
                         ClobRow.bookLevel(c1Start * 1000L + 2000L, c1Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
                 ));
-                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet"), List.of(
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile2, List.of(
                         ClobRow.discovered(c2Start * 1000L - 5000L, "201", "202"),
                         ClobRow.bookLevel(c2Start * 1000L + 2000L, c2Start * 1000L + 1990L, 4, true, true, 4900, 300.0),
                         ClobRow.bookLevel(c2Start * 1000L + 2000L, c2Start * 1000L + 1990L, 4, true, false, 5100, 300.0)
@@ -668,9 +663,9 @@ class BacktestEngineTest {
             long baseMs = c1Start * 1000L;
             String curDate = "2026-08-01";
 
-            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path pmFile1 = localDataset.getPolymarket15mFile("BTCUSDT", c1Start);
             Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(twapFile.getParent());
 
             try (Connection conn = localDuckDb.openSession();
@@ -683,7 +678,7 @@ class BacktestEngineTest {
 
                 // At +1000ms ask is 0.50 (50 shares). Strategy submits FAK BUY @ 0.50.
                 // At +1080ms (< +1196ms speed-bump match time!), maker cancels 0.50 ask and reprices to 0.56!
-                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), List.of(
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, List.of(
                         ClobRow.discovered(baseMs - 5000L, "101", "102"),
                         ClobRow.bookLevel(baseMs + 1000L, baseMs + 990L, 4, true, true, 4800, 100.0),
                         ClobRow.bookLevel(baseMs + 1000L, baseMs + 990L, 4, true, false, 5000, 50.0),
@@ -767,12 +762,13 @@ class BacktestEngineTest {
             long c2EndMs = (c2Start + 900L) * 1000L;
             String curDate = "2026-08-01";
 
-            Path pmDir = localDataset.getPolymarket15mDir("BTCUSDT");
+            Path pmFile1 = localDataset.getPolymarket15mFile("BTCUSDT", c1Start);
+            Path pmFile2 = localDataset.getPolymarket15mFile("BTCUSDT", c2Start);
             Path cryptoFile = localDataset.getPolymarketCryptoPriceFile("BTCUSDT", curDate);
             Path twapFile = localDataset.getPolymarketCryptoTwap60sFile("BTCUSDT", curDate);
             Path cbFile = localDataset.getCoinbaseSpotTradesFile("BTCUSDT", curDate);
 
-            Files.createDirectories(pmDir);
+            Files.createDirectories(pmFile1.getParent());
             Files.createDirectories(cryptoFile.getParent());
             Files.createDirectories(twapFile.getParent());
             Files.createDirectories(cbFile.getParent());
@@ -939,8 +935,8 @@ class BacktestEngineTest {
                         + ") AS t(trade_timestamp, symbol, trade_id, side, price, qty, timestamp)) TO '"
                         + cbFile.toAbsolutePath().toString().replace('\\', '/') + "' (FORMAT PARQUET)");
 
-                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet"), c1ClobRows);
-                TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + c2Start + ".parquet"), c2ClobRows);
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile1, c1ClobRows);
+                TypedClobParquetTestHelper.writeParquet(stmt, pmFile2, c2ClobRows);
             }
 
             OraclePulseLockStrategy btStrategy = new OraclePulseLockStrategy(cfg);
@@ -1097,10 +1093,11 @@ class BacktestEngineTest {
         assertThat(allSkipped.totalMarkets()).isEqualTo(3);
 
         long day2Start = BASE_START + 86_400L;
-        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path pmFileDay2 = datasetService.getPolymarket15mFile("BTCUSDT", day2Start);
         Path cryptoPriceDay2 = datasetService.getPolymarketCryptoPriceFile("BTCUSDT", "2026-08-02");
         Path twap60sDay2 = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-02");
         Path spotDay2 = datasetService.getBinanceSpotAggTradesFile("BTCUSDT", "2026-08-02");
+        Files.createDirectories(pmFileDay2.getParent());
         Files.createDirectories(cryptoPriceDay2.getParent());
         Files.createDirectories(twap60sDay2.getParent());
         Files.createDirectories(spotDay2.getParent());
@@ -1123,7 +1120,7 @@ class BacktestEngineTest {
                     "(NULL::UBIGINT, 1::BIGINT, 'BTCUSDT'::VARCHAR, 60000.0::DOUBLE, 5.0::DOUBLE, 1::BIGINT, 1::BIGINT, " + (day2Start * 1000L + 100L) + "::UBIGINT, false::BOOLEAN, true::BOOLEAN)" +
                     ") AS t(event_time, aggregate_trade_id, symbol, price, quantity, first_trade_id, last_trade_id, trade_time, is_buyer_maker, is_best_match)) TO '" + normSpot + "' (FORMAT PARQUET)");
 
-            TypedClobParquetTestHelper.writeParquet(stmt, pmDir.resolve("btc-updown-15m-" + day2Start + ".parquet"), List.of(
+            TypedClobParquetTestHelper.writeParquet(stmt, pmFileDay2, List.of(
                     ClobRow.discovered(day2Start * 1000L - 5000L, "401", "402"),
                     ClobRow.bookLevel((day2Start + 60L) * 1000L + 10L, (day2Start + 60L) * 1000L, 4, true, true, 4900, 300.0),
                     ClobRow.bookLevel((day2Start + 60L) * 1000L + 10L, (day2Start + 60L) * 1000L, 4, true, false, 5000, 300.0)

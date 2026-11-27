@@ -146,12 +146,11 @@ class BacktestResourceTest {
     @DisplayName("Full lifecycle: run backtest asynchronously, persist to DuckDB, compare DAY & MARKET curves, rename, query trades, and delete")
     void shouldExecutePersistCompareRenameAndDeleteBacktest() throws Exception {
         long tStart = 1785542400L; // 2026-08-01 00:00:00 UTC
-        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path pmFile = datasetService.getPolymarket15mFile("BTCUSDT", tStart);
         Path twapFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
-        Files.createDirectories(pmDir);
+        Files.createDirectories(pmFile.getParent());
         Files.createDirectories(twapFile.getParent());
 
-        Path pmFile = pmDir.resolve("btc-updown-15m-" + tStart + ".parquet");
         if (!Files.exists(pmFile) || !Files.exists(twapFile)) {
             try (Connection conn = datasetService.getDuckDbSessionManager().openSession();
                  Statement stmt = conn.createStatement()) {

@@ -152,10 +152,12 @@ if ($CleanAlreadyDownloaded) {
     [System.IO.File]::WriteAllLines($tempManifest, $manifestLines)
 
     $reconcilePy = @"
-import os, sys
+import os, sys, re, datetime
 
 remote_base = "$RemoteBaseDir"
 manifest_file = "/tmp/reconcile_manifest.tsv"
+utc_today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 if not os.path.exists(manifest_file):
     print("ERROR: Manifest missing")
@@ -191,9 +193,18 @@ for root, dirs, files in os.walk(remote_base):
 total_mb = sum(s for _, _, s in matched) / (1024 * 1024)
 print(f"RECONCILE\t{len(matched)}\t{total_mb:.2f}\t{len(mismatch)}\t{remote_total}")
 
+prune_dirs = set()
 with open("/tmp/reconcile_delete.txt", "w") as out:
     for _, full_path, _ in matched:
         out.write(full_path + "\n")
+        parent = os.path.dirname(full_path)
+        parent_name = os.path.basename(parent)
+        if date_dir_re.fullmatch(parent_name) and parent_name < utc_today:
+            prune_dirs.add(parent)
+
+with open("/tmp/reconcile_rmdir.txt", "w") as out:
+    for d in sorted(prune_dirs):
+        out.write(d + "\n")
 "@
 
     $tempPy = Join-Path $env:TEMP "reconcile_check_$([guid]::NewGuid().ToString()).py"
@@ -224,7 +235,7 @@ with open("/tmp/reconcile_delete.txt", "w") as out:
 
     if ($matchedCount -eq 0) {
         Write-Host "[INFO] No matching files to delete on EC2." -ForegroundColor Yellow
-        ssh @sshOptions $sshTarget "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh @sshOptions $sshTarget "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
         return
     }
 
@@ -232,12 +243,12 @@ with open("/tmp/reconcile_delete.txt", "w") as out:
         Write-Host "[DRY-RUN] Files that would be deleted from EC2:" -ForegroundColor Yellow
         ssh @sshOptions $sshTarget "head -n 20 /tmp/reconcile_delete.txt"
         Write-Host "[DRY-RUN] Completed. No files deleted." -ForegroundColor Yellow
-        ssh @sshOptions $sshTarget "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh @sshOptions $sshTarget "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
         return
     }
 
     Write-Host "[3/3] Deleting $matchedCount verified files on EC2..." -ForegroundColor Cyan
-    ssh @sshOptions $sshTarget "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+    ssh @sshOptions $sshTarget "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && cat /tmp/reconcile_rmdir.txt | xargs -r -d '\n' sudo rmdir --ignore-fail-on-non-empty 2>/dev/null || true; rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
     $dfOutput = ssh @sshOptions $sshTarget "df -h $RemoteBaseDir"
     Write-Host "      Files deleted successfully. Remote EBS volume status:`n$dfOutput" -ForegroundColor Green
     Write-Host "`nSUCCESS: Reclaimed $matchedMb MB across $matchedCount files on EC2." -ForegroundColor Green
@@ -273,10 +284,11 @@ Write-Host "=================================================================" -
 
 # 1. Generate remote manifest on EC2 via inline python script
 $remotePythonScript = @"
-import os, datetime
+import os, datetime, re
 
 date_str = "$Date"
 stream_filter = "$Stream".lower()
+date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 try:
     day_start = int(datetime.datetime.strptime(date_str + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
 except Exception as e:
@@ -292,6 +304,7 @@ if not os.path.exists(base):
 manifest_entries = []
 
 for root, dirs, files in os.walk(base):
+    dirs[:] = sorted(d for d in dirs if not date_dir_re.fullmatch(d) or d == date_str)
     for f in files:
         if not f.endswith(".jsonl.zst"):
             continue
@@ -429,7 +442,13 @@ Write-Host "      Verification 100% SUCCESSFUL: All $fileCount files match expec
 # 5. Delete verified files on EC2 if KeepRemoteFiles is not set
 if (-not $KeepRemoteFiles) {
     Write-Host "[CLEANUP] Deleting $fileCount verified files from EC2 ($RemoteBaseDir)..." -ForegroundColor Cyan
-    $deleteCmd = "cut -f1 /tmp/collector-$Date.manifest | sed 's|^|$RemoteBaseDir/|' | xargs -r -d '\n' sudo rm -f && rm -f /tmp/collector-$Date.manifest /tmp/collector-$Date.files"
+    $remoteBaseClean = $RemoteBaseDir.TrimEnd('/')
+    if ([string]::IsNullOrEmpty($remoteBaseClean)) { $remoteBaseClean = "/" }
+    $rmdirSnippet = ""
+    if ($Date -lt $utcToday) {
+        $rmdirSnippet = "&& cut -f1 /tmp/collector-$Date.manifest | xargs -r -d '\n' -n1 dirname | sort -u | grep -E '(^|/)$Date$' | sed 's|^|$remoteBaseClean/|' | xargs -r -d '\n' sudo rmdir --ignore-fail-on-non-empty 2>/dev/null || true"
+    }
+    $deleteCmd = "cut -f1 /tmp/collector-$Date.manifest | sed 's|^|$remoteBaseClean/|' | xargs -r -d '\n' sudo rm -f $rmdirSnippet; rm -f /tmp/collector-$Date.manifest /tmp/collector-$Date.files"
     ssh @sshOptions $sshTarget $deleteCmd
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Deletion command returned exit code $LASTEXITCODE. Please verify remote disk manually."

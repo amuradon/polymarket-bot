@@ -300,13 +300,11 @@ class BacktestLoggingTest {
         long c1Start = BASE_START;
         long c2MissingOpenStart = BASE_START + 1800L;
 
-        Path pmDir = datasetService.getPolymarket15mDir("BTCUSDT");
+        Path pmFile1 = datasetService.getPolymarket15mFile("BTCUSDT", c1Start);
+        Path pmFile2 = datasetService.getPolymarket15mFile("BTCUSDT", c2MissingOpenStart);
         Path twap60sFile = datasetService.getPolymarketCryptoTwap60sFile("BTCUSDT", "2026-08-01");
-        Files.createDirectories(pmDir);
+        Files.createDirectories(pmFile1.getParent());
         Files.createDirectories(twap60sFile.getParent());
-
-        Path pmFile1 = pmDir.resolve("btc-updown-15m-" + c1Start + ".parquet");
-        Path pmFile2 = pmDir.resolve("btc-updown-15m-" + c2MissingOpenStart + ".parquet");
 
         try (Connection conn = activeDuckDb.openSession();
              Statement stmt = conn.createStatement()) {

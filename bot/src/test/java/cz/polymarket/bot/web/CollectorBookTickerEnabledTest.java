@@ -107,6 +107,16 @@ class CollectorBookTickerEnabledTest {
         assertThat(zstFiles).hasSize(6);
         assertThat(Files.exists(root.resolve("binance/spot/BTCUSDT/aggTrades"))).isFalse();
 
+        // Polymarket CLOB archives must reside inside UTC daily yyyy-MM-dd subdirectories
+        List<Path> polymarketClobFiles = zstFiles.stream()
+                .filter(p -> p.toString().contains("btc-updown-15m"))
+                .toList();
+        assertThat(polymarketClobFiles).hasSize(2);
+        assertThat(polymarketClobFiles).allSatisfy(p -> {
+            assertThat(p.getParent().getFileName().toString()).matches("\\d{4}-\\d{2}-\\d{2}");
+            assertThat(p.getParent().getParent().getFileName().toString()).isEqualTo("btc-updown-15m");
+        });
+
         Path spotBookTickerDir = root.resolve("binance/spot/BTCUSDT/bookTicker");
         List<Path> spotFiles;
         try (Stream<Path> list = Files.list(spotBookTickerDir)) {

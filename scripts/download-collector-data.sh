@@ -221,10 +221,12 @@ EOF
     log_success "      Found $LOCAL_COUNT local .jsonl.zst files."
 
     cat << 'EOF' > "$TEMP_PY"
-import os, sys
+import os, sys, re, datetime
 
 remote_base = sys.argv[1]
 manifest_file = "/tmp/reconcile_manifest.tsv"
+utc_today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 if not os.path.exists(manifest_file):
     print("ERROR: Manifest missing")
@@ -260,9 +262,18 @@ for root, dirs, files in os.walk(remote_base):
 total_mb = sum(s for _, _, s in matched) / (1024 * 1024)
 print(f"RECONCILE\t{len(matched)}\t{total_mb:.2f}\t{len(mismatch)}\t{remote_total}")
 
+prune_dirs = set()
 with open("/tmp/reconcile_delete.txt", "w") as out:
     for _, full_path, _ in matched:
         out.write(full_path + "\n")
+        parent = os.path.dirname(full_path)
+        parent_name = os.path.basename(parent)
+        if date_dir_re.fullmatch(parent_name) and parent_name < utc_today:
+            prune_dirs.add(parent)
+
+with open("/tmp/reconcile_rmdir.txt", "w") as out:
+    for d in sorted(prune_dirs):
+        out.write(d + "\n")
 EOF
 
     log_info "[2/3] Comparing with EC2 EBS volume..."
@@ -290,7 +301,7 @@ EOF
 
     if [ "$MATCHED_COUNT" -eq 0 ]; then
         log_warn "[INFO] No matching files to delete on EC2."
-        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
         exit 0
     fi
 
@@ -298,12 +309,12 @@ EOF
         log_warn "[DRY-RUN] Files that would be deleted from EC2:"
         ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "head -n 20 /tmp/reconcile_delete.txt"
         log_warn "[DRY-RUN] Completed. No files deleted."
-        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+        ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
         exit 0
     fi
 
     log_info "[3/3] Deleting $MATCHED_COUNT verified files on EC2..."
-    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat /tmp/reconcile_delete.txt | xargs -r -d '\n' sudo rm -f && cat /tmp/reconcile_rmdir.txt | xargs -r -d '\n' sudo rmdir --ignore-fail-on-non-empty 2>/dev/null || true; rm -f /tmp/reconcile_manifest.tsv /tmp/reconcile_check.py /tmp/reconcile_delete.txt /tmp/reconcile_rmdir.txt"
     DF_OUTPUT=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "df -h '$REMOTE_BASE_DIR'")
     log_success "      Files deleted successfully. Remote EBS volume status:\n$DF_OUTPUT"
     log_success "\nSUCCESS: Reclaimed $MATCHED_MB MB across $MATCHED_COUNT files on EC2."
@@ -352,10 +363,11 @@ log_info "[1/4] Scanning EC2 for files belonging to $TARGET_DATE..."
 
 REMOTE_SCAN_CMD=$(cat << EOF
 python3 - << 'PYEOF'
-import os, sys, datetime
+import os, sys, datetime, re
 
 date_str = "$TARGET_DATE"
 stream_filter = "$STREAM_FILTER".lower()
+date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 try:
     day_start = int(datetime.datetime.strptime(date_str + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
 except Exception as e:
@@ -371,6 +383,7 @@ if not os.path.exists(base):
 manifest_entries = []
 
 for root, dirs, files in os.walk(base):
+    dirs[:] = sorted(d for d in dirs if not date_dir_re.fullmatch(d) or d == date_str)
     for f in files:
         if not f.endswith(".jsonl.zst"):
             continue
@@ -513,7 +526,13 @@ log_success "      Verification 100% SUCCESSFUL: All $FILE_COUNT files match exp
 
 if [ "$KEEP_REMOTE_FILES" = false ]; then
     log_info "[CLEANUP] Deleting $FILE_COUNT verified files from EC2 ($REMOTE_BASE_DIR)..."
-    DELETE_CMD="cut -f1 '/tmp/collector-$TARGET_DATE.manifest' | sed 's|^|$REMOTE_BASE_DIR/|' | xargs -r -d '\n' sudo rm -f && rm -f '/tmp/collector-$TARGET_DATE.manifest' '/tmp/collector-$TARGET_DATE.files'"
+    REMOTE_BASE_CLEAN="${REMOTE_BASE_DIR%/}"
+    [ -z "$REMOTE_BASE_CLEAN" ] && REMOTE_BASE_CLEAN="/"
+    RMDIR_SNIPPET=""
+    if [[ "$TARGET_DATE" < "$UTC_TODAY" ]]; then
+        RMDIR_SNIPPET="&& cut -f1 '/tmp/collector-$TARGET_DATE.manifest' | xargs -r -d '\n' -n1 dirname | sort -u | grep -E '(^|/)${TARGET_DATE}$' | sed 's|^|${REMOTE_BASE_CLEAN}/|' | xargs -r -d '\n' sudo rmdir --ignore-fail-on-non-empty 2>/dev/null || true"
+    fi
+    DELETE_CMD="cut -f1 '/tmp/collector-$TARGET_DATE.manifest' | sed 's|^|${REMOTE_BASE_CLEAN}/|' | xargs -r -d '\n' sudo rm -f ${RMDIR_SNIPPET}; rm -f '/tmp/collector-$TARGET_DATE.manifest' '/tmp/collector-$TARGET_DATE.files'"
     ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$DELETE_CMD"
     log_success "          Remote files successfully deleted from EC2."
 else

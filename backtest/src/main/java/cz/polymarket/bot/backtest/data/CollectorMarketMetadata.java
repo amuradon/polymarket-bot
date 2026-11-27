@@ -6,7 +6,7 @@ import java.nio.file.Path;
 
 /**
  * Metadata descriptor for a single 15-minute Polymarket binary market archive
- * captured by the data collector ({@code polymarket/<market>-updown-15m/<market>-updown-15m-<tStart>.parquet}).
+ * captured by the data collector ({@code polymarket/<market>-updown-15m/<yyyy-MM-dd>/<market>-updown-15m-<tStart>.parquet}).
  *
  * @param tStart candle start timestamp in epoch seconds UTC
  * @param tEnd candle end timestamp in epoch seconds UTC ({@code tStart + 900})

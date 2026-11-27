@@ -564,8 +564,10 @@ class StrategyTradingEngineTest {
         RuntimeCoordinator coordinator = new RuntimeCoordinator(collectorService, engine, paperRepository, stateStore);
 
         long nowSec = Instant.now().getEpochSecond();
+        long activeCycleStartSec = PolymarketMarketInfo.alignCycleStart(nowSec, 900L);
         String activeSlug = PolymarketMarketInfo.buildMarketSlug(
-                "BTCUSDT", "15m", PolymarketMarketInfo.alignCycleStart(nowSec, 900L));
+                "BTCUSDT", "15m", activeCycleStartSec);
+        String activeDateDir = PolymarketMarketStorageManager.extractUtcDateFromSlug(activeSlug);
 
         try {
             coordinator.startRuntime(nowSec);
@@ -634,7 +636,7 @@ class StrategyTradingEngineTest {
         // Inspect activeSlug .jsonl.zst archive: uniqueBookPayload MUST appear strictly ONCE (never duplicated by dual strategy legs!)
         // and Binance aggTrades directory MUST NOT exist!
         assertThat(Files.exists(collectorDir.resolve("binance/spot/BTCUSDT/aggTrades"))).isFalse();
-        Path activeMarketFile = collectorDir.resolve("polymarket/btc-updown-15m/" + activeSlug + ".jsonl.zst");
+        Path activeMarketFile = collectorDir.resolve("polymarket/btc-updown-15m/" + activeDateDir + "/" + activeSlug + ".jsonl.zst");
         assertThat(Files.exists(activeMarketFile)).isTrue();
         List<String> lines = ZstdJsonlWriterTest.readAllZstdLines(activeMarketFile);
         long bookCount = lines.stream().filter(l -> l.contains("\"size\":\"999\"")).count();

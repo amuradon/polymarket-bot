@@ -123,6 +123,33 @@ public class CollectorParquetDatasetService {
     }
 
     /**
+     * Resolves the UTC daily subdirectory for a 15-minute Polymarket market series
+     * (e.g. {@code <collectorDir>/polymarket/btc-updown-15m/2026-10-15}).
+     *
+     * @param symbol  trading symbol
+     * @param dateStr UTC date string ({@code yyyy-MM-dd})
+     * @return daily subdirectory path
+     */
+    public Path getPolymarket15mDayDir(String symbol, String dateStr) {
+        return getPolymarket15mDir(symbol).resolve(dateStr);
+    }
+
+    /**
+     * Resolves the 15-minute Polymarket market Parquet file path inside its UTC daily subdirectory
+     * (e.g. {@code <collectorDir>/polymarket/btc-updown-15m/2026-10-15/btc-updown-15m-1792022400.parquet}).
+     *
+     * @param symbol trading symbol
+     * @param tStart candle start timestamp in epoch seconds UTC
+     * @return Parquet file path
+     */
+    public Path getPolymarket15mFile(String symbol, long tStart) {
+        String assetLower = extractBaseAsset(symbol).toLowerCase(Locale.ROOT);
+        String dateStr = DATE_FORMATTER.format(Instant.ofEpochSecond(tStart));
+        return getPolymarket15mDayDir(symbol, dateStr)
+                .resolve(assetLower + "-updown-15m-" + tStart + ".parquet");
+    }
+
+    /**
      * Resolves the {@code polymarket/price_crypto} directory for the given symbol
      * (e.g. {@code <collectorDir>/polymarket/price_crypto/btcusd}).
      *
@@ -223,10 +250,11 @@ public class CollectorParquetDatasetService {
     }
 
     /**
-     * Discovers all 15-minute Polymarket market archives for the requested symbol and date range,
-     * sorted chronologically by candle start timestamp {@code tStart} ascending.
+     * Discovers all 15-minute Polymarket market archives for the requested symbol and date range
+     * across daily {@code yyyy-MM-dd} subdirectories, sorted chronologically by candle start timestamp
+     * {@code tStart} ascending.
      * <p>
-     * Discovery relies strictly on the {@code <asset>-updown-15m-<timestamp>.parquet} filename
+     * Discovery relies strictly on {@code <yyyy-MM-dd>/<asset>-updown-15m-<timestamp>.parquet} paths
      * without reading any Parquet metadata. Market metadata is read lazily via
      * {@link #loadMarketMetadata(CollectorMarketMetadata, BacktestEvent[])} when each market is processed.
      *
@@ -251,31 +279,56 @@ public class CollectorParquetDatasetService {
         String filePrefix = assetLower + "-updown-15m-";
         String fileSuffix = ".parquet";
 
-        long minStartEpoch = (startDate != null && !startDate.isBlank())
-                ? LocalDate.parse(startDate.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond()
+        LocalDate startLocalDate = (startDate != null && !startDate.isBlank())
+                ? LocalDate.parse(startDate.trim())
+                : null;
+        LocalDate endLocalDate = (endDate != null && !endDate.isBlank())
+                ? LocalDate.parse(endDate.trim())
+                : null;
+
+        long minStartEpoch = startLocalDate != null
+                ? startLocalDate.atStartOfDay(ZoneOffset.UTC).toEpochSecond()
                 : Long.MIN_VALUE;
-        long maxStartEpoch = (endDate != null && !endDate.isBlank())
-                ? LocalDate.parse(endDate.trim()).plusDays(1).atStartOfDay(ZoneOffset.UTC).toEpochSecond() - 1L
+        long maxStartEpoch = endLocalDate != null
+                ? endLocalDate.plusDays(1).atStartOfDay(ZoneOffset.UTC).toEpochSecond() - 1L
                 : Long.MAX_VALUE;
 
         record CandidateFile(long tStart, Path path) {}
         List<CandidateFile> candidates = new ArrayList<>();
 
-        try (Stream<Path> stream = Files.list(marketDir)) {
-            stream.filter(Files::isRegularFile).forEach(path -> {
-                String name = path.getFileName().toString();
-                if (name.startsWith(filePrefix) && name.endsWith(fileSuffix)) {
-                    String epochPart = name.substring(filePrefix.length(), name.length() - fileSuffix.length());
-                    try {
-                        long tStart = Long.parseLong(epochPart);
-                        if (tStart >= minStartEpoch && tStart <= maxStartEpoch) {
-                            candidates.add(new CandidateFile(tStart, path));
-                        }
-                    } catch (NumberFormatException e) {
-                        Log.warnf("Skipping market file with invalid epoch timestamp in filename: %s", path);
-                    }
+        try (Stream<Path> dayDirs = Files.list(marketDir)) {
+            Iterable<Path> dirIter = dayDirs::iterator;
+            for (Path dayDir : dirIter) {
+                if (!Files.isDirectory(dayDir)) {
+                    continue;
                 }
-            });
+                LocalDate dirDate = parseDateDirectoryName(dayDir);
+                if (dirDate == null) {
+                    continue;
+                }
+                if (startLocalDate != null && dirDate.isBefore(startLocalDate)) {
+                    continue;
+                }
+                if (endLocalDate != null && dirDate.isAfter(endLocalDate)) {
+                    continue;
+                }
+                try (Stream<Path> files = Files.list(dayDir)) {
+                    files.filter(Files::isRegularFile).forEach(path -> {
+                        String name = path.getFileName().toString();
+                        if (name.startsWith(filePrefix) && name.endsWith(fileSuffix)) {
+                            String epochPart = name.substring(filePrefix.length(), name.length() - fileSuffix.length());
+                            try {
+                                long tStart = Long.parseLong(epochPart);
+                                if (tStart >= minStartEpoch && tStart <= maxStartEpoch) {
+                                    candidates.add(new CandidateFile(tStart, path));
+                                }
+                            } catch (NumberFormatException e) {
+                                Log.warnf("Skipping market file with invalid epoch timestamp in filename: %s", path);
+                            }
+                        }
+                    });
+                }
+            }
         } catch (IOException e) {
             Log.warnf("Failed to list collector market directory %s: %s", marketDir, e.getMessage());
             return List.of();
@@ -362,7 +415,7 @@ public class CollectorParquetDatasetService {
 
     /**
      * Resolves the inclusive earliest and latest UTC dates available for the specified symbol
-     * purely from {@code <asset>-updown-15m-<epoch>.parquet} filenames.
+     * purely from {@code <yyyy-MM-dd>/<asset>-updown-15m-<epoch>.parquet} paths.
      *
      * @param symbol trading symbol (e.g. {@code "BTCUSDT"})
      * @return optional {@link DateBounds}, or empty if no market files exist
@@ -382,27 +435,35 @@ public class CollectorParquetDatasetService {
         int count = 0;
         Set<String> days = new HashSet<>();
 
-        try (Stream<Path> stream = Files.list(marketDir)) {
-            Iterable<Path> files = stream::iterator;
-            for (Path path : files) {
-                if (!Files.isRegularFile(path)) {
+        try (Stream<Path> dayDirs = Files.list(marketDir)) {
+            Iterable<Path> dirIter = dayDirs::iterator;
+            for (Path dayDir : dirIter) {
+                if (!Files.isDirectory(dayDir) || parseDateDirectoryName(dayDir) == null) {
                     continue;
                 }
-                String name = path.getFileName().toString();
-                if (name.startsWith(filePrefix) && name.endsWith(fileSuffix)) {
-                    String epochPart = name.substring(filePrefix.length(), name.length() - fileSuffix.length());
-                    try {
-                        long tStart = Long.parseLong(epochPart);
-                        if (tStart < minEpoch) {
-                            minEpoch = tStart;
+                try (Stream<Path> stream = Files.list(dayDir)) {
+                    Iterable<Path> files = stream::iterator;
+                    for (Path path : files) {
+                        if (!Files.isRegularFile(path)) {
+                            continue;
                         }
-                        if (tStart > maxEpoch) {
-                            maxEpoch = tStart;
+                        String name = path.getFileName().toString();
+                        if (name.startsWith(filePrefix) && name.endsWith(fileSuffix)) {
+                            String epochPart = name.substring(filePrefix.length(), name.length() - fileSuffix.length());
+                            try {
+                                long tStart = Long.parseLong(epochPart);
+                                if (tStart < minEpoch) {
+                                    minEpoch = tStart;
+                                }
+                                if (tStart > maxEpoch) {
+                                    maxEpoch = tStart;
+                                }
+                                days.add(DATE_FORMATTER.format(Instant.ofEpochSecond(tStart)));
+                                count++;
+                            } catch (NumberFormatException ignored) {
+                                // Ignore malformed filenames
+                            }
                         }
-                        days.add(DATE_FORMATTER.format(Instant.ofEpochSecond(tStart)));
-                        count++;
-                    } catch (NumberFormatException ignored) {
-                        // Ignore malformed filenames
                     }
                 }
             }
@@ -417,6 +478,22 @@ public class CollectorParquetDatasetService {
         String minDate = DATE_FORMATTER.format(Instant.ofEpochSecond(minEpoch));
         String maxDate = DATE_FORMATTER.format(Instant.ofEpochSecond(maxEpoch));
         return Optional.of(new DateBounds(minDate, maxDate, count, days.size()));
+    }
+
+    private static LocalDate parseDateDirectoryName(Path dir) {
+        Path fileName = dir.getFileName();
+        if (fileName == null) {
+            return null;
+        }
+        String name = fileName.toString();
+        if (name.length() != 10) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(name);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /**
