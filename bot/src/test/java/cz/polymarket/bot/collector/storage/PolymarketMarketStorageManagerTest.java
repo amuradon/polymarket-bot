@@ -14,8 +14,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link PolymarketMarketStorageManager} verifying UTC daily subdirectory partitioning
- * across timeframes ({@code 15m} and {@code 5m}), fail-fast slug validation, and safe deployment
- * continuity when resuming in-progress legacy flat files.
+ * across timeframes ({@code 15m} and {@code 5m}), restart-append into daily archives, and fail-fast
+ * slug validation.
  */
 class PolymarketMarketStorageManagerTest {
 
@@ -61,46 +61,34 @@ class PolymarketMarketStorageManagerTest {
     }
 
     @Test
-    void shouldResumeExistingLegacyFlatFileAcrossDeploymentWhileCreatingNewMarketsInDailySubdirectory() throws Exception {
-        long activeStartSec = Instant.parse("2026-11-27T16:45:00Z").getEpochSecond();
-        long nextStartSec = Instant.parse("2026-11-27T17:00:00Z").getEpochSecond();
-        String legacySlug = "btc-updown-15m-" + activeStartSec;
-        String newSlug = "btc-updown-15m-" + nextStartSec;
+    void shouldAppendToExistingDailyArchiveAcrossRestarts() throws Exception {
+        long startSec = Instant.parse("2026-11-27T16:45:00Z").getEpochSecond();
+        String slug = "btc-updown-15m-" + startSec;
 
-        Path legacyFile = tempDir.resolve("polymarket/btc-updown-15m/" + legacySlug + ".jsonl.zst");
-        try (ZstdJsonlWriter legacyWriter = new ZstdJsonlWriter(legacyFile)) {
-            legacyWriter.writePolymarketEvent(activeStartSec * 1000L, "market_discovered", "{\"slug\":\"" + legacySlug + "\"}");
-            legacyWriter.writePolymarketEvent(activeStartSec * 1000L + 100L, "clob", "{\"event_type\":\"book\"}");
-        }
+        PolymarketMarketStorageManager storage1 = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        assertThat(storage1.marketArchiveExists(slug)).isFalse();
+        storage1.recordMarketEvent(slug, startSec * 1000L, "market_discovered", "{\"slug\":\"" + slug + "\"}");
+        storage1.recordMarketEvent(slug, startSec * 1000L + 100L, "clob", "{\"event_type\":\"book\"}");
+        storage1.closeAll();
 
-        PolymarketMarketStorageManager storage = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
-
-        // Pre-existing legacy file is detected and resumed in-place
-        assertThat(storage.marketArchiveExists(legacySlug)).isTrue();
-        assertThat(storage.resolveMarketFilePath(legacySlug)).isEqualTo(legacyFile);
-        storage.recordMarketEventBytes(
-                legacySlug,
-                activeStartSec * 1000L + 5000L,
+        PolymarketMarketStorageManager storage2 = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        assertThat(storage2.marketArchiveExists(slug)).isTrue();
+        storage2.recordMarketEventBytes(
+                slug,
+                startSec * 1000L + 5000L,
                 "clob",
                 "{\"event_type\":\"last_trade_price\"}".getBytes(StandardCharsets.UTF_8)
         );
+        storage2.closeAll();
 
-        // Brand-new market not present in legacy layout is written to daily yyyy-MM-dd directory
-        assertThat(storage.marketArchiveExists(newSlug)).isFalse();
-        Path expectedNewDailyFile = tempDir.resolve("polymarket/btc-updown-15m/2026-11-27/" + newSlug + ".jsonl.zst");
-        assertThat(storage.resolveMarketFilePath(newSlug)).isEqualTo(expectedNewDailyFile);
-        storage.recordMarketEvent(newSlug, nextStartSec * 1000L, "market_discovered", "{\"slug\":\"" + newSlug + "\"}");
+        Path dailyFile = tempDir.resolve("polymarket/btc-updown-15m/2026-11-27/" + slug + ".jsonl.zst");
+        assertThat(Files.isRegularFile(dailyFile)).isTrue();
 
-        storage.closeAll();
-
-        assertThat(Files.exists(tempDir.resolve("polymarket/btc-updown-15m/2026-11-27/" + legacySlug + ".jsonl.zst"))).isFalse();
-        assertThat(Files.exists(expectedNewDailyFile)).isTrue();
-
-        List<String> legacyLines = ZstdJsonlWriterTest.readAllZstdLines(legacyFile);
-        assertThat(legacyLines).hasSize(3);
-        assertThat(legacyLines.get(0)).contains("\"type\":\"market_discovered\"");
-        assertThat(legacyLines.get(1)).contains("\"event_type\":\"book\"");
-        assertThat(legacyLines.get(2)).contains("\"event_type\":\"last_trade_price\"");
+        List<String> lines = ZstdJsonlWriterTest.readAllZstdLines(dailyFile);
+        assertThat(lines).hasSize(3);
+        assertThat(lines.get(0)).contains("\"type\":\"market_discovered\"");
+        assertThat(lines.get(1)).contains("\"event_type\":\"book\"");
+        assertThat(lines.get(2)).contains("\"event_type\":\"last_trade_price\"");
     }
 
     @Test
@@ -110,7 +98,7 @@ class PolymarketMarketStorageManagerTest {
         assertThatThrownBy(() -> storage.resolveMarketFilePath("btc-updown-15m"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("numeric epoch seconds");
-        assertThatThrownBy(() -> storage.resolveDailyMarketFilePath("invalidslug"))
+        assertThatThrownBy(() -> storage.resolveMarketFilePath("invalidslug"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("-<epochSeconds>");
         assertThatThrownBy(() -> PolymarketMarketStorageManager.extractUtcDateFromSlug(" "))

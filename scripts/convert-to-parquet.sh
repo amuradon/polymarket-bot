@@ -565,9 +565,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Scan files using python for exact matching (supporting daily subdirectories and legacy flat -updown- files)
+# Scan files using python for exact matching across daily subdirectories
 python3 - << EOF > "$TEMP_FILE_LIST"
-import os, sys, fnmatch, re, datetime
+import os, sys, fnmatch, re
 
 target = "$TARGET_DIR_RESOLVED"
 date_filter = "$DATE_FILTER"
@@ -575,13 +575,6 @@ stream_filter = "$STREAM_FILTER".lower()
 file_filter = "$FILE_FILTER"
 
 date_dir_re = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-updown_epoch_re = re.compile(r"-updown-[^-]+-([0-9]+)\.(?:jsonl\.zst|jsonl|zst)$", re.IGNORECASE)
-
-day_start = None
-day_end = None
-if date_filter:
-    day_start = int(datetime.datetime.strptime(date_filter + " 00:00:00+0000", "%Y-%m-%d %H:%M:%S%z").timestamp())
-    day_end = day_start + 86400
 
 matched = []
 for root, dirs, files in os.walk(target):
@@ -592,15 +585,8 @@ for root, dirs, files in os.walk(target):
     for f in files:
         if fnmatch.fnmatch(f, file_filter):
             full = os.path.join(root, f)
-            if date_filter:
-                date_ok = (date_filter in f) or (date_filter in full)
-                if not date_ok:
-                    m = updown_epoch_re.search(f)
-                    if m:
-                        epoch = int(m.group(1))
-                        date_ok = (day_start <= epoch < day_end)
-                if not date_ok:
-                    continue
+            if date_filter and (date_filter not in f and date_filter not in full):
+                continue
             if stream_filter and (stream_filter not in full.lower()):
                 continue
             matched.append((full, os.path.getsize(full)))
@@ -653,19 +639,6 @@ while IFS=$'\t' read -r src_path src_size; do
         dest_path="${src_path%.zst}.parquet"
     else
         dest_path="${src_path}.parquet"
-    fi
-
-    # Normalize Polymarket CLOB archives into yyyy-MM-dd/ even when converting legacy flat transition files
-    if [ "$stream_type" = "polymarket-clob-market" ]; then
-        src_parent_dir=$(dirname "$src_path")
-        src_parent_name=$(basename "$src_parent_dir")
-        if [[ ! "$src_parent_name" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            dest_stem=$(basename "$dest_path" .parquet)
-            if [[ "$dest_stem" =~ -([0-9]+)$ ]]; then
-                utc_date=$(python3 -c 'import datetime, sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%d"))' "${BASH_REMATCH[1]}")
-                dest_path="${src_parent_dir}/${utc_date}/$(basename "$dest_path")"
-            fi
-        fi
     fi
 
     # Check if target exists

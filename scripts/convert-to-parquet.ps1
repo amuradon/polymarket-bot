@@ -520,18 +520,7 @@ $allFiles = @(Get-ChildItem -Path $resolvedTargetDir -Recurse -File -Filter $Fil
 
 $files = $allFiles
 if ($Date) {
-    $dayStart = [DateTimeOffset]::ParseExact($Date, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUnixTimeSeconds()
-    $dayEnd = $dayStart + 86400L
-    $files = @($files | Where-Object {
-        if ($_.Name -like "*$Date*" -or $_.FullName -like "*$Date*") {
-            return $true
-        }
-        if ($_.Name -match '-updown-[^-]+-(\d+)\.(?:jsonl\.zst|jsonl|zst)$') {
-            $ep = [int64]$Matches[1]
-            return ($ep -ge $dayStart -and $ep -lt $dayEnd)
-        }
-        return $false
-    })
+    $files = @($files | Where-Object { $_.Name -like "*$Date*" -or $_.FullName -like "*$Date*" })
 }
 if ($Stream) {
     $files = @($files | Where-Object { $_.FullName -like "*$Stream*" })
@@ -598,20 +587,6 @@ try {
             $destPath = $srcPath.Substring(0, $srcPath.Length - 4) + ".parquet"
         } else {
             $destPath = $srcPath + ".parquet"
-        }
-
-        # Normalize Polymarket CLOB archives into yyyy-MM-dd/ even when converting legacy flat transition files
-        if ($streamType -eq "polymarket-clob-market") {
-            $srcParentDir = Split-Path -Parent $srcPath
-            $srcParentName = Split-Path -Leaf $srcParentDir
-            if ($srcParentName -notmatch '^\d{4}-\d{2}-\d{2}$') {
-                $destLeaf = Split-Path -Leaf $destPath
-                $destStem = [System.IO.Path]::GetFileNameWithoutExtension($destLeaf)
-                if ($destStem -match '-(\d+)$') {
-                    $utcDate = [DateTimeOffset]::FromUnixTimeSeconds([int64]$Matches[1]).UtcDateTime.ToString("yyyy-MM-dd")
-                    $destPath = Join-Path (Join-Path $srcParentDir $utcDate) $destLeaf
-                }
-            }
         }
 
         # Check if target .parquet already exists
