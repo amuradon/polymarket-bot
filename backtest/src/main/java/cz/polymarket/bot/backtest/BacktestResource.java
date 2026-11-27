@@ -51,7 +51,6 @@ public class BacktestResource {
     private final String defaultStrategy;
     private final String defaultStartDate;
     private final double defaultInitialCapital;
-    private final double defaultLatencyFactor;
     private final long defaultOrderGatewayDelayMs;
     private final ExchangeDelays defaultExchangeDelays;
 
@@ -64,7 +63,6 @@ public class BacktestResource {
      * @param defaultStrategy            default trading strategy name configured in application properties
      * @param defaultStartDate           default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
      * @param defaultInitialCapital      default initial capital in USD
-     * @param defaultLatencyFactor       default order execution latency multiplier
      * @param defaultOrderGatewayDelayMs default Polymarket CLOB order gateway round-trip delay in milliseconds
      * @param binanceDelayMs             default simulated Binance one-way feed delay in milliseconds
      * @param krakenDelayMs              default simulated Kraken one-way feed delay in milliseconds
@@ -81,8 +79,6 @@ public class BacktestResource {
             String defaultStartDate,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultInitialCapital,
-            @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double defaultLatencyFactor,
             @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
             long defaultOrderGatewayDelayMs,
             @ConfigProperty(name = "backtest.binance.delay-ms", defaultValue = "100")
@@ -116,7 +112,6 @@ public class BacktestResource {
                 ? defaultStartDate.trim()
                 : "2026-10-12";
         this.defaultInitialCapital = defaultInitialCapital;
-        this.defaultLatencyFactor = defaultLatencyFactor;
         this.defaultOrderGatewayDelayMs = defaultOrderGatewayDelayMs;
         this.defaultExchangeDelays = new ExchangeDelays(binanceDelayMs, krakenDelayMs, coinbaseDelayMs);
     }
@@ -171,7 +166,6 @@ public class BacktestResource {
                 "BTCUSDT",
                 defaultStartDate,
                 defaultInitialCapital,
-                defaultLatencyFactor,
                 defaultOrderGatewayDelayMs,
                 defaultExchangeDelays,
                 strategies,
@@ -293,14 +287,6 @@ public class BacktestResource {
                     .build();
         }
 
-        if (request.latencyFactor() != null && (Double.isNaN(request.latencyFactor()) || Double.isInfinite(request.latencyFactor()) || request.latencyFactor() < 0.0)) {
-            Log.errorf("Cannot start backtest run: latencyFactor must be non-negative (received %s)",
-                    request.latencyFactor());
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "latencyFactor must be non-negative"))
-                    .build();
-        }
-
         if (request.orderGatewayDelayMs() != null && request.orderGatewayDelayMs() < 0L) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "orderGatewayDelayMs must be non-negative"))
@@ -337,7 +323,6 @@ public class BacktestResource {
                 resolvedEndDate,
                 Boolean.TRUE.equals(request.fullRange()),
                 request.initialCapital(),
-                request.latencyFactor(),
                 request.orderGatewayDelayMs(),
                 request.binanceDelayMs(),
                 request.krakenDelayMs(),
@@ -519,7 +504,6 @@ public class BacktestResource {
             String defaultSymbol,
             String defaultStartDate,
             double defaultInitialCapital,
-            double defaultLatencyFactor,
             long defaultOrderGatewayDelayMs,
             ExchangeDelays defaultExchangeDelays,
             List<StrategyMetadata> strategies,

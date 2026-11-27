@@ -286,19 +286,17 @@
 
             <fieldset class="fieldset">
                 <legend>Parametry backtest enginu</legend>
-                <div class="form-grid-5">
+                <div class="form-grid-2">
                     <div class="form-field">
                         <label for="run-capital">Initial balance ($)</label>
                         <input type="number" id="run-capital" class="input" step="100" min="1" required>
                     </div>
                     <div class="form-field">
-                        <label for="run-latency-factor">Latency factor</label>
-                        <input type="number" id="run-latency-factor" class="input" step="0.1" min="0" required>
-                    </div>
-                    <div class="form-field">
                         <label for="run-gateway-delay">Order gateway (ms)</label>
                         <input type="number" id="run-gateway-delay" class="input" step="5" min="0" required>
                     </div>
+                </div>
+                <div class="form-grid-3 mt-8">
                     <div class="form-field">
                         <label for="run-binance-delay">Binance delay (ms)</label>
                         <input type="number" id="run-binance-delay" class="input" step="5" min="0" required>

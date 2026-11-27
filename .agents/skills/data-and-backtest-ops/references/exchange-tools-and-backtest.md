@@ -46,7 +46,6 @@ python3 download_coinbase_trades.py --symbol BTCUSD --from 2026-11-24 --to 2026-
 | `polymarket.backtest.initial-capital` | `10000.0` | Starting capital in USD |
 | `polymarket.backtest.from` | `2026-10-12` | Inclusive start date (`yyyy-MM-dd`) |
 | `polymarket.backtest.to` | Current UTC date | Inclusive end date (`yyyy-MM-dd`) |
-| `polymarket.backtest.latency-factor` | `1.0` | Scaling multiplier for simulated CLOB execution delay |
 | `polymarket.backtest.order-gateway-delay-ms` | `220` | Two-phase Polymarket CLOB `POST /order` delay in ms (`~196 ms` speed bump + `~24 ms` return) |
 | `polymarket.backtest.collector-dir` | `/data/polymarket/collector` | Root directory of converted Parquet archives |
 | `polymarket.backtest.history-db-path` | `${user.home}/.local/share/polymarket-bot/backtest-history.duckdb` | Persistent DuckDB database on internal NVMe SSD |

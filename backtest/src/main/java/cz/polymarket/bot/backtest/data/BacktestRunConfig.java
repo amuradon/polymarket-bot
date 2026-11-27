@@ -24,7 +24,6 @@ import java.util.TreeMap;
  * @param startDate           inclusive UTC start date ({@code yyyy-MM-dd})
  * @param endDate             inclusive UTC end date ({@code yyyy-MM-dd})
  * @param initialCapital      initial account capital in USD
- * @param latencyFactor       simulated order latency scaling factor
  * @param orderGatewayDelayMs simulated Polymarket CLOB {@code POST /order} gateway round-trip delay in milliseconds
  * @param binanceDelayMs      simulated Binance one-way feed delay in milliseconds
  * @param krakenDelayMs       simulated Kraken one-way feed delay in milliseconds
@@ -38,7 +37,6 @@ public record BacktestRunConfig(
         String startDate,
         String endDate,
         double initialCapital,
-        double latencyFactor,
         long orderGatewayDelayMs,
         long binanceDelayMs,
         long krakenDelayMs,
@@ -63,7 +61,6 @@ public record BacktestRunConfig(
                 strategyName,
                 symbol,
                 initialCapital,
-                latencyFactor,
                 orderGatewayDelayMs,
                 binanceDelayMs,
                 krakenDelayMs,
@@ -74,14 +71,13 @@ public record BacktestRunConfig(
 
     /**
      * Computes a deterministic 64-character lowercase SHA-256 hash over strategy name, symbol,
-     * initial capital, latency factor, CLOB order gateway delay, exchange feed delays, and normalized
+     * initial capital, CLOB order gateway delay, exchange feed delays, and normalized
      * strategy parameters. Date bounds and human-readable labels are intentionally excluded so incremental
      * runs over new dates automatically resolve to the same configuration hash.
      *
      * @param strategyName        evaluated trading strategy name
      * @param symbol              evaluated cryptocurrency symbol
      * @param initialCapital      initial account capital in USD
-     * @param latencyFactor       simulated order latency scaling factor
      * @param orderGatewayDelayMs simulated CLOB order gateway delay in milliseconds
      * @param binanceDelayMs      simulated Binance one-way feed delay in milliseconds
      * @param krakenDelayMs       simulated Kraken one-way feed delay in milliseconds
@@ -93,7 +89,6 @@ public record BacktestRunConfig(
             String strategyName,
             String symbol,
             double initialCapital,
-            double latencyFactor,
             long orderGatewayDelayMs,
             long binanceDelayMs,
             long krakenDelayMs,
@@ -112,7 +107,6 @@ public record BacktestRunConfig(
         canonicalPayload.put("strategyName", strategyName != null ? strategyName.trim() : "");
         canonicalPayload.put("symbol", symbol != null ? symbol.trim().toUpperCase(Locale.ROOT) : "");
         canonicalPayload.put("initialCapital", canonicalDouble(initialCapital));
-        canonicalPayload.put("latencyFactor", canonicalDouble(latencyFactor));
         canonicalPayload.put("orderGatewayDelayMs", orderGatewayDelayMs);
         canonicalPayload.put("binanceDelayMs", binanceDelayMs);
         canonicalPayload.put("krakenDelayMs", krakenDelayMs);

@@ -386,7 +386,6 @@ class BacktestLoggingTest {
                 "TestBatchStrategy",
                 "2026-08-01",
                 10000.0,
-                1.0,
                 220L,
                 100L,
                 50L,
@@ -397,7 +396,7 @@ class BacktestLoggingTest {
     private static BacktestRunRequest runRequest(String strategyName, String symbol) {
         return new BacktestRunRequest(
                 null, strategyName, symbol, "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, 220L, null, null, null, null, false, false
+                false, 10000.0, 220L, null, null, null, null, false, false
         );
     }
 

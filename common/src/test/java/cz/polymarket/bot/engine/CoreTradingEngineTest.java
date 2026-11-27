@@ -72,7 +72,7 @@ class CoreTradingEngineTest {
                 1_000.0
         );
 
-        SimulatedClobExecutionEngine simClob = new SimulatedClobExecutionEngine(book, 220L, 1.0);
+        SimulatedClobExecutionEngine simClob = new SimulatedClobExecutionEngine(book, 220L);
         assertThat(simClob.computeOutboundMatchDelayMs()).isEqualTo(196L);
         assertThat(simClob.computeReturnReportDelayMs()).isEqualTo(24L);
 
@@ -147,7 +147,7 @@ class CoreTradingEngineTest {
                 "BTC",
                 60.0 // Tight $60 initial capital!
         );
-        SimulatedClobExecutionEngine simClob = new SimulatedClobExecutionEngine(book, 0L, 0.0);
+        SimulatedClobExecutionEngine simClob = new SimulatedClobExecutionEngine(book, 0L);
         simClob.bind(null, engine::onExecutionReport);
         engine.setExecutionGateway(simClob);
         engine.beginCandleCycle(1_800_000L, 1_800_900L, 70_000.0, "UP-1", "DOWN-1", false);

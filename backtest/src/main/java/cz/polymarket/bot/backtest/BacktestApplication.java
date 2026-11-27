@@ -39,7 +39,6 @@ public class BacktestApplication implements QuarkusApplication {
     private final String startDate;
     private final Optional<String> endDate;
     private final double initialCapital;
-    private final double latencyFactor;
     private final long orderGatewayDelayMs;
 
     /**
@@ -52,7 +51,6 @@ public class BacktestApplication implements QuarkusApplication {
      * @param startDate           inclusive start date in {@code yyyy-MM-dd} format (default {@code 2026-10-12})
      * @param endDate             optional inclusive end date in {@code yyyy-MM-dd} format (defaults to current UTC date if omitted)
      * @param initialCapital      initial account balance in USD (default {@code 10000.0})
-     * @param latencyFactor       simulated order execution latency factor (default {@code 1.0})
      * @param orderGatewayDelayMs simulated Polymarket CLOB order gateway round-trip delay in milliseconds (default {@code 220})
      */
     @Inject
@@ -70,8 +68,6 @@ public class BacktestApplication implements QuarkusApplication {
             Optional<String> endDate,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double initialCapital,
-            @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double latencyFactor,
             @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
             long orderGatewayDelayMs) {
         if (backtestEngine == null) {
@@ -85,7 +81,6 @@ public class BacktestApplication implements QuarkusApplication {
         this.startDate = startDate;
         this.endDate = endDate != null ? endDate : Optional.empty();
         this.initialCapital = initialCapital;
-        this.latencyFactor = latencyFactor;
         this.orderGatewayDelayMs = orderGatewayDelayMs;
     }
 
@@ -130,7 +125,6 @@ public class BacktestApplication implements QuarkusApplication {
                     resolvedEndDate,
                     false,
                     initialCapital,
-                    latencyFactor,
                     orderGatewayDelayMs,
                     null,
                     null,

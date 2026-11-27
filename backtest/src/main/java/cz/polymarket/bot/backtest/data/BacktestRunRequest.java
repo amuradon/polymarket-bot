@@ -14,7 +14,6 @@ import java.util.Map;
  * @param endDate               optional end date filter in ISO format (yyyy-MM-dd)
  * @param fullRange             when true, evaluates the full available dataset date range for the requested symbol
  * @param initialCapital        optional initial starting capital in USD (defaults to configured initial capital)
- * @param latencyFactor         optional multiplier for simulated order execution latency (defaults to configured latency factor)
  * @param orderGatewayDelayMs   optional base Polymarket CLOB {@code POST /order} gateway round-trip delay in ms (default {@code 220})
  * @param binanceDelayMs        optional simulated Binance one-way feed delay in ms
  * @param krakenDelayMs         optional simulated Kraken one-way feed delay in ms
@@ -45,9 +44,6 @@ public record BacktestRunRequest(
 
         @Schema(description = "Optional initial capital in USD", examples = "10000.0")
         Double initialCapital,
-
-        @Schema(description = "Optional latency scaling factor (default 1.0)", examples = "1.0")
-        Double latencyFactor,
 
         @Schema(description = "Optional Polymarket CLOB order gateway round-trip delay in milliseconds (default 220)", examples = "220")
         Long orderGatewayDelayMs,

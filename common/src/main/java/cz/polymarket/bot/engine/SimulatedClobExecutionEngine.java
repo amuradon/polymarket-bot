@@ -71,33 +71,26 @@ public class SimulatedClobExecutionEngine implements OrderExecutionGateway {
 
     private final PolymarketOrderBook orderBook;
     private final long orderGatewayDelayMs;
-    private final double latencyFactor;
     private DelayedActionScheduler scheduler;
     private SimulatedReportSink reportSink;
 
     /**
-     * Constructs a {@link SimulatedClobExecutionEngine} with explicit gateway delay and latency multiplier.
+     * Constructs a {@link SimulatedClobExecutionEngine} with explicit gateway delay.
      *
      * @param orderBook           shared L2 order book
      * @param orderGatewayDelayMs base {@code POST /order} round-trip delay in milliseconds ({@code >= 0})
-     * @param latencyFactor       scaling multiplier applied to delays ({@code >= 0.0})
      */
     public SimulatedClobExecutionEngine(
             PolymarketOrderBook orderBook,
-            long orderGatewayDelayMs,
-            double latencyFactor) {
+            long orderGatewayDelayMs) {
         if (orderBook == null) {
             throw new IllegalArgumentException("orderBook cannot be null");
         }
         if (orderGatewayDelayMs < 0L) {
             throw new IllegalArgumentException("orderGatewayDelayMs must be non-negative");
         }
-        if (!Double.isFinite(latencyFactor) || latencyFactor < 0.0) {
-            throw new IllegalArgumentException("latencyFactor must be finite and non-negative");
-        }
         this.orderBook = orderBook;
         this.orderGatewayDelayMs = orderGatewayDelayMs;
-        this.latencyFactor = latencyFactor;
     }
 
     /**
@@ -121,26 +114,17 @@ public class SimulatedClobExecutionEngine implements OrderExecutionGateway {
     }
 
     /**
-     * Returns the configured latency scaling factor.
-     *
-     * @return latency factor
-     */
-    public double getLatencyFactor() {
-        return latencyFactor;
-    }
-
-    /**
      * Computes the outbound delay in milliseconds from order submission to atomic CLOB matching.
      *
      * @return outbound match delay in milliseconds
      */
     public long computeOutboundMatchDelayMs() {
-        if (latencyFactor <= 0.0 || orderGatewayDelayMs <= 0L) {
+        if (orderGatewayDelayMs <= 0L) {
             return 0L;
         }
         long observedWsMs = orderBook.getLastObservedOneWayLatencyMs();
         long extraCongestionMs = Math.max(0L, observedWsMs - BASELINE_WS_ONE_WAY_MS);
-        return Math.max(0L, Math.round((OUTBOUND_MATCH_DELAY_SHARE * orderGatewayDelayMs + extraCongestionMs) * latencyFactor));
+        return Math.max(0L, Math.round(OUTBOUND_MATCH_DELAY_SHARE * orderGatewayDelayMs) + extraCongestionMs);
     }
 
     /**
@@ -149,11 +133,11 @@ public class SimulatedClobExecutionEngine implements OrderExecutionGateway {
      * @return return report delay in milliseconds
      */
     public long computeReturnReportDelayMs() {
-        if (latencyFactor <= 0.0 || orderGatewayDelayMs <= 0L) {
+        if (orderGatewayDelayMs <= 0L) {
             return 0L;
         }
         double returnShare = 1.0 - OUTBOUND_MATCH_DELAY_SHARE;
-        return Math.max(0L, Math.round(returnShare * orderGatewayDelayMs * latencyFactor));
+        return Math.max(0L, Math.round(returnShare * orderGatewayDelayMs));
     }
 
     @Override

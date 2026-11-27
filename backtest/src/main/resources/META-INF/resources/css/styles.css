@@ -810,14 +810,8 @@ dialog::backdrop {
     gap: 12px;
 }
 
-.form-grid-5 {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-}
-
 @media (max-width: 760px) {
-    .form-grid-2, .form-grid-3, .form-grid-5 {
+    .form-grid-2, .form-grid-3 {
         grid-template-columns: 1fr;
     }
 }

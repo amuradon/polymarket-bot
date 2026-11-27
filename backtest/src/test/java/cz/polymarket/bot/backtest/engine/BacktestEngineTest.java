@@ -218,7 +218,6 @@ class BacktestEngineTest {
                 "OraclePulseLockStrategy",
                 "2026-08-01",
                 10000.0,
-                1.0,
                 220L,
                 100L,
                 50L,
@@ -240,8 +239,8 @@ class BacktestEngineTest {
     @DisplayName("Should run backtest over collector Parquet archives, record per-market equity points, and persist to DuckDB")
     void shouldRunBacktestOverCollectorParquetArchives() {
         BacktestRunRequest req = new BacktestRunRequest(
-                "PM Only 1.5x", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.5, 220L, null, null, null, null, false, false);
+                "PM Only 330ms", "PolymarketOnlyStrategy", "BTCUSDT",
+                "2026-08-01", "2026-08-01", false, 10000.0, 330L, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -264,7 +263,7 @@ class BacktestEngineTest {
 
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false);
+                "2026-08-01", "2026-08-01", false, 10000.0, 220L, null, null, null, null, false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
         assertThat(result).isNotNull();
@@ -351,7 +350,6 @@ class BacktestEngineTest {
                         "UtterParameciumStrategy",
                         "2026-08-01",
                         10000.0,
-                        1.0,
                         220L,
                         100L,
                         50L,
@@ -362,7 +360,7 @@ class BacktestEngineTest {
                         null,
                         new BacktestRunRequest(
                                 null, "utter_paramecium", "BTCUSDT", "2026-08-01", "2026-08-01",
-                                false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
+                                false, 10000.0, 220L, null, null, null, null, false, false),
                         BacktestProgressListener.NOOP
                 );
 
@@ -493,7 +491,6 @@ class BacktestEngineTest {
                         "UtterParameciumStrategy",
                         "2026-08-01",
                         10000.0,
-                        1.0,
                         220L,
                         100L,
                         50L,
@@ -502,10 +499,10 @@ class BacktestEngineTest {
 
                 BacktestResult windowedRes = engine.runBacktest(null, new BacktestRunRequest(
                         null, windowedStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                        false, 10000.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
                 BacktestResult fullRes = engine.runBacktest(null, new BacktestRunRequest(
                         null, fullReplayStrategy.getName(), "BTCUSDT", "2026-08-01", "2026-08-01",
-                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                        false, 10000.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
 
                 assertThat(windowedRes.trades()).isNotEmpty();
                 assertThat(windowedRes.trades()).hasSameSizeAs(fullRes.trades());
@@ -638,7 +635,6 @@ class BacktestEngineTest {
                         stateful.getName(),
                         curDate,
                         10000.0,
-                        1.0,
                         220L,
                         100L,
                         50L,
@@ -647,7 +643,7 @@ class BacktestEngineTest {
 
                 localEngine.runBacktest(null, new BacktestRunRequest(
                         null, stateful.getName(), "BTCUSDT", curDate, curDate,
-                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                        false, 10000.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
 
                 // reset() was called strictly ONCE at backtest start, NEVER between candle 1 and candle 2!
                 assertThat(resetCount.get()).isEqualTo(1);
@@ -739,7 +735,6 @@ class BacktestEngineTest {
                         sniper.getName(),
                         curDate,
                         10000.0,
-                        1.0,
                         220L,
                         100L,
                         50L,
@@ -748,7 +743,7 @@ class BacktestEngineTest {
 
                 BacktestResult res = engine.runBacktest(null, new BacktestRunRequest(
                         null, sniper.getName(), "BTCUSDT", curDate, curDate,
-                        false, 10000.0, 1.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
+                        false, 10000.0, 220L, null, null, null, null, false, false), BacktestProgressListener.NOOP);
 
                 assertThat(res.trades()).isEmpty();
                 assertThat(reports).hasSize(1);
@@ -804,7 +799,7 @@ class BacktestEngineTest {
                     "BTCUSDT",
                     10_000.0
             );
-            SimulatedClobExecutionEngine paperSim = new SimulatedClobExecutionEngine(paperBook, 220L, 1.0);
+            SimulatedClobExecutionEngine paperSim = new SimulatedClobExecutionEngine(paperBook, 220L);
             paperEngine.setExecutionGateway(paperSim);
 
             PriorityQueue<TimedAction> paperQueue = new PriorityQueue<>();
@@ -960,7 +955,6 @@ class BacktestEngineTest {
                         btStrategy.getName(),
                         curDate,
                         10_000.0,
-                        1.0,
                         220L,
                         100L,
                         50L,
@@ -969,7 +963,7 @@ class BacktestEngineTest {
 
                 BacktestResult btResult = btEngine.runBacktest(null, new BacktestRunRequest(
                         null, btStrategy.getName(), "BTCUSDT", curDate, curDate,
-                        false, 10_000.0, 1.0, 220L, 100L, 50L, 50L, null, false, false), BacktestProgressListener.NOOP);
+                        false, 10_000.0, 220L, 100L, 50L, 50L, null, false, false), BacktestProgressListener.NOOP);
 
                 List<TradeRecord> paperTrades = paperEngine.getCompletedTradesHistory();
                 assertThat(btResult.trades()).isNotEmpty();
@@ -983,7 +977,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when unknown strategy requested")
     void shouldThrowWhenUnknownStrategy() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null, null, false, false);
+                null, "UnknownStrategy", "BTCUSDT", null, null, false, 10000.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown strategy");
@@ -993,7 +987,7 @@ class BacktestEngineTest {
     @DisplayName("Should throw IllegalArgumentException when no market rows available")
     void shouldThrowWhenNoMarketRowsAvailable() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null, null, false, false);
+                null, "UtterParameciumStrategy", "UNKNOWN_SYMBOL", null, null, false, 10000.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("No market rows available");
@@ -1003,7 +997,7 @@ class BacktestEngineTest {
     @DisplayName("Should resolve default strategy, default startDate, current UTC endDate, default capital, and support fullRange & strategyParams")
     void shouldResolveDefaultParametersWhenOmitted() {
         BacktestRunRequest req = new BacktestRunRequest(
-                null, null, "BTCUSDT", null, null, true, null, null, null, null, null, null,
+                null, null, "BTCUSDT", null, null, true, null, null, null, null, null,
                 Map.of("minTauMs", 3000L), false, false);
         BacktestResult result = backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP);
 
@@ -1021,7 +1015,7 @@ class BacktestEngineTest {
     void shouldThrowWhenStartDateIsAfterEndDate() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "UtterParameciumStrategy", "BTCUSDT", "2026-08-10", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null, null, false, false);
+                false, 10000.0, null, null, null, null, null, false, false);
         assertThatThrownBy(() -> backtestEngine.runBacktest(null, req, BacktestProgressListener.NOOP))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("startDate must not be after endDate");
@@ -1032,7 +1026,7 @@ class BacktestEngineTest {
     void shouldCancelBacktestCooperatively() {
         BacktestRunRequest req = new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT", "2026-08-01", "2026-08-01",
-                false, 10000.0, 1.0, null, null, null, null, null, false, false);
+                false, 10000.0, null, null, null, null, null, false, false);
         BacktestProgressListener cancelledListener = new BacktestProgressListener() {
             @Override
             public boolean isCancelled() {
@@ -1053,28 +1047,28 @@ class BacktestEngineTest {
 
         assertThatThrownBy(() -> new BacktestEngine(
                 localDataset, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, -1L,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, -1L,
                 100L, 50L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("defaultOrderGatewayDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
                 localDataset, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 220L,
                 -1L, 50L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("binanceDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
                 localDataset, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 220L,
                 100L, -1L, 50L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("krakenDelayMs");
 
         assertThatThrownBy(() -> new BacktestEngine(
                 localDataset, paramService, calc, historyRepository,
-                "UtterParameciumStrategy", "2026-08-01", 10000.0, 1.0, 220L,
+                "UtterParameciumStrategy", "2026-08-01", 10000.0, 220L,
                 100L, 50L, -1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("coinbaseDelayMs");
@@ -1085,7 +1079,7 @@ class BacktestEngineTest {
     void shouldAutoMergeNewDaysSkipExistingOverwriteAndForceNewRun() throws Exception {
         BacktestResult run1 = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 "Incremental Test", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-01", false, 10000.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(run1.mergedIntoExisting()).isFalse();
         assertThat(run1.skippedDays()).isZero();
@@ -1094,7 +1088,7 @@ class BacktestEngineTest {
 
         BacktestResult allSkipped = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-01", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-01", false, 10000.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(allSkipped.runId()).isEqualTo(run1.runId());
         assertThat(allSkipped.label()).isEqualTo("Incremental Test");
@@ -1138,7 +1132,7 @@ class BacktestEngineTest {
 
         BacktestResult merged = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-01", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, false, false),
+                "2026-08-01", "2026-08-02", false, 10000.0, 220L, null, null, null, null, false, false),
                 BacktestProgressListener.NOOP);
         assertThat(merged.runId()).isEqualTo(run1.runId());
         assertThat(merged.label()).isEqualTo("Incremental Test");
@@ -1151,7 +1145,7 @@ class BacktestEngineTest {
 
         BacktestResult overwritten = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 null, "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, false, true),
+                "2026-08-02", "2026-08-02", false, 10000.0, 220L, null, null, null, null, false, true),
                 BacktestProgressListener.NOOP);
         assertThat(overwritten.runId()).isEqualTo(run1.runId());
         assertThat(overwritten.mergedIntoExisting()).isTrue();
@@ -1161,7 +1155,7 @@ class BacktestEngineTest {
 
         BacktestResult forced = backtestEngine.runBacktest(null, new BacktestRunRequest(
                 "Forced Run", "PolymarketOnlyStrategy", "BTCUSDT",
-                "2026-08-02", "2026-08-02", false, 10000.0, 1.0, 220L, null, null, null, null, true, false),
+                "2026-08-02", "2026-08-02", false, 10000.0, 220L, null, null, null, null, true, false),
                 BacktestProgressListener.NOOP);
         assertThat(forced.runId()).isNotEqualTo(run1.runId());
         assertThat(forced.label()).isEqualTo("Forced Run");

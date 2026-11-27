@@ -80,7 +80,6 @@ public class BacktestEngine {
     private final String defaultStrategy;
     private final String defaultStartDate;
     private final double defaultCapital;
-    private final double defaultLatencyFactor;
     private final long defaultOrderGatewayDelayMs;
     private final ExchangeDelays defaultExchangeDelays;
 
@@ -94,7 +93,6 @@ public class BacktestEngine {
      * @param defaultStrategy            default trading strategy name configured in application properties
      * @param defaultStartDate           default inclusive start date ({@code yyyy-MM-dd}) configured in application properties
      * @param defaultCapital             default initial trading balance in USD
-     * @param defaultLatencyFactor       default multiplier for simulated order execution latency (default {@code 1.0})
      * @param defaultOrderGatewayDelayMs default Polymarket CLOB order gateway round-trip delay in ms (default {@code 220})
      * @param binanceDelayMs             default simulated one-way feed delay for Binance in ms (default {@code 100})
      * @param krakenDelayMs              default simulated one-way feed delay for Kraken in ms (default {@code 50})
@@ -112,8 +110,6 @@ public class BacktestEngine {
             String defaultStartDate,
             @ConfigProperty(name = "polymarket.backtest.initial-capital", defaultValue = "10000.0")
             double defaultCapital,
-            @ConfigProperty(name = "polymarket.backtest.latency-factor", defaultValue = "1.0")
-            double defaultLatencyFactor,
             @ConfigProperty(name = "polymarket.backtest.order-gateway-delay-ms", defaultValue = "220")
             long defaultOrderGatewayDelayMs,
             @ConfigProperty(name = "backtest.binance.delay-ms", defaultValue = "100")
@@ -154,7 +150,6 @@ public class BacktestEngine {
                 ? defaultStartDate.trim()
                 : "2026-10-12";
         this.defaultCapital = defaultCapital;
-        this.defaultLatencyFactor = defaultLatencyFactor >= 0.0 ? defaultLatencyFactor : 1.0;
         this.defaultOrderGatewayDelayMs = defaultOrderGatewayDelayMs;
     }
 
@@ -223,12 +218,6 @@ public class BacktestEngine {
             throw new IllegalArgumentException("initialCapital must be greater than 0");
         }
 
-        double resolvedLatencyFactor = (request.latencyFactor() != null) ? request.latencyFactor() : defaultLatencyFactor;
-        if (Double.isNaN(resolvedLatencyFactor) || Double.isInfinite(resolvedLatencyFactor) || resolvedLatencyFactor < 0.0) {
-            Log.errorf("Cannot start backtest: latencyFactor must be non-negative (received %s)", resolvedLatencyFactor);
-            throw new IllegalArgumentException("latencyFactor must be non-negative");
-        }
-
         long resolvedOrderGatewayDelayMs = (request.orderGatewayDelayMs() != null)
                 ? request.orderGatewayDelayMs()
                 : defaultOrderGatewayDelayMs;
@@ -293,7 +282,6 @@ public class BacktestEngine {
                 activeStrategy.getName(),
                 sym,
                 capital,
-                resolvedLatencyFactor,
                 resolvedOrderGatewayDelayMs,
                 effectiveDelays.binanceDelayMs(),
                 effectiveDelays.krakenDelayMs(),
@@ -314,9 +302,9 @@ public class BacktestEngine {
                 : (merging ? existingMatch.get().label() : activeStrategy.getName() + " (" + resolvedStartDate + " .. " + resolvedEndDate + ")");
 
         if (Log.isInfoEnabled()) {
-            Log.infof("Starting continuous backtest: runId=%s, merging=%s, overwriteExisting=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, latencyFactor=%.2f, orderGatewayDelayMs=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
+            Log.infof("Starting continuous backtest: runId=%s, merging=%s, overwriteExisting=%s, label=%s, strategy=%s, symbol=%s, startDate=%s, endDate=%s, initialCapital=%.2f, orderGatewayDelayMs=%d, delaysMs=[binance=%d, kraken=%d, coinbase=%d]",
                     targetRunId, merging, overwriteExisting, resolvedLabel, activeStrategy.getName(), sym,
-                    resolvedStartDate, resolvedEndDate, capital, resolvedLatencyFactor, resolvedOrderGatewayDelayMs,
+                    resolvedStartDate, resolvedEndDate, capital, resolvedOrderGatewayDelayMs,
                     effectiveDelays.binanceDelayMs(), effectiveDelays.krakenDelayMs(), effectiveDelays.coinbaseDelayMs());
         }
 
@@ -416,8 +404,7 @@ public class BacktestEngine {
         );
         SimulatedClobExecutionEngine executionEngine = new SimulatedClobExecutionEngine(
                 orderBook,
-                resolvedOrderGatewayDelayMs,
-                resolvedLatencyFactor
+                resolvedOrderGatewayDelayMs
         );
         coreEngine.setExecutionGateway(executionEngine);
 
@@ -664,7 +651,6 @@ public class BacktestEngine {
                 resolvedStartDate,
                 resolvedEndDate,
                 capital,
-                resolvedLatencyFactor,
                 resolvedOrderGatewayDelayMs,
                 effectiveDelays.binanceDelayMs(),
                 effectiveDelays.krakenDelayMs(),

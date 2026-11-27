@@ -349,7 +349,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
         this.coreEngine.setTradeLifecycleListener(new EngineTradeLifecycleBridge());
 
         this.clobBookSink = new EngineClobBookSink();
-        this.paperExecutionEngine = new SimulatedClobExecutionEngine(sharedOrderBook, this.orderLatencyMs, 1.0);
+        this.paperExecutionEngine = new SimulatedClobExecutionEngine(sharedOrderBook, this.orderLatencyMs);
         this.paperExecutionEngine.bind(this::schedulePaperSimulatedAction, this::onPaperSimulatedReport);
         this.paperExecutionGateway = new OrderExecutionGateway() {
             @Override

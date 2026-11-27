@@ -114,16 +114,6 @@ class BacktestResourceTest {
                 .contentType(ContentType.JSON)
                 .body(Map.of(
                         "strategyName", "UtterParameciumStrategy",
-                        "latencyFactor", -1.0))
-                .when().post("/api/backtest/run")
-                .then()
-                .statusCode(400)
-                .body("error", containsString("latencyFactor must be non-negative"));
-
-        given()
-                .contentType(ContentType.JSON)
-                .body(Map.of(
-                        "strategyName", "UtterParameciumStrategy",
                         "orderGatewayDelayMs", -10))
                 .when().post("/api/backtest/run")
                 .then()
@@ -188,7 +178,6 @@ class BacktestResourceTest {
                         "startDate", "2026-08-01",
                         "endDate", "2026-08-01",
                         "initialCapital", 5000.0,
-                        "latencyFactor", 1.0,
                         "strategyParams", Map.of("minEdgeMc", 25)
                 ))
                 .when().post("/api/backtest/run")
@@ -226,7 +215,6 @@ class BacktestResourceTest {
                         "startDate", "2026-08-01",
                         "endDate", "2026-08-01",
                         "initialCapital", 5000.0,
-                        "latencyFactor", 1.0,
                         "strategyParams", Map.of("minEdgeMc", 25)
                 ))
                 .when().post("/api/backtest/run")
@@ -256,7 +244,6 @@ class BacktestResourceTest {
                         "startDate", "2026-08-01",
                         "endDate", "2026-08-01",
                         "initialCapital", 5000.0,
-                        "latencyFactor", 1.0,
                         "strategyParams", Map.of("minEdgeMc", 25),
                         "forceNewRun", true
                 ))
@@ -337,7 +324,7 @@ class BacktestResourceTest {
     void shouldReturnNullTotalMarketsWithoutNpeForQueuedJob() {
         BacktestJob queuedJob = new BacktestJob(new BacktestRunRequest(
                 null, "OraclePulseLockStrategy", "BTCUSDT", "2026-10-12", "2026-11-21",
-                false, 10000.0, 1.0, 220L, 100L, 50L, 50L, Map.of(), false, false
+                false, 10000.0, 220L, 100L, 50L, 50L, Map.of(), false, false
         ));
 
         BacktestJobManager mockJobManager = Mockito.mock(BacktestJobManager.class);
@@ -351,7 +338,6 @@ class BacktestResourceTest {
                 "OraclePulseLockStrategy",
                 "2026-10-12",
                 10000.0,
-                1.0,
                 220L,
                 100L,
                 50L,

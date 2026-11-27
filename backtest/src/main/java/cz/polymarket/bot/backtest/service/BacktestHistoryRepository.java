@@ -152,7 +152,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 String insertRunSql = """
                         INSERT INTO backtest_runs (
                             run_id, label, strategy_name, symbol, start_date, end_date,
-                            initial_capital, latency_factor, order_gateway_delay_ms,
+                            initial_capital, order_gateway_delay_ms,
                             binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
                             strategy_params_json, strategy_overrides_json,
                             total_markets, total_trades, winning_trades, losing_trades,
@@ -160,7 +160,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
                             profit_factor, max_drawdown_usd, max_drawdown_pct, expected_value_per_trade,
                             sharpe_ratio, sortino_ratio, brier_score, final_balance,
                             execution_time_utc, duration_ms, config_hash
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """;
                 try (PreparedStatement ps = conn.prepareStatement(insertRunSql)) {
                     ps.setString(1, result.runId());
@@ -170,34 +170,33 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     ps.setString(5, cfg != null ? cfg.startDate() : "");
                     ps.setString(6, cfg != null ? cfg.endDate() : "");
                     ps.setDouble(7, m.initialCapital());
-                    ps.setDouble(8, cfg != null ? cfg.latencyFactor() : 1.0);
-                    ps.setLong(9, cfg != null ? cfg.orderGatewayDelayMs() : 220L);
-                    ps.setLong(10, cfg != null ? cfg.binanceDelayMs() : 100L);
-                    ps.setLong(11, cfg != null ? cfg.krakenDelayMs() : 50L);
-                    ps.setLong(12, cfg != null ? cfg.coinbaseDelayMs() : 50L);
-                    ps.setString(13, paramsJson);
-                    ps.setString(14, overridesJson);
-                    ps.setInt(15, result.totalMarkets());
-                    ps.setInt(16, m.totalTrades());
-                    ps.setInt(17, m.winningTrades());
-                    ps.setInt(18, m.losingTrades());
-                    ps.setDouble(19, m.winRatePct());
-                    ps.setDouble(20, m.totalNetPnl());
-                    ps.setDouble(21, m.totalFees());
-                    ps.setDouble(22, m.grossPnl());
-                    ps.setDouble(23, m.grossProfit());
-                    ps.setDouble(24, m.grossLoss());
-                    ps.setDouble(25, m.profitFactor());
-                    ps.setDouble(26, m.maxDrawdownUsd());
-                    ps.setDouble(27, m.maxDrawdownPct());
-                    ps.setDouble(28, m.expectedValuePerTrade());
-                    ps.setDouble(29, m.sharpeRatio());
-                    ps.setDouble(30, m.sortinoRatio());
-                    ps.setDouble(31, m.brierScore());
-                    ps.setDouble(32, m.finalBalance());
-                    ps.setString(33, result.executionTimeUtc().toString());
-                    ps.setLong(34, result.durationMs());
-                    ps.setString(35, configHash);
+                    ps.setLong(8, cfg != null ? cfg.orderGatewayDelayMs() : 220L);
+                    ps.setLong(9, cfg != null ? cfg.binanceDelayMs() : 100L);
+                    ps.setLong(10, cfg != null ? cfg.krakenDelayMs() : 50L);
+                    ps.setLong(11, cfg != null ? cfg.coinbaseDelayMs() : 50L);
+                    ps.setString(12, paramsJson);
+                    ps.setString(13, overridesJson);
+                    ps.setInt(14, result.totalMarkets());
+                    ps.setInt(15, m.totalTrades());
+                    ps.setInt(16, m.winningTrades());
+                    ps.setInt(17, m.losingTrades());
+                    ps.setDouble(18, m.winRatePct());
+                    ps.setDouble(19, m.totalNetPnl());
+                    ps.setDouble(20, m.totalFees());
+                    ps.setDouble(21, m.grossPnl());
+                    ps.setDouble(22, m.grossProfit());
+                    ps.setDouble(23, m.grossLoss());
+                    ps.setDouble(24, m.profitFactor());
+                    ps.setDouble(25, m.maxDrawdownUsd());
+                    ps.setDouble(26, m.maxDrawdownPct());
+                    ps.setDouble(27, m.expectedValuePerTrade());
+                    ps.setDouble(28, m.sharpeRatio());
+                    ps.setDouble(29, m.sortinoRatio());
+                    ps.setDouble(30, m.brierScore());
+                    ps.setDouble(31, m.finalBalance());
+                    ps.setString(32, result.executionTimeUtc().toString());
+                    ps.setLong(33, result.durationMs());
+                    ps.setString(34, configHash);
                     ps.executeUpdate();
                 }
 
@@ -240,7 +239,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
     public List<RunSummaryDto> listRuns(String strategyFilter, String symbolFilter) {
         StringBuilder sql = new StringBuilder("""
                 SELECT run_id, label, strategy_name, symbol, start_date, end_date,
-                       initial_capital, latency_factor, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
+                       initial_capital, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
                        binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
                        strategy_overrides_json, total_markets, total_trades, winning_trades, losing_trades,
                        win_rate_pct, total_net_pnl, total_fees, gross_pnl, gross_profit, gross_loss,
@@ -296,7 +295,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
         }
         String sql = """
                 SELECT run_id, label, strategy_name, symbol, start_date, end_date,
-                       initial_capital, latency_factor, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
+                       initial_capital, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
                        binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
                        strategy_params_json, strategy_overrides_json,
                        total_markets, total_trades, winning_trades, losing_trades,
@@ -339,7 +338,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
         }
         String sql = """
                 SELECT run_id, label, strategy_name, symbol, start_date, end_date,
-                       initial_capital, latency_factor, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
+                       initial_capital, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
                        binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
                        strategy_overrides_json, total_markets, total_trades, winning_trades, losing_trades,
                        win_rate_pct, total_net_pnl, total_fees, gross_pnl, gross_profit, gross_loss,
@@ -650,7 +649,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
                     mergedStartDate,
                     mergedEndDate,
                     latestConfig.initialCapital(),
-                    latestConfig.latencyFactor(),
                     latestConfig.orderGatewayDelayMs(),
                     latestConfig.binanceDelayMs(),
                     latestConfig.krakenDelayMs(),
@@ -1171,6 +1169,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
     }
 
     private void initializeSchema(Connection conn) throws SQLException {
+        boolean migratedLegacyLatencyFactor = false;
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -1181,7 +1180,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
                         start_date VARCHAR NOT NULL,
                         end_date VARCHAR NOT NULL,
                         initial_capital DOUBLE NOT NULL,
-                        latency_factor DOUBLE NOT NULL,
                         order_gateway_delay_ms BIGINT NOT NULL DEFAULT 220,
                         binance_delay_ms BIGINT NOT NULL,
                         kraken_delay_ms BIGINT NOT NULL,
@@ -1214,6 +1212,15 @@ public class BacktestHistoryRepository implements AutoCloseable {
             stmt.execute("ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS config_hash VARCHAR");
             stmt.execute("ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS order_gateway_delay_ms BIGINT DEFAULT 220");
             stmt.execute("UPDATE backtest_runs SET order_gateway_delay_ms = 220 WHERE order_gateway_delay_ms IS NULL");
+            try (ResultSet rs = stmt.executeQuery(
+                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'backtest_runs' AND column_name = 'latency_factor'")) {
+                if (rs.next() && rs.getInt(1) > 0) {
+                    migratedLegacyLatencyFactor = true;
+                }
+            }
+            if (migratedLegacyLatencyFactor) {
+                stmt.execute("ALTER TABLE backtest_runs DROP COLUMN IF EXISTS latency_factor");
+            }
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS backtest_market_points (
                         run_id VARCHAR NOT NULL,
@@ -1257,32 +1264,31 @@ public class BacktestHistoryRepository implements AutoCloseable {
             stmt.execute("DROP INDEX IF EXISTS idx_bt_trades_run");
             stmt.execute("DROP INDEX IF EXISTS idx_bt_runs_config_hash");
         }
-        backfillMissingConfigHashes(conn);
+        backfillMissingConfigHashes(conn, migratedLegacyLatencyFactor);
     }
 
-    private void backfillMissingConfigHashes(Connection conn) throws SQLException {
+    private void backfillMissingConfigHashes(Connection conn, boolean recomputeAll) throws SQLException {
         List<Map.Entry<String, String>> updates = new ArrayList<>();
+        String whereClause = recomputeAll ? "" : " WHERE config_hash IS NULL OR config_hash = ''";
         String selectSql = """
-                SELECT run_id, strategy_name, symbol, initial_capital, latency_factor,
+                SELECT run_id, strategy_name, symbol, initial_capital,
                        COALESCE(order_gateway_delay_ms, 220),
                        binance_delay_ms, kraken_delay_ms, coinbase_delay_ms, strategy_params_json
                 FROM backtest_runs
-                WHERE config_hash IS NULL OR config_hash = ''
-                """;
+                """ + whereClause;
         try (Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(selectSql)) {
             while (rs.next()) {
                 String runId = rs.getString(1);
-                Map<String, Object> params = deserializeMap(rs.getString(10));
+                Map<String, Object> params = deserializeMap(rs.getString(9));
                 String hash = BacktestRunConfig.computeConfigHash(
                         rs.getString(2),
                         rs.getString(3),
                         rs.getDouble(4),
-                        rs.getDouble(5),
+                        rs.getLong(5),
                         rs.getLong(6),
                         rs.getLong(7),
                         rs.getLong(8),
-                        rs.getLong(9),
                         params
                 );
                 updates.add(Map.entry(runId, hash));
@@ -1599,7 +1605,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
         addDiffRow(rows, "ENGINE", "startDate", details, d -> d.config().startDate());
         addDiffRow(rows, "ENGINE", "endDate", details, d -> d.config().endDate());
         addDiffRow(rows, "ENGINE", "initialCapital", details, d -> d.config().initialCapital());
-        addDiffRow(rows, "ENGINE", "latencyFactor", details, d -> d.config().latencyFactor());
         addDiffRow(rows, "ENGINE", "orderGatewayDelayMs", details, d -> d.config().orderGatewayDelayMs());
         addDiffRow(rows, "ENGINE", "binanceDelayMs", details, d -> d.config().binanceDelayMs());
         addDiffRow(rows, "ENGINE", "krakenDelayMs", details, d -> d.config().krakenDelayMs());
@@ -1654,7 +1659,7 @@ public class BacktestHistoryRepository implements AutoCloseable {
     private Optional<RunDetailDto> loadRunDetailInternal(Connection conn, String runId) throws SQLException {
         String sql = """
                 SELECT run_id, label, strategy_name, symbol, start_date, end_date,
-                       initial_capital, latency_factor, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
+                       initial_capital, COALESCE(order_gateway_delay_ms, 220) AS order_gateway_delay_ms,
                        binance_delay_ms, kraken_delay_ms, coinbase_delay_ms,
                        strategy_params_json, strategy_overrides_json,
                        total_markets, total_trades, winning_trades, losing_trades,
@@ -1714,7 +1719,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 rs.getString("start_date"),
                 rs.getString("end_date"),
                 rs.getDouble("initial_capital"),
-                rs.getDouble("latency_factor"),
                 rs.getLong("order_gateway_delay_ms"),
                 rs.getLong("binance_delay_ms"),
                 rs.getLong("kraken_delay_ms"),
@@ -1736,7 +1740,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
                 summary.startDate(),
                 summary.endDate(),
                 summary.initialCapital(),
-                summary.latencyFactor(),
                 summary.orderGatewayDelayMs(),
                 summary.binanceDelayMs(),
                 summary.krakenDelayMs(),
@@ -1831,7 +1834,6 @@ public class BacktestHistoryRepository implements AutoCloseable {
             String startDate,
             String endDate,
             double initialCapital,
-            double latencyFactor,
             long orderGatewayDelayMs,
             long binanceDelayMs,
             long krakenDelayMs,

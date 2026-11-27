@@ -526,7 +526,6 @@ function renderRunsList() {
                 endDate: null,
                 fullRange: true,
                 initialCapital: cfg.initialCapital,
-                latencyFactor: cfg.latencyFactor,
                 orderGatewayDelayMs: cfg.orderGatewayDelayMs,
                 binanceDelayMs: cfg.binanceDelayMs,
                 krakenDelayMs: cfg.krakenDelayMs,

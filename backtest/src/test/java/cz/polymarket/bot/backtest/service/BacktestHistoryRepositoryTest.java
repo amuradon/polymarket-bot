@@ -56,7 +56,7 @@ class BacktestHistoryRepositoryTest {
         );
         BacktestRunConfig cfg1 = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
-                10000.0, 1.0, 220L, 100L, 50L, 50L,
+                10000.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000L, "maxSpread", 0.026),
                 Map.of()
         );
@@ -76,7 +76,7 @@ class BacktestHistoryRepositoryTest {
         );
         BacktestRunConfig cfg2 = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
-                10000.0, 1.5, 250L, 100L, 50L, 50L,
+                10000.0, 250L, 100L, 50L, 50L,
                 Map.of("minTauMs", 5000L, "maxSpread", 0.026),
                 Map.of("minTauMs", 5000L)
         );
@@ -111,12 +111,8 @@ class BacktestHistoryRepositoryTest {
             assertThat(fullMarket.series().get(0).points().get(1).tradesCount()).isZero();
             assertThat(fullMarket.series().get(0).points().get(1).cumulativePnlUsd()).isCloseTo(98.0, within(1e-6));
 
-            // Parameter diff highlights latencyFactor and minTauMs, while maxSpread is identical
+            // Parameter diff highlights orderGatewayDelayMs and minTauMs, while maxSpread is identical
             assertThat(fullMarket.parameterDiffs())
-                    .anySatisfy(row -> {
-                        assertThat(row.parameter()).isEqualTo("latencyFactor");
-                        assertThat(row.differs()).isTrue();
-                    })
                     .anySatisfy(row -> {
                         assertThat(row.parameter()).isEqualTo("orderGatewayDelayMs");
                         assertThat(row.differs()).isTrue();
@@ -161,10 +157,10 @@ class BacktestHistoryRepositoryTest {
     @DisplayName("Should match configHash across Integer/Long param types and merge appended/backfilled/overwritten days chronologically")
     void shouldMatchConfigHashAndMergeDaysChronologically(@TempDir Path tempDir) {
         String hashWithInt = BacktestRunConfig.computeConfigHash(
-                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 220L, 100L, 50L, 50L,
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000, "maxSpread", 0.026));
         String hashWithLong = BacktestRunConfig.computeConfigHash(
-                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 1.0, 220L, 100L, 50L, 50L,
+                "OraclePulseLockStrategy", "BTCUSDT", 10000.0, 220L, 100L, 50L, 50L,
                 Map.of("maxSpread", 0.026, "minTauMs", 2000L));
         assertThat(hashWithInt).isEqualTo(hashWithLong);
 
@@ -176,7 +172,7 @@ class BacktestHistoryRepositoryTest {
         TradeRecord day2Trade = new TradeRecord("2026-08-02T00:10:00Z", day2T1, TradeDirection.UP, 0.50, 1.00, 100.0, 200.0, 2.0, 100.0, "Resolution", 0.70, 0.50, 0.20, true, 10100.0);
         BacktestRunConfig initialCfg = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-02", "2026-08-02",
-                10000.0, 1.0, 220L, 100L, 50L, 50L,
+                10000.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000, "maxSpread", 0.026), Map.of()
         );
         BacktestResult initialRes = new BacktestResult(
@@ -247,11 +243,13 @@ class BacktestHistoryRepositoryTest {
         Path dbFile = tempDir.resolve("legacy-indexed-history.duckdb");
 
         // Simulate a legacy DB that still carries secondary ART indexes idx_bt_points_run and idx_bt_trades_run
+        // as well as the removed latency_factor column
         try (BacktestHistoryRepository bootstrap = new BacktestHistoryRepository(dbFile, new ObjectMapper(), CALC)) {
             assertThat(bootstrap.listRuns(null, null)).isEmpty();
         }
         try (Connection rawConn = DriverManager.getConnection("jdbc:duckdb:" + dbFile);
              Statement stmt = rawConn.createStatement()) {
+            stmt.execute("ALTER TABLE backtest_runs ADD COLUMN latency_factor DOUBLE DEFAULT 1.0");
             stmt.execute("CREATE INDEX idx_bt_points_run ON backtest_market_points (run_id, market_idx)");
             stmt.execute("CREATE INDEX idx_bt_trades_run ON backtest_trades (run_id, trade_idx)");
         }
@@ -290,7 +288,7 @@ class BacktestHistoryRepositoryTest {
 
         BacktestRunConfig cfg = new BacktestRunConfig(
                 "OraclePulseLockStrategy", "BTCUSDT", "2026-08-01", "2026-08-03",
-                10000.0, 1.0, 220L, 100L, 50L, 50L,
+                10000.0, 220L, 100L, 50L, 50L,
                 Map.of("minTauMs", 2000L), Map.of()
         );
         BacktestResult largeRun1 = new BacktestResult(
@@ -359,13 +357,19 @@ class BacktestHistoryRepositoryTest {
             assertThat(repo.listRuns(null, null)).isEmpty();
         }
 
-        // Verify secondary ART indexes remain absent on disk
+        // Verify secondary ART indexes and legacy latency_factor column remain absent on disk
         try (Connection rawConn = DriverManager.getConnection("jdbc:duckdb:" + dbFile);
-             Statement stmt = rawConn.createStatement();
-             ResultSet rs = stmt.executeQuery(
-                     "SELECT COUNT(*) FROM duckdb_indexes() WHERE index_name IN ('idx_bt_points_run', 'idx_bt_trades_run')")) {
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).isZero();
+             Statement stmt = rawConn.createStatement()) {
+            try (ResultSet rs = stmt.executeQuery(
+                    "SELECT COUNT(*) FROM duckdb_indexes() WHERE index_name IN ('idx_bt_points_run', 'idx_bt_trades_run')")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).isZero();
+            }
+            try (ResultSet rs = stmt.executeQuery(
+                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'backtest_runs' AND column_name = 'latency_factor'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).isZero();
+            }
         }
     }
 }
