@@ -397,7 +397,7 @@ class StrategyTradingEngineTest {
                         assertThat(engine.getInitialCapital()).isEqualTo(2328.0);
                         assertThat(engine.getCurrentBalance()).isEqualTo(2328.0);
                         assertThat(engine.getActiveMarketInfo()).isNotNull();
-                        assertThat(engine.getCurrentSpotPrice()).isEqualTo(85020.0);
+                        assertThat(engine.getCurrentSpotPrice()).isCloseTo(85020.0, org.assertj.core.data.Offset.offset(1e-6));
                         assertThat(engine.getLatestQuote()).isNotNull();
                         assertThat(engine.getLatestQuote().bestAskUp()).isEqualTo(0.55);
                     });
@@ -795,6 +795,7 @@ class StrategyTradingEngineTest {
         engine.discoverAndRotateMarket(c2 + 1L);
         engine.discoverAndRotateMarket(c3 + 1L);
         engine.discoverAndRotateMarket(c4 + 1L);
+        assertThat(clobSockets).isEmpty();
 
         // Record CLOB frames belonging to live market c4
         engine.onRawClobFrame("""

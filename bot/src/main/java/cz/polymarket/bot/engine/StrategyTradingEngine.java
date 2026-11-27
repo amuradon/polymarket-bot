@@ -1410,7 +1410,7 @@ public class StrategyTradingEngine implements StrategyContext, ExecutionRouter {
     }
 
     private synchronized void openStrategyClobStreamForMarket(PolymarketMarketInfo market) {
-        if (market == null || this.strategyMode == StrategyMode.OFF) {
+        if (!this.streamsEnabled || market == null || this.strategyMode == StrategyMode.OFF) {
             return;
         }
         clobWsClient.openMarketStreamBatch(
