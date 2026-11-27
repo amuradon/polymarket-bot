@@ -526,13 +526,13 @@ class StrategyTradingEngineTest {
         Path collectorDir = tempDir.resolve("collector");
         DailyBinanceStorageManager binanceStorage = new DailyBinanceStorageManager(collectorDir.toString(), "BTCUSDT");
         DailyPolyBoltStorageManager polyBoltStorage = new DailyPolyBoltStorageManager(collectorDir.toString(), "BTCUSDT");
-        PolymarketMarketStorageManager polymarketStorage = new PolymarketMarketStorageManager(collectorDir.toString(), "BTCUSDT", "15m");
+        PolymarketMarketStorageManager polymarketStorage = new PolymarketMarketStorageManager(collectorDir.toString());
         PolymarketLifecycleCoordinator lifecycleCoordinator = new PolymarketLifecycleCoordinator(
-                gammaClient, clobClient, polymarketStorage, "BTCUSDT", "15m", 1
+                gammaClient, clobClient, polymarketStorage, "BTCUSDT", List.of("15m"), 1
         );
         DataCollectorService collectorService = new DataCollectorService(
                 binanceConnector, binanceStorage, polyBoltStorage, lifecycleCoordinator, polymarketStorage,
-                polyBoltClient, clobClient, "BTCUSDT", "15m", true, false, false
+                polyBoltClient, clobClient, "BTCUSDT", List.of("15m"), true, false, false
         );
 
         UtterParameciumStrategy strategy = new UtterParameciumStrategy(UtterParameciumStrategyConfig.defaultModelV1());

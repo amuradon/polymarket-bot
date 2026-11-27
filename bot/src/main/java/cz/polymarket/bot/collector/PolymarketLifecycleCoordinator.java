@@ -15,17 +15,18 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Coordinates the lifecycle of Polymarket prediction markets for the Data Collector, maintaining CLOB
- * archival recording across the current market (sharing {@code POLYMARKET-CLOB-<slug>} + {@code -BACKUP}
- * with Strategy without archive duplication) and {@code lookahead-count} (default {@code 1}) future market
- * (single-leg {@code POLYMARKET-CLOB-<slug>}, keeping total CLOB market streams bounded to at most {@code 3}).
+ * Coordinates the lifecycle of Polymarket prediction markets for the Data Collector across all configured
+ * timeframes (e.g. {@code 15m} and {@code 5m}), maintaining CLOB archival recording across each timeframe's
+ * current market and {@code lookahead-count} (default {@code 1}) future market.
  * <p>
  * Records all raw CLOB WebSocket messages as UTF-8 {@code byte[]} directly to Zstandard storage on {@code CPU #0}
  * without JSON parsing, avoids writing duplicate {@code market_discovered} records when appending across restarts,
@@ -34,6 +35,16 @@ import java.util.concurrent.TimeUnit;
  */
 @ApplicationScoped
 public class PolymarketLifecycleCoordinator {
+
+    /**
+     * Immutable specification for one collected Polymarket timeframe.
+     *
+     * @param timeframe       normalized timeframe code (e.g. {@code "15m"}, {@code "5m"})
+     * @param durationSeconds duration of one cycle in seconds (e.g. {@code 900L}, {@code 300L})
+     * @param seriesPrefix    market slug prefix (e.g. {@code "btc-updown-15m"})
+     */
+    public record TimeframeSlot(String timeframe, long durationSeconds, String seriesPrefix) {
+    }
 
     /**
      * Maximum retention window in seconds after a market's {@code endSec} (5 minutes = 300 seconds)
@@ -45,9 +56,8 @@ public class PolymarketLifecycleCoordinator {
     private final PolymarketClobClient clobClient;
     private final PolymarketMarketStorageManager polymarketStorage;
     private final String symbol;
-    private final String timeframe;
+    private final List<TimeframeSlot> timeframeSlots;
     private final int lookaheadCount;
-    private final long durationSeconds;
 
     private final Map<String, PolymarketMarketInfo> trackedMarketsBySlug = new ConcurrentHashMap<>();
     private final Map<String, Long> closedMarketsEndSecBySlug = new ConcurrentHashMap<>();
@@ -61,8 +71,8 @@ public class PolymarketLifecycleCoordinator {
      * @param clobClient        CLOB WebSocket client managing isolated single-leg collector streams
      * @param polymarketStorage per-market Zstd storage manager
      * @param symbol            configured asset symbol (e.g. BTCUSDT)
-     * @param timeframe         configured Polymarket timeframe (e.g. 15m)
-     * @param lookaheadCount    number of future markets to record ahead of the current market (default 1)
+     * @param timeframes        configured Polymarket timeframes (e.g. {@code ["15m", "5m"]})
+     * @param lookaheadCount    number of future markets to record ahead of the current market per timeframe (default 1)
      */
     @Inject
     public PolymarketLifecycleCoordinator(
@@ -71,17 +81,46 @@ public class PolymarketLifecycleCoordinator {
             PolymarketMarketStorageManager polymarketStorage,
             @ConfigProperty(name = "polymarket.collector.symbol", defaultValue = "BTCUSDT")
             String symbol,
-            @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
-            String timeframe,
+            @ConfigProperty(name = "polymarket.collector.timeframes", defaultValue = "15m,5m")
+            List<String> timeframes,
             @ConfigProperty(name = "polymarket.collector.lookahead-count", defaultValue = "1")
             int lookaheadCount) {
         this.gammaClient = gammaClient;
         this.clobClient = clobClient;
         this.polymarketStorage = polymarketStorage;
         this.symbol = symbol;
-        this.timeframe = timeframe;
+        this.timeframeSlots = parseTimeframeSlots(symbol, timeframes);
         this.lookaheadCount = Math.max(0, lookaheadCount);
-        this.durationSeconds = PolymarketMarketInfo.parseTimeframeSeconds(timeframe);
+    }
+
+    /**
+     * Parses, normalizes, deduplicates, and validates configured timeframe strings into {@link TimeframeSlot} entries.
+     *
+     * @param symbol     configured asset symbol
+     * @param timeframes configured timeframe codes
+     * @return immutable non-empty list of {@link TimeframeSlot}
+     */
+    public static List<TimeframeSlot> parseTimeframeSlots(String symbol, List<String> timeframes) {
+        if (timeframes == null || timeframes.isEmpty()) {
+            throw new IllegalArgumentException("polymarket.collector.timeframes cannot be empty");
+        }
+        String asset = PolymarketMarketInfo.normalizeAssetSlugPrefix(symbol);
+        Set<String> seen = new LinkedHashSet<>();
+        List<TimeframeSlot> slots = new ArrayList<>(timeframes.size());
+        for (String raw : timeframes) {
+            if (raw == null || raw.isBlank()) {
+                continue;
+            }
+            String tf = raw.trim().toLowerCase();
+            if (seen.add(tf)) {
+                long durationSec = PolymarketMarketInfo.parseTimeframeSeconds(tf);
+                slots.add(new TimeframeSlot(tf, durationSec, asset + "-updown-" + tf));
+            }
+        }
+        if (slots.isEmpty()) {
+            throw new IllegalArgumentException("polymarket.collector.timeframes must contain at least one valid timeframe");
+        }
+        return List.copyOf(slots);
     }
 
     /**
@@ -104,8 +143,8 @@ public class PolymarketLifecycleCoordinator {
     }
 
     /**
-     * Discovers and opens collector CLOB WebSocket streams for new future markets so that the current market
-     * plus {@code lookaheadCount} future markets are continuously recorded.
+     * Discovers and opens collector CLOB WebSocket streams for new future markets across all configured timeframes
+     * so that each timeframe's current market plus {@code lookaheadCount} future markets are continuously recorded.
      *
      * @param nowEpochSec current epoch timestamp in seconds
      */
@@ -113,21 +152,34 @@ public class PolymarketLifecycleCoordinator {
         this.lastRefreshEpochSec = nowEpochSec;
         this.lastRefreshNanoTime = System.nanoTime();
 
-        long currentStartSec = PolymarketMarketInfo.alignCycleStart(nowEpochSec, durationSeconds);
-        closedMarketsEndSecBySlug.entrySet().removeIf(entry -> entry.getValue() < currentStartSec);
+        long minCurrentStartSec = Long.MAX_VALUE;
+        for (TimeframeSlot slot : timeframeSlots) {
+            long startSec = PolymarketMarketInfo.alignCycleStart(nowEpochSec, slot.durationSeconds());
+            if (startSec < minCurrentStartSec) {
+                minCurrentStartSec = startSec;
+            }
+        }
+        long pruneCutoff = minCurrentStartSec;
+        closedMarketsEndSecBySlug.entrySet().removeIf(entry -> entry.getValue() < pruneCutoff);
 
         closeExpiredOrDisconnectedEndedMarkets(nowEpochSec);
 
-        boolean awaitingPreviousResolution = trackedMarketsBySlug.values().stream()
-                .anyMatch(m -> m.endSec() > 0 && m.endSec() <= nowEpochSec);
-        int maxFutureIndex = awaitingPreviousResolution ? Math.max(0, lookaheadCount - 1) : lookaheadCount;
+        for (TimeframeSlot slot : timeframeSlots) {
+            long currentStartSec = PolymarketMarketInfo.alignCycleStart(nowEpochSec, slot.durationSeconds());
+            String prefixWithDash = slot.seriesPrefix() + "-";
+            boolean awaitingPreviousResolution = trackedMarketsBySlug.values().stream()
+                    .anyMatch(m -> m.slug().startsWith(prefixWithDash)
+                            && m.endSec() > 0
+                            && m.endSec() <= nowEpochSec);
+            int maxFutureIndex = awaitingPreviousResolution ? Math.max(0, lookaheadCount - 1) : lookaheadCount;
 
-        for (int i = 0; i <= maxFutureIndex; i++) {
-            long slotStartSec = currentStartSec + (i * durationSeconds);
-            String slug = PolymarketMarketInfo.buildMarketSlug(symbol, timeframe, slotStartSec);
-            if (!trackedMarketsBySlug.containsKey(slug) && !closedMarketsEndSecBySlug.containsKey(slug)) {
-                Optional<PolymarketMarketInfo> discovered = gammaClient.fetchMarketBySlug(slug, durationSeconds);
-                discovered.ifPresent(info -> registerNewMarket(info, System.currentTimeMillis()));
+            for (int i = 0; i <= maxFutureIndex; i++) {
+                long slotStartSec = currentStartSec + (i * slot.durationSeconds());
+                String slug = PolymarketMarketInfo.buildMarketSlug(symbol, slot.timeframe(), slotStartSec);
+                if (!trackedMarketsBySlug.containsKey(slug) && !closedMarketsEndSecBySlug.containsKey(slug)) {
+                    Optional<PolymarketMarketInfo> discovered = gammaClient.fetchMarketBySlug(slug, slot.durationSeconds());
+                    discovered.ifPresent(info -> registerNewMarket(info, System.currentTimeMillis()));
+                }
             }
         }
     }

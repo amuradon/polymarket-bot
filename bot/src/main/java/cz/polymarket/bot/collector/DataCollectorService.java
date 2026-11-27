@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,8 +48,8 @@ public class DataCollectorService {
     private final PolymarketPolyBoltClient polyBoltClient;
     private final PolymarketClobClient clobClient;
     private final String symbol;
-    private final String timeframe;
-    private final long durationSeconds;
+    private final List<PolymarketLifecycleCoordinator.TimeframeSlot> timeframeSlots;
+    private final List<String> timeframes;
     private final boolean streamsEnabled;
     private final boolean binanceSpotBookTickerEnabled;
     private final boolean binanceFuturesBookTickerEnabled;
@@ -66,7 +67,7 @@ public class DataCollectorService {
      * @param polyBoltClient                  Polymarket PolyBolt v2 WebSocket client
      * @param clobClient                      Polymarket CLOB WebSocket client
      * @param symbol                          configured trading symbol (default BTCUSDT)
-     * @param timeframe                       configured Polymarket market timeframe (default 15m)
+     * @param timeframes                      configured Polymarket market timeframes (default {@code ["15m", "5m"]})
      * @param streamsEnabled                  whether collector streams are enabled (default true)
      * @param binanceSpotBookTickerEnabled    whether to connect and persist Binance Spot {@code bookTicker} (default false)
      * @param binanceFuturesBookTickerEnabled whether to connect and persist Binance USD-M Futures {@code bookTicker} (default false)
@@ -82,8 +83,8 @@ public class DataCollectorService {
             PolymarketClobClient clobClient,
             @ConfigProperty(name = "polymarket.collector.symbol", defaultValue = "BTCUSDT")
             String symbol,
-            @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
-            String timeframe,
+            @ConfigProperty(name = "polymarket.collector.timeframes", defaultValue = "15m,5m")
+            List<String> timeframes,
             @ConfigProperty(name = "polymarket.collector.streams-enabled", defaultValue = "true")
             boolean streamsEnabled,
             @ConfigProperty(name = "polymarket.collector.binance.spot-book-ticker-enabled", defaultValue = "false")
@@ -98,8 +99,10 @@ public class DataCollectorService {
         this.polyBoltClient = polyBoltClient;
         this.clobClient = clobClient;
         this.symbol = BinanceStreamConnector.normalizeSymbol(symbol);
-        this.timeframe = timeframe;
-        this.durationSeconds = PolymarketMarketInfo.parseTimeframeSeconds(timeframe);
+        this.timeframeSlots = PolymarketLifecycleCoordinator.parseTimeframeSlots(this.symbol, timeframes);
+        this.timeframes = this.timeframeSlots.stream()
+                .map(PolymarketLifecycleCoordinator.TimeframeSlot::timeframe)
+                .toList();
         this.streamsEnabled = streamsEnabled;
         this.binanceSpotBookTickerEnabled = binanceSpotBookTickerEnabled;
         this.binanceFuturesBookTickerEnabled = binanceFuturesBookTickerEnabled;
@@ -115,8 +118,8 @@ public class DataCollectorService {
             return;
         }
         Set<BinanceStreamType> enabledBookTickers = enabledBinanceBookTickerStreams();
-        Log.infof("Starting Data Collector for symbol=%s, timeframe=%s, lookaheadCount=%d, binanceSpotBookTickerEnabled=%b, binanceFuturesBookTickerEnabled=%b...",
-                symbol, timeframe, polymarketCoordinator.getLookaheadCount(), binanceSpotBookTickerEnabled, binanceFuturesBookTickerEnabled);
+        Log.infof("Starting Data Collector for symbol=%s, timeframes=%s, lookaheadCount=%d, binanceSpotBookTickerEnabled=%b, binanceFuturesBookTickerEnabled=%b...",
+                symbol, timeframes, polymarketCoordinator.getLookaheadCount(), binanceSpotBookTickerEnabled, binanceFuturesBookTickerEnabled);
 
         polyBoltClient.startCollectorStreams(
                 symbol,
@@ -253,11 +256,14 @@ public class DataCollectorService {
         long totalWritten = binanceWritten + polyBoltWritten + polymarketWritten;
 
         long nowEpochSec = Instant.now().getEpochSecond();
-        String activeSlug = PolymarketMarketInfo.buildMarketSlug(
-                symbol,
-                timeframe,
-                PolymarketMarketInfo.alignCycleStart(nowEpochSec, durationSeconds)
-        );
+        List<String> activeSlugs = new ArrayList<>(timeframeSlots.size());
+        for (PolymarketLifecycleCoordinator.TimeframeSlot slot : timeframeSlots) {
+            activeSlugs.add(PolymarketMarketInfo.buildMarketSlug(
+                    symbol,
+                    slot.timeframe(),
+                    PolymarketMarketInfo.alignCycleStart(nowEpochSec, slot.durationSeconds())
+            ));
+        }
 
         boolean healthy = evaluateHealthy(
                 enabledBinanceStreams,
@@ -266,13 +272,13 @@ public class DataCollectorService {
                 polyBoltCryptoState,
                 trackedSlugs,
                 rawClobStates,
-                activeSlug,
+                activeSlugs,
                 totalWritten
         );
 
         return new CollectorStatusDto(
                 symbol,
-                timeframe,
+                timeframes,
                 polymarketCoordinator.getLookaheadCount(),
                 healthy,
                 binanceSpotBookTickerEnabled,
@@ -306,7 +312,7 @@ public class DataCollectorService {
             ConnectionState polyBoltCryptoState,
             List<String> trackedSlugs,
             Map<String, ConnectionState> clobStates,
-            String activeSlug,
+            List<String> activeSlugs,
             long totalWritten) {
         if (!streamsEnabled) {
             return true;
@@ -331,12 +337,15 @@ public class DataCollectorService {
         if (trackedSlugs == null || trackedSlugs.isEmpty() || clobStates == null) {
             return false;
         }
-        if (clobStates.get(activeSlug) != ConnectionState.CONNECTED) {
-            // Fall back to checking that all tracked slugs are connected when clock alignment just rolled
-            for (String slug : trackedSlugs) {
-                if (clobStates.get(slug) != ConnectionState.CONNECTED) {
-                    return false;
+        for (String activeSlug : activeSlugs) {
+            if (clobStates.get(activeSlug) != ConnectionState.CONNECTED) {
+                // Fall back to checking that all tracked slugs are connected when clock alignment just rolled
+                for (String slug : trackedSlugs) {
+                    if (clobStates.get(slug) != ConnectionState.CONNECTED) {
+                        return false;
+                    }
                 }
+                break;
             }
         }
         return true;

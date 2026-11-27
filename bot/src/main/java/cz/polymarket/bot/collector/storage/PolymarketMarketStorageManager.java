@@ -1,6 +1,5 @@
 package cz.polymarket.bot.collector.storage;
 
-import cz.polymarket.bot.connector.polymarket.PolymarketMarketInfo;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -20,7 +19,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages per-market Zstandard streaming JSONL files ({@code .jsonl.zst}) for Polymarket markets,
- * partitioning archives into UTC daily subdirectories ({@code polymarket/<asset>-updown-<tf>/<yyyy-MM-dd>/})
+ * partitioning archives dynamically by market series and UTC date
+ * ({@code polymarket/<asset>-updown-<tf>/<yyyy-MM-dd>/<slug>.jsonl.zst})
  * and keeping each market's file open across its entire lifecycle (from discovery through resolution)
  * with per-market lock isolation and zero-decode {@code byte[]} writing.
  */
@@ -29,7 +29,7 @@ public class PolymarketMarketStorageManager {
 
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
-    private final Path polymarketDir;
+    private final Path polymarketRootDir;
     private final Map<String, ZstdJsonlWriter> marketWriters = new ConcurrentHashMap<>();
     private final AtomicLong totalRecordsWritten = new AtomicLong(0L);
 
@@ -37,22 +37,12 @@ public class PolymarketMarketStorageManager {
      * Constructs the Polymarket per-market storage manager.
      *
      * @param dataDirStr root collector data directory path
-     * @param symbol     configured asset symbol (e.g. BTCUSDT)
-     * @param timeframe  configured Polymarket timeframe (e.g. 15m)
      */
     @Inject
     public PolymarketMarketStorageManager(
             @ConfigProperty(name = "polymarket.collector.data-dir", defaultValue = "data/collector")
-            String dataDirStr,
-            @ConfigProperty(name = "polymarket.collector.symbol", defaultValue = "BTCUSDT")
-            String symbol,
-            @ConfigProperty(name = "polymarket.collector.timeframe", defaultValue = "15m")
-            String timeframe) {
-        String asset = PolymarketMarketInfo.normalizeAssetSlugPrefix(symbol);
-        String tf = (timeframe == null || timeframe.isBlank()) ? "15m" : timeframe.trim().toLowerCase();
-        this.polymarketDir = Path.of(dataDirStr)
-                .resolve("polymarket")
-                .resolve(asset + "-updown-" + tf);
+            String dataDirStr) {
+        this.polymarketRootDir = Path.of(dataDirStr).resolve("polymarket");
     }
 
     /**
@@ -165,15 +155,34 @@ public class PolymarketMarketStorageManager {
     }
 
     /**
-     * Resolves the UTC daily subdirectory file path for a given market slug
-     * ({@code <polymarketDir>/<yyyy-MM-dd>/<marketSlug>.jsonl.zst}).
+     * Resolves the series and UTC daily subdirectory file path for a given market slug
+     * ({@code <polymarketRootDir>/<series>/<yyyy-MM-dd>/<marketSlug>.jsonl.zst}).
      *
-     * @param marketSlug market slug ending with {@code -<epochSeconds>}
+     * @param marketSlug market slug formatted as {@code <series>-<epochSeconds>}
      * @return path to the market's {@code .jsonl.zst} file
      */
     public Path resolveMarketFilePath(String marketSlug) {
+        String seriesDir = extractMarketSeriesFromSlug(marketSlug);
         String dateDir = extractUtcDateFromSlug(marketSlug);
-        return polymarketDir.resolve(dateDir).resolve(marketSlug + ".jsonl.zst");
+        return polymarketRootDir.resolve(seriesDir).resolve(dateDir).resolve(marketSlug + ".jsonl.zst");
+    }
+
+    /**
+     * Extracts the market series directory name from a market slug by stripping its trailing
+     * {@code -<epochSeconds>} suffix (e.g. {@code btc-updown-5m-1789041600} -> {@code "btc-updown-5m"}).
+     *
+     * @param marketSlug market slug formatted as {@code <series>-<epochSeconds>}
+     * @return market series directory name
+     */
+    public static String extractMarketSeriesFromSlug(String marketSlug) {
+        if (marketSlug == null || marketSlug.isBlank()) {
+            throw new IllegalArgumentException("Market slug cannot be null or blank");
+        }
+        int lastDash = marketSlug.lastIndexOf('-');
+        if (lastDash <= 0 || lastDash == marketSlug.length() - 1) {
+            throw new IllegalArgumentException("Market slug must end with '-<epochSeconds>': " + marketSlug);
+        }
+        return marketSlug.substring(0, lastDash);
     }
 
     /**

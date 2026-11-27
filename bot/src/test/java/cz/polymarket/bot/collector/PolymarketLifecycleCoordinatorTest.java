@@ -81,13 +81,13 @@ class PolymarketLifecycleCoordinatorTest {
             when(gammaClient.fetchMarketBySlug(eq(slug), eq(durationSec))).thenReturn(Optional.of(info));
         }
 
-        PolymarketMarketStorageManager storage1 = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        PolymarketMarketStorageManager storage1 = new PolymarketMarketStorageManager(tempDir.toString());
         PolymarketLifecycleCoordinator coordinator1 = new PolymarketLifecycleCoordinator(
                 gammaClient,
                 clobClient,
                 storage1,
                 "BTCUSDT",
-                "15m",
+                List.of("15m"),
                 1
         );
 
@@ -109,13 +109,13 @@ class PolymarketLifecycleCoordinatorTest {
         coordinator1.stop();
         storage1.closeAll();
 
-        PolymarketMarketStorageManager storage2 = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        PolymarketMarketStorageManager storage2 = new PolymarketMarketStorageManager(tempDir.toString());
         PolymarketLifecycleCoordinator coordinator2 = new PolymarketLifecycleCoordinator(
                 gammaClient,
                 clobClient,
                 storage2,
                 "BTCUSDT",
-                "15m",
+                List.of("15m"),
                 1
         );
         coordinator2.start(baseStartSec + 9L);
@@ -177,13 +177,13 @@ class PolymarketLifecycleCoordinatorTest {
             when(gammaClient.fetchMarketBySlug(eq(slug), eq(durationSec))).thenReturn(Optional.of(info));
         }
 
-        PolymarketMarketStorageManager storage = new PolymarketMarketStorageManager(tempDir.toString(), "BTCUSDT", "15m");
+        PolymarketMarketStorageManager storage = new PolymarketMarketStorageManager(tempDir.toString());
         PolymarketLifecycleCoordinator coordinator = new PolymarketLifecycleCoordinator(
                 gammaClient,
                 clobClient,
                 storage,
                 "BTCUSDT",
-                "15m",
+                List.of("15m"),
                 1
         );
         coordinator.start(baseStartSec + 10L);
@@ -203,5 +203,83 @@ class PolymarketLifecycleCoordinatorTest {
 
         coordinator.stop();
         storage.closeAll();
+    }
+
+    @Test
+    void shouldCollect15mAnd5mTimeframesSimultaneouslyWithIndependentLookaheadAndArchives() throws Exception {
+        PolymarketGammaClient gammaClient = mock(PolymarketGammaClient.class);
+        PolymarketClobClient clobClient = mock(PolymarketClobClient.class);
+
+        Map<String, RawWebSocketListener> clobListenersBySlug = new HashMap<>();
+        Map<String, Consumer<WebSocketStreamTelemetry>> closeListenersBySlug = new HashMap<>();
+        doAnswer(invocation -> {
+            String slug = invocation.getArgument(0);
+            clobListenersBySlug.put(slug, invocation.getArgument(2));
+            closeListenersBySlug.put(slug, invocation.getArgument(3));
+            return null;
+        }).when(clobClient).openCollectorMarketStream(any(), any(), any(), any(), any());
+
+        long baseStartSec = 1789041600L; // aligned to both 900s and 300s (2026-09-10T12:00:00Z)
+        for (int i = 0; i <= 3; i++) {
+            long start15m = baseStartSec + (i * 900L);
+            String slug15m = "btc-updown-15m-" + start15m;
+            when(gammaClient.fetchMarketBySlug(eq(slug15m), eq(900L))).thenReturn(Optional.of(new PolymarketMarketInfo(
+                    slug15m, start15m, start15m + 900L, List.of("15m_up_" + i, "15m_dn_" + i), false,
+                    "{\"slug\":\"" + slug15m + "\"}"
+            )));
+
+            long start5m = baseStartSec + (i * 300L);
+            String slug5m = "btc-updown-5m-" + start5m;
+            when(gammaClient.fetchMarketBySlug(eq(slug5m), eq(300L))).thenReturn(Optional.of(new PolymarketMarketInfo(
+                    slug5m, start5m, start5m + 300L, List.of("5m_up_" + i, "5m_dn_" + i), false,
+                    "{\"slug\":\"" + slug5m + "\"}"
+            )));
+        }
+
+        PolymarketMarketStorageManager storage = new PolymarketMarketStorageManager(tempDir.toString());
+        PolymarketLifecycleCoordinator coordinator = new PolymarketLifecycleCoordinator(
+                gammaClient,
+                clobClient,
+                storage,
+                "BTCUSDT",
+                List.of("15m", "5m"),
+                1
+        );
+
+        String m15_0 = "btc-updown-15m-" + baseStartSec;
+        String m15_1 = "btc-updown-15m-" + (baseStartSec + 900L);
+        String m5_0 = "btc-updown-5m-" + baseStartSec;
+        String m5_1 = "btc-updown-5m-" + (baseStartSec + 300L);
+        String m5_2 = "btc-updown-5m-" + (baseStartSec + 600L);
+
+        coordinator.start(baseStartSec + 5L);
+        assertThat(coordinator.getTrackedMarketSlugs()).containsExactlyInAnyOrder(m15_0, m15_1, m5_0, m5_1);
+
+        // Write a CLOB frame to both active markets
+        clobListenersBySlug.get(m15_0).onMessageBytes(new TimestampedFrame(
+                "{\"event_type\":\"book\",\"tf\":\"15m\"}".getBytes(StandardCharsets.UTF_8), (baseStartSec + 6L) * 1000L));
+        clobListenersBySlug.get(m5_0).onMessageBytes(new TimestampedFrame(
+                "{\"event_type\":\"book\",\"tf\":\"5m\"}".getBytes(StandardCharsets.UTF_8), (baseStartSec + 6L) * 1000L));
+
+        // 5m market 0 ends at baseStartSec + 300; while awaiting closeCode=1000, m5_2 is held back and 15m continues undisturbed
+        coordinator.discoverAndRefreshMarkets(baseStartSec + 305L);
+        assertThat(coordinator.getTrackedMarketSlugs()).containsExactlyInAnyOrder(m15_0, m15_1, m5_0, m5_1);
+
+        // Server closes m5_0 with closeCode=1000 -> immediately opens m5_2 without affecting 15m
+        closeListenersBySlug.get(m5_0).accept(new WebSocketStreamTelemetry(
+                "POLYMARKET-CLOB-" + m5_0, ConnectionState.DISCONNECTED, "ws-subscriptions-clob.polymarket.com:443",
+                0, 10, 0L, 1L, 1L, 1L, 1L, 0L, 0L, (baseStartSec + 306L) * 1000L, 1000, "resolved"
+        ));
+        assertThat(coordinator.getTrackedMarketSlugs()).containsExactlyInAnyOrder(m15_0, m15_1, m5_1, m5_2);
+
+        coordinator.stop();
+        storage.closeAll();
+
+        Path file15m = tempDir.resolve("polymarket/btc-updown-15m/2026-09-10/" + m15_0 + ".jsonl.zst");
+        Path file5m = tempDir.resolve("polymarket/btc-updown-5m/2026-09-10/" + m5_0 + ".jsonl.zst");
+        assertThat(Files.isRegularFile(file15m)).isTrue();
+        assertThat(Files.isRegularFile(file5m)).isTrue();
+        assertThat(ZstdJsonlWriterTest.readAllZstdLines(file15m)).anyMatch(l -> l.contains("\"tf\":\"15m\""));
+        assertThat(ZstdJsonlWriterTest.readAllZstdLines(file5m)).anyMatch(l -> l.contains("\"tf\":\"5m\""));
     }
 }

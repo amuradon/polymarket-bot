@@ -78,7 +78,7 @@ class CollectorBookTickerEnabledTest {
                         .body("binanceStreams.FUTURES_AGG_TRADES", nullValue())
                         .body("polymarketPolyBoltTwapState", equalTo("CONNECTED"))
                         .body("polymarketPolyBoltCryptoPriceState", equalTo("CONNECTED"))
-                        .body("trackedPolymarketSlugs", hasSize(2))
+                        .body("trackedPolymarketSlugs", hasSize(4))
                         .body("binanceRecordsWritten", greaterThanOrEqualTo(2))
                         .body("polyBoltRecordsWritten", greaterThanOrEqualTo(2))
                         .body("polymarketRecordsWritten", greaterThanOrEqualTo(6)));
@@ -103,19 +103,21 @@ class CollectorBookTickerEnabledTest {
             zstFiles = walk.filter(p -> p.toString().endsWith(".jsonl.zst")).toList();
         }
 
-        // 2 daily Binance bookTicker + 2 daily PolyBolt + 2 Polymarket (current + 1 lookahead) = 6 .jsonl.zst files
-        assertThat(zstFiles).hasSize(6);
+        // 2 daily Binance bookTicker + 2 daily PolyBolt + 2 Polymarket 15m + 2 Polymarket 5m = 8 .jsonl.zst files
+        assertThat(zstFiles).hasSize(8);
         assertThat(Files.exists(root.resolve("binance/spot/BTCUSDT/aggTrades"))).isFalse();
 
-        // Polymarket CLOB archives must reside inside UTC daily yyyy-MM-dd subdirectories
-        List<Path> polymarketClobFiles = zstFiles.stream()
-                .filter(p -> p.toString().contains("btc-updown-15m"))
-                .toList();
-        assertThat(polymarketClobFiles).hasSize(2);
-        assertThat(polymarketClobFiles).allSatisfy(p -> {
-            assertThat(p.getParent().getFileName().toString()).matches("\\d{4}-\\d{2}-\\d{2}");
-            assertThat(p.getParent().getParent().getFileName().toString()).isEqualTo("btc-updown-15m");
-        });
+        // Polymarket CLOB archives for both 15m and 5m must reside inside UTC daily yyyy-MM-dd subdirectories
+        for (String series : List.of("btc-updown-15m", "btc-updown-5m")) {
+            List<Path> seriesFiles = zstFiles.stream()
+                    .filter(p -> p.toString().contains(series))
+                    .toList();
+            assertThat(seriesFiles).hasSize(2);
+            assertThat(seriesFiles).allSatisfy(p -> {
+                assertThat(p.getParent().getFileName().toString()).matches("\\d{4}-\\d{2}-\\d{2}");
+                assertThat(p.getParent().getParent().getFileName().toString()).isEqualTo(series);
+            });
+        }
 
         Path spotBookTickerDir = root.resolve("binance/spot/BTCUSDT/bookTicker");
         List<Path> spotFiles;

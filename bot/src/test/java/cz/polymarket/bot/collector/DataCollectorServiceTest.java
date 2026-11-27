@@ -43,14 +43,19 @@ class DataCollectorServiceTest {
         PolymarketClobClient clobClient = mock(PolymarketClobClient.class);
 
         long nowSec = Instant.now().getEpochSecond();
-        String activeSlug = PolymarketMarketInfo.buildMarketSlug(
+        String active15mSlug = PolymarketMarketInfo.buildMarketSlug(
                 "BTCUSDT", "15m", PolymarketMarketInfo.alignCycleStart(nowSec, 900L));
+        String active5mSlug = PolymarketMarketInfo.buildMarketSlug(
+                "BTCUSDT", "5m", PolymarketMarketInfo.alignCycleStart(nowSec, 300L));
 
         when(polymarketCoordinator.getLookaheadCount()).thenReturn(1);
         when(polyBoltClient.getTwapState()).thenReturn(ConnectionState.CONNECTED);
         when(polyBoltClient.getCryptoPriceState()).thenReturn(ConnectionState.CONNECTED);
-        when(polymarketCoordinator.getTrackedMarketSlugs()).thenReturn(List.of(activeSlug));
-        when(clobClient.getCollectorConnectionStates()).thenReturn(Map.of(activeSlug, ConnectionState.CONNECTED));
+        when(polymarketCoordinator.getTrackedMarketSlugs()).thenReturn(List.of(active15mSlug, active5mSlug));
+        when(clobClient.getCollectorConnectionStates()).thenReturn(Map.of(
+                active15mSlug, ConnectionState.CONNECTED,
+                active5mSlug, ConnectionState.CONNECTED
+        ));
         when(polyBoltDailyStorage.getTotalRecordsWritten()).thenReturn(0L);
 
         DataCollectorService service = new DataCollectorService(
@@ -62,7 +67,7 @@ class DataCollectorServiceTest {
                 polyBoltClient,
                 clobClient,
                 "BTCUSDT",
-                "15m",
+                List.of("15m", "5m"),
                 true,
                 false,
                 false
@@ -81,6 +86,7 @@ class DataCollectorServiceTest {
         when(polyBoltDailyStorage.getTotalRecordsWritten()).thenReturn(5L);
         CollectorStatusDto status = service.getStatus();
         assertThat(status.healthy()).isTrue();
+        assertThat(status.timeframes()).containsExactly("15m", "5m");
         assertThat(status.lookaheadCount()).isEqualTo(1);
         assertThat(status.binanceSpotBookTickerEnabled()).isFalse();
         assertThat(status.binanceFuturesBookTickerEnabled()).isFalse();
@@ -129,7 +135,7 @@ class DataCollectorServiceTest {
                 polyBoltClient,
                 clobClient,
                 "ETHUSDT",
-                "15m",
+                List.of("15m"),
                 true,
                 true,
                 true
